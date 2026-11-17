@@ -32,7 +32,8 @@ def main():
             raise SystemExit("co-author and AI-attribution trailers are prohibited")
     for name in ("LICENSE", "NOTICE"):
         expected = subprocess.check_output(["git", "show", "Ghidra_12.2_build:" + name], cwd=ROOT)
-        if (ROOT / name).read_bytes() != expected:
+        # Windows checkouts may use CRLF under upstream's text=auto policy.
+        if (ROOT / name).read_bytes().replace(b"\r\n", b"\n") != expected.replace(b"\r\n", b"\n"):
             raise SystemExit(f"upstream {name} must be preserved")
     headers = {
         "nlohmann/json.hpp": "9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6",

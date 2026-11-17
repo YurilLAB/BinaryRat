@@ -1,0 +1,2 @@
+# Preserve the upstream bytes used by dependency integrity checks on all hosts.
+* -text

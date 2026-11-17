@@ -11,6 +11,13 @@ ENGINE = sys.argv.pop(1)
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_unicode_cache_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root) / "\u042e\u0440\u0438\u0439_\u65e5\u672c\u8a9e"
+            response = self.run_requests(directory, [dict(id="unicode", op="ping")])[0]
+            self.assertTrue(response["ok"])
+            self.assertTrue(directory.is_dir())
+
     def test_cache_ownership_is_released_when_process_is_killed(self):
         with tempfile.TemporaryDirectory() as root:
             owner = subprocess.Popen([ENGINE, "serve", "--cache", root], stdin=subprocess.PIPE,
