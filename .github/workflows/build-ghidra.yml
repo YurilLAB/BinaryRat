@@ -1,9 +1,12 @@
+# Modified by YurilLAB for BinaryRat: the dedicated BinaryRat matrix builds the
+# complete fork on both supported hosts for every new commit.
 name: Build Ghidra
 
 on: [push]
 
 jobs:
   build:
+    if: github.repository == 'NationalSecurityAgency/ghidra'
     strategy:
       matrix:
         platform: [ubuntu-latest]

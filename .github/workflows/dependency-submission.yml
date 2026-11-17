@@ -1,3 +1,5 @@
+# Modified by YurilLAB for BinaryRat: preserve dependency reports without requiring
+# the optional GitHub dependency-graph setting on forks.
 name: Dependency Submission
 
 on:
@@ -31,3 +33,4 @@ jobs:
         uses: gradle/actions/dependency-submission@v6
         with:
           gradle-version: '9.5.1'
+          dependency-graph: ${{ github.repository == 'NationalSecurityAgency/ghidra' && 'generate-submit-and-upload' || 'generate-and-upload' }}

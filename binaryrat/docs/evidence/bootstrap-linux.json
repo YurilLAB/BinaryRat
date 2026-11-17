@@ -289,5 +289,7 @@
     "No database writeback or persistent Ghidra JVM daemon is implemented."
   ],
   "ghidra_source_build_log_sha256": "66ee50b41efe1403736099dea09afef093500156e0c7ea9fa5df63e871eb62f2",
-  "source_build_environment_note": "Selected a project Python3.13 virtual environment with pip; system Python3.13 lacked pip. No Ghidra core/build patch."
+  "source_build_environment_note": "Selected a project Python3.13 virtual environment with pip; system Python3.13 lacked pip. No Ghidra core/build patch.",
+  "source_built_distribution_runs": 1,
+  "source_built_vs_official_exact_c_prototype_status_functions": 14
 }
