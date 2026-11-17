@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+set -eu
+python3 - "$1" <<'PY'
+from pathlib import Path
+import re
+import sys
+message = Path(sys.argv[1]).read_text(encoding='utf-8')
+if re.search(r'(?im)^\s*(co-authored-by|generated-by|ai-attribution|ai-assisted-by|assisted-by):', message):
+    raise SystemExit('Co-author and AI-attribution trailers are prohibited')
+PY

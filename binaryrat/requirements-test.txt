@@ -1,0 +1,2 @@
+# Process-tree benchmark sampling; the engine itself has no Python dependency.
+psutil==6.1.1

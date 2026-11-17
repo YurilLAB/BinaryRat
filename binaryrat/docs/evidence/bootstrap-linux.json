@@ -1,0 +1,291 @@
+{
+  "schema_version": 1,
+  "baseline": "Ghidra_12.2_build",
+  "baseline_commit": "8ca9077040cc43cd790babcfccf19475622a3e9a",
+  "host": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "compiler": "g++ (Debian 14.2.0-19) 14.2.0",
+  "jdk": "Temurin 25.0.5+8",
+  "gradle": "9.8.0",
+  "native_ctest_suites": 5,
+  "python_tests": 16,
+  "tooling_tests": 7,
+  "gcc_fixture_pairs": 8,
+  "exact_serial_parallel_paired_runs": 26,
+  "worker_counts": [
+    1,
+    2,
+    4
+  ],
+  "reverse_order_verified": true,
+  "reverse_report_memory_evidence_complete": true,
+  "exact_output_hashes": [
+    {
+      "artifact_id": "gcc/O0/types",
+      "workers": 1,
+      "sha256": "559c02242ae070b899720d52b4a2130c8dfade5e10be03596e838b76f8ebe488",
+      "function_count": 15
+    },
+    {
+      "artifact_id": "gcc/O0/types",
+      "workers": 2,
+      "sha256": "559c02242ae070b899720d52b4a2130c8dfade5e10be03596e838b76f8ebe488",
+      "function_count": 15
+    },
+    {
+      "artifact_id": "gcc/O0/types",
+      "workers": 4,
+      "sha256": "559c02242ae070b899720d52b4a2130c8dfade5e10be03596e838b76f8ebe488",
+      "function_count": 15
+    },
+    {
+      "artifact_id": "gcc/O0/classes",
+      "workers": 1,
+      "sha256": "7bfc7f9c36517456989a1f7c6aabc81455834ac4561b9f09246a8d33cee532c3",
+      "function_count": 36
+    },
+    {
+      "artifact_id": "gcc/O0/classes",
+      "workers": 2,
+      "sha256": "7bfc7f9c36517456989a1f7c6aabc81455834ac4561b9f09246a8d33cee532c3",
+      "function_count": 36
+    },
+    {
+      "artifact_id": "gcc/O0/classes",
+      "workers": 4,
+      "sha256": "7bfc7f9c36517456989a1f7c6aabc81455834ac4561b9f09246a8d33cee532c3",
+      "function_count": 36
+    },
+    {
+      "artifact_id": "gcc/O1/types",
+      "workers": 1,
+      "sha256": "a32146ac0fcde93c91fb8af68a5d0fd541bf9c64febceb49d721c9d47d885771",
+      "function_count": 14
+    },
+    {
+      "artifact_id": "gcc/O1/types",
+      "workers": 2,
+      "sha256": "a32146ac0fcde93c91fb8af68a5d0fd541bf9c64febceb49d721c9d47d885771",
+      "function_count": 14
+    },
+    {
+      "artifact_id": "gcc/O1/types",
+      "workers": 4,
+      "sha256": "a32146ac0fcde93c91fb8af68a5d0fd541bf9c64febceb49d721c9d47d885771",
+      "function_count": 14
+    },
+    {
+      "artifact_id": "gcc/O1/classes",
+      "workers": 1,
+      "sha256": "befe38b7a8a59d0205c1595fb9169be965a2a555ad5bb0e3b289c301ba0cbfe4",
+      "function_count": 17
+    },
+    {
+      "artifact_id": "gcc/O1/classes",
+      "workers": 2,
+      "sha256": "befe38b7a8a59d0205c1595fb9169be965a2a555ad5bb0e3b289c301ba0cbfe4",
+      "function_count": 17
+    },
+    {
+      "artifact_id": "gcc/O1/classes",
+      "workers": 4,
+      "sha256": "befe38b7a8a59d0205c1595fb9169be965a2a555ad5bb0e3b289c301ba0cbfe4",
+      "function_count": 17
+    },
+    {
+      "artifact_id": "gcc/O2/types",
+      "workers": 1,
+      "sha256": "c839993b40651361af409c1bf23a941b31de52298bf38e494312c1571b0f070e",
+      "function_count": 14
+    },
+    {
+      "artifact_id": "gcc/O2/types",
+      "workers": 2,
+      "sha256": "c839993b40651361af409c1bf23a941b31de52298bf38e494312c1571b0f070e",
+      "function_count": 14
+    },
+    {
+      "artifact_id": "gcc/O2/types",
+      "workers": 4,
+      "sha256": "c839993b40651361af409c1bf23a941b31de52298bf38e494312c1571b0f070e",
+      "function_count": 14
+    },
+    {
+      "artifact_id": "gcc/O2/classes",
+      "workers": 1,
+      "sha256": "0fc4a0ed551277db0cf4647e7a7ef585f81d63b3f1408b4087124dd9149a1a1a",
+      "function_count": 16
+    },
+    {
+      "artifact_id": "gcc/O2/classes",
+      "workers": 2,
+      "sha256": "0fc4a0ed551277db0cf4647e7a7ef585f81d63b3f1408b4087124dd9149a1a1a",
+      "function_count": 16
+    },
+    {
+      "artifact_id": "gcc/O2/classes",
+      "workers": 4,
+      "sha256": "0fc4a0ed551277db0cf4647e7a7ef585f81d63b3f1408b4087124dd9149a1a1a",
+      "function_count": 16
+    },
+    {
+      "artifact_id": "gcc/O3/types",
+      "workers": 1,
+      "sha256": "bbee6bca9033dab65ed1930c8ebbd29eeb1803dc62d511458a56371d93007e2f",
+      "function_count": 14
+    },
+    {
+      "artifact_id": "gcc/O3/types",
+      "workers": 2,
+      "sha256": "bbee6bca9033dab65ed1930c8ebbd29eeb1803dc62d511458a56371d93007e2f",
+      "function_count": 14
+    },
+    {
+      "artifact_id": "gcc/O3/types",
+      "workers": 4,
+      "sha256": "bbee6bca9033dab65ed1930c8ebbd29eeb1803dc62d511458a56371d93007e2f",
+      "function_count": 14
+    },
+    {
+      "artifact_id": "gcc/O3/classes",
+      "workers": 1,
+      "sha256": "a4b30d1f3bac33b9dd41b287fc68a2e909f297f3a336e14cc10b1ff754b602c4",
+      "function_count": 16
+    },
+    {
+      "artifact_id": "gcc/O3/classes",
+      "workers": 2,
+      "sha256": "a4b30d1f3bac33b9dd41b287fc68a2e909f297f3a336e14cc10b1ff754b602c4",
+      "function_count": 16
+    },
+    {
+      "artifact_id": "gcc/O3/classes",
+      "workers": 4,
+      "sha256": "a4b30d1f3bac33b9dd41b287fc68a2e909f297f3a336e14cc10b1ff754b602c4",
+      "function_count": 16
+    }
+  ],
+  "native_cache": {
+    "schema_version": 1,
+    "scope": "native JSONL artifact cache roundtrip",
+    "source_export_sha256": "bbee6bca9033dab65ed1930c8ebbd29eeb1803dc62d511458a56371d93007e2f",
+    "function_count": 14,
+    "put_total_seconds": 0.009050953000041773,
+    "get_samples_seconds": [
+      0.00040872900035537896,
+      0.00035257700028523686,
+      0.00032013500003813533,
+      0.00029954999990877695,
+      0.0004209440003251075,
+      0.0003536680001161585,
+      0.0002834229999280069,
+      0.00037638499998138286,
+      0.0011125759997412388,
+      0.00039087200002541067,
+      0.0005411779998212296,
+      0.0006497649997072585,
+      0.00036794899961023475,
+      0.0006974109996917832,
+      0.000414948999605258,
+      0.00030640600016340613,
+      0.00035719300012715394,
+      0.00042633200018826756,
+      0.0005069519997960015,
+      0.000492256000143243,
+      0.0004260290002093825,
+      0.0005614950000563113,
+      0.000668649999624904,
+      0.0005619579997073743,
+      0.0006639769999310374,
+      0.0006270610001593013,
+      0.0005006289998163993,
+      0.00045921099990664516,
+      0.00048251299995172303,
+      0.00040959099987958325,
+      0.0005718530001104227,
+      0.0006588339997506409,
+      0.0006271850002121937,
+      0.0006895090000398341,
+      0.0005640370000037365,
+      0.0007074569998621882,
+      0.001231070999892836,
+      0.0005660840001837641,
+      0.0004808630001207348,
+      0.0005691130004379374,
+      0.00043752999999924214,
+      0.00039933900006872136,
+      0.0005814039996039355,
+      0.0004967819995727041,
+      0.00048438799967698287,
+      0.00044448700009525055,
+      0.0005825460002597538,
+      0.0004402960003062617,
+      0.0003772109998863016,
+      0.0003747360001398192,
+      0.00035322299981999095,
+      0.00035149599989381386,
+      0.00044729800038112444,
+      0.0003285980001237476,
+      0.00037061099965285393,
+      0.0003495310002108454,
+      0.000427639999998064,
+      0.0004275930000403605,
+      0.00042828999994526384,
+      0.0008193620001293311,
+      0.0003745459998754086,
+      0.00039817500010030926,
+      0.00034994099996765726,
+      0.0003209890001016902,
+      0.000384819999908359,
+      0.000407955999889964,
+      0.00038493399961225805,
+      0.00033323800016660243,
+      0.00046501499991791206,
+      0.00034529000004113186,
+      0.0002658710000105202,
+      0.0002949270001408877,
+      0.0004483419997995952,
+      0.0041096420000030776,
+      0.0004906690001007519,
+      0.0004634890001398162,
+      0.00033304900034636375,
+      0.00042927899994538166,
+      0.0006419199999072589,
+      0.0005103540001982765,
+      0.00042889399992418475,
+      0.00043236600004092907,
+      0.0003360999999131309,
+      0.00032348900003853487,
+      0.00029820600002494757,
+      0.0002886130000661069,
+      0.0003126309998151555,
+      0.000268324999979086,
+      0.0003117700002803758,
+      0.0002613760002532217,
+      0.0003114689998255926,
+      0.00035943299963037134,
+      0.0004735239999718033,
+      0.0004941080001117371,
+      0.00037275499971656245,
+      0.00034913899980892893,
+      0.00040324499968846794,
+      0.00033495899970148457,
+      0.00027764600008595153,
+      0.00040605000003779423
+    ],
+    "get_median_seconds": 0.000423486500267245,
+    "restart_persistence_verified": true,
+    "dependency_invalidation_verified": true,
+    "limitations": [
+      "Not a decompilation, type-accuracy, JVM-daemon or auto-analysis benchmark.",
+      "Snapshot digest here is an evidence-file identity, not live Program invalidation."
+    ]
+  },
+  "ghidra_source_build": "running; not yet certified",
+  "windows_status": "CI configured; not yet executed",
+  "limits": [
+    "Small fixtures only; 100MB+ benchmarks remain open.",
+    "Source build ran concurrently; local timings are diagnostic, not a controlled performance claim.",
+    "Type recovery is preliminary layout evidence; no DWARF/PDB precision/recall scoring yet.",
+    "No database writeback or persistent Ghidra JVM daemon is implemented."
+  ]
+}

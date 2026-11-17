@@ -1,3 +1,20 @@
+<!-- Modified by YurilLAB for BinaryRat: project entry point and build links. -->
+# BinaryRat
+
+BinaryRat is an experimental, C++20-led fork of Ghidra 12.2. Its native engine
+uses CMake; a small Java bridge accesses Ghidra's existing decompiler and program
+model, and a typed Python package provides scripting access.
+
+**Start here:** [BinaryRat build and current status](binaryrat/README.md),
+[architecture and milestones](binaryrat/docs/ARCHITECTURE.md),
+[upstream synchronization](binaryrat/docs/UPSTREAM.md).
+
+This is an early implementation. Full interprocedural/C++ type recovery,
+automatic database write-back, a persistent Ghidra JVM daemon, and proven
+large-binary auto-analysis acceleration remain tracked milestones.
+
+The original upstream documentation follows.
+
 <img src="Ghidra/Features/Base/src/main/resources/images/GHIDRA_3.png" width="400">
 
 # Ghidra Software Reverse Engineering Framework

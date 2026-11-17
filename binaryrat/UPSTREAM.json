@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/NationalSecurityAgency/ghidra.git",
+  "tag": "Ghidra_12.2_build",
+  "commit": "8ca9077040cc43cd790babcfccf19475622a3e9a",
+  "release_date": "2026-10-22",
+  "jdk_major": 25,
+  "gradle_minimum": "9.1.0",
+  "gradle_wrapper": "9.8.0",
+  "distribution": "ghidra_12.2_PUBLIC_20261016.zip",
+  "distribution_sha256": "2c2cd776db3c1f6a097ba418922378ac3649cadd5e844a6f5f088ae628a7be67"
+}
