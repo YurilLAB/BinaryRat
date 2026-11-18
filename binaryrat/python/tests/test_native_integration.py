@@ -20,10 +20,14 @@ class NativeIntegrationTests(unittest.TestCase):
             with EngineClient(os.environ["BINARYRAT_ENGINE"], cache_dir=directory) as engine:
                 self.assertEqual(engine.ping()["name"], "BinaryRat")
                 self.assertTrue(engine.cache_put(key, {"c": "return 0;"}, ["type:A"])["stored"])
-                self.assertEqual(engine.cache_get(key), {"hit": True, "value": {"c": "return 0;"}})
+                found = engine.cache_get(key)
+                self.assertEqual((found["hit"], found["value"]), (True, {"c": "return 0;"}))
+                self.assertTrue(found["verified"], "stored in this session")
             # A new client proves data survives the first native process.
             with EngineClient(os.environ["BINARYRAT_ENGINE"], cache_dir=directory) as engine:
-                self.assertTrue(engine.cache_get(key)["hit"])
+                found = engine.cache_get(key)
+                self.assertTrue(found["hit"])
+                self.assertFalse(found["verified"], "earlier sessions must be verified first")
                 self.assertEqual(engine.cache_invalidate(["type:A"])["removed"], 1)
                 self.assertFalse(engine.cache_get(key)["hit"])
                 recovered = engine.recover_types([

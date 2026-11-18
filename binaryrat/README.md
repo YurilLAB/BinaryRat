@@ -25,7 +25,8 @@ build/native/binaryrat/binaryrat-engine --version
 build/native/binaryrat/binaryrat-engine serve --cache build/cache
 ```
 
-`serve` reads one JSON request per line and emits one correlated JSON response.
+`serve` reads one JSON request per line and emits one correlated JSON response;
+lease grants may answer out of order, and scheduler events arrive between responses.
 It is a persistent **native process**, not yet a persistent Ghidra JVM daemon.
 See [protocol](protocol/README.md) and [Python client](python/README.md).
 
@@ -35,28 +36,38 @@ See [protocol](protocol/README.md) and [Python client](python/README.md).
 - Admission-controlled C++ executor: worker count from a CPU/RAM budget, per-task
   memory reservations with strict FIFO admission, execution deadlines and
   cancellation, and explicit completed/failed/timed-out/cancelled/rejected
-  statuses. Not yet attached to the Java decompiler pool or to `serve`.
+  statuses.
+- Lease scheduler in `serve` that runs real Ghidra decompilations under that
+  executor: CPU and RAM measured by the engine, a lease per decompilation, the
+  native decompiler process's resident memory watched against its reservation,
+  deadlines and cancels delivered to the bridge, and stuck processes killed.
 - Persistent SHA-256-addressed artifact storage, checksummed records, atomic
   replacement, explicit dependency invalidation, and exclusive process ownership.
+- Live decompiler cache: each decompilation's reads recorded through Ghidra's
+  callback, a dependency index that removes entries on mapped Program changes,
+  replay against the Program after changes of unknown reach or a restart, and a
+  `cache-proof` harness comparing every served result with fresh decompilation.
 - Pure C++ layout-evidence aggregation: preserve gaps and overlapping
   alternatives, deduplicate support, expose stride conflicts, and abstain when
   an object origin is unknown. Scores are uncalibrated evidence strength.
 - A minimal headless Java adapter using Ghidra's existing `DecompInterface` and
-  `DecompilerCallback`, with serial/parallel exact-output comparison.
+  `DecompilerCallback`, with serial/parallel/scheduled exact-output comparison.
 - Typed Python value objects, streaming export parsing, and native-engine client.
 - C/C++ corpus builders with separate DWARF/PDB oracles, stripping checks,
   cross-target manifests, and CI for Linux/Windows.
 
-The cache is not yet attached to live Program change events. Callers must supply
-complete semantic identities; function bytes and the in-memory modification
-number alone cannot establish correctness across project reopen/import. Current
-exports are evidence artifacts, not automatically safe reusable decompilations.
+Only the bridge's live cache path (schema 2 keys, tracked dependencies and
+replay) makes reuse safe across changes and restarts. Schema 1 keys still require
+callers to supply complete semantic identities; function bytes and the in-memory
+modification number alone cannot establish correctness across reopen/import, and
+plain exports are evidence artifacts, not reusable decompilations.
 
 ## Ghidra integration checks
 
 Use an official Ghidra 12.2 installation and JDK 25. The bridge is compiled by
-Ghidra's script machinery. It is read-only and requires headless execution after
-analysis with no concurrent writer. [Bridge contract](bridge/README.md).
+Ghidra's script machinery. Except for `cache-proof`, which edits a throwaway
+program, it is read-only and requires headless execution after analysis with no
+concurrent writer. [Bridge contract](bridge/README.md).
 
 ```sh
 python -m pip install -r binaryrat/requirements-test.txt

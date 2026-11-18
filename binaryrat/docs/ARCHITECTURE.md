@@ -56,9 +56,14 @@ not database snapshots. No correctness claim depends on a stable read epoch.
 
 **Current implementation versus target:** the native artifact server, bounded
 executor, memory-admission executor, preliminary layout-evidence aggregation,
-typed client and headless stock-decompiler adapter exist. Shared Java proposal
-services, automatic live invalidation, attaching RAM admission to the Java
-decompiler pool, coordinated type application and a persistent
+typed client and headless stock-decompiler adapter exist. The engine's lease
+scheduler admits headless stock decompilations by CPU and RAM, enforces deadlines,
+cancels and per-process resident-memory ceilings, and kills stuck processes. The
+live cache records each decompilation's callback reads, removes entries on mapped
+Program changes, replays entries after changes of unknown reach, and is proven
+against fresh decompilation by `cache-proof` (see `bridge/README.md`). Shared Java
+proposal services, size-based per-function memory estimates, extraction-time
+change injection tests, coordinated type application and a persistent
 Ghidra/PyGhidra JVM daemon remain implementation gates. A persistent native
 process is not a persistent Ghidra JVM.
 
@@ -187,8 +192,11 @@ If a dependency class or query footprint is incomplete, use a conservative globa
 semantic digest for it and broad invalidation. Unknown events, restoration,
 missing coverage and uncertain indirect reads take this conservative path. A
 call graph or `HighFunction` alone is not a complete native read footprint.
-Complete callback-read interception is **VERIFY IN SOURCE** in
-`DecompileCallback` / `DecompInterface` before promising an extension-only seam.
+Callback-read interception is extension-only: `DecompileCallback` and its query
+methods are public and not final, `DecompInterface.decompCallback` and
+`initializeProcess()` are protected, and `DecompileProcess` routes every native
+query through those methods, so `TracingDecompiler` installs a recording subclass
+without a core patch.
 
 Cache successful complete decompilations only as successes; retain timeout,
 crash, cancellation and stale status explicitly. Do not persist live `Function`

@@ -101,7 +101,7 @@ jobs:
       - name: Download and verify official Ghidra 12.2 baseline
         run: python binaryrat/tools/fetch_ghidra.py --output build/ghidra
       - name: Stock versus BinaryRat Ghidra integration and benchmark evidence
-        run: python binaryrat/benchmarks/verify_ghidra.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report --workers 1 2 4 --repetitions 1
+        run: python binaryrat/benchmarks/verify_ghidra.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report --workers 1 2 4 --repetitions 1 --engine ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
       - name: Native artifact roundtrip, restart and invalidation benchmark
         env:
           BINARYRAT_ENGINE: ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
@@ -157,7 +157,7 @@ jobs:
       - name: Download and verify official Ghidra 12.2 baseline
         run: python binaryrat/tools/fetch_ghidra.py --output build/ghidra
       - name: Import AArch64 PE and verify stock versus parallel output
-        run: python binaryrat/benchmarks/verify_ghidra.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report --workers 1 2 4 --repetitions 1
+        run: python binaryrat/benchmarks/verify_ghidra.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report --workers 1 2 4 --repetitions 1 --engine ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

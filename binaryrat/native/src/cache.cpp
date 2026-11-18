@@ -189,6 +189,44 @@ std::optional<nlohmann::json> ArtifactCache::get(const nlohmann::json& key) {
     return (*record)["value"];
 }
 
+std::vector<ArtifactCache::Stored> ArtifactCache::scan() {
+    std::lock_guard lock(mutex_);
+    std::vector<Stored> result;
+    for (const auto& entry : std::filesystem::directory_iterator(root_)) {
+        if (!artifact_filename(entry.path())) {
+            continue;
+        }
+        const auto record = read_record(entry.path());
+        if (!record) {
+            if (!entry.is_symlink() && entry.is_regular_file()) {
+                std::filesystem::remove(entry.path());
+            }
+            continue;
+        }
+        Stored stored;
+        stored.id = entry.path().stem().string();
+        for (const auto& dependency : (*record)["dependencies"]) {
+            stored.dependencies.push_back(dependency.get<std::string>());
+        }
+        result.push_back(std::move(stored));
+    }
+    return result;
+}
+
+bool ArtifactCache::remove(const std::string& id) {
+    const auto name = std::filesystem::path(id + ".json");
+    if (!artifact_filename(name)) {
+        throw std::invalid_argument("not a cache record id");
+    }
+    std::lock_guard lock(mutex_);
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(root_ / name, error);
+    if (error || !std::filesystem::is_regular_file(status)) {
+        return false;
+    }
+    return std::filesystem::remove(root_ / name);
+}
+
 std::size_t ArtifactCache::invalidate(const std::vector<std::string>& dependencies) {
     if (dependencies.empty()) {
         return 0;

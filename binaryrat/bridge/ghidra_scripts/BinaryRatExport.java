@@ -1,4 +1,5 @@
-// Export deterministic stock-decompiler records without modifying the Program.
+// Export deterministic stock-decompiler records; optionally run decompilation under the
+// C++ engine's admission control, or prove the engine's live cache against fresh output.
 // @category BinaryRat
 // @menupath
 /*
@@ -16,6 +17,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
@@ -24,11 +26,18 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Stream;
 
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+
+import binaryrat.CacheProof;
+import binaryrat.DecompOutput;
+import binaryrat.EngineClient;
+import binaryrat.ScheduledDecompiler;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
-import ghidra.app.decompiler.DecompiledFunction;
 import ghidra.app.decompiler.parallel.DecompilerCallback;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.script.GhidraScript;
@@ -42,18 +51,26 @@ import ghidra.util.task.TaskMonitor;
 /**
  * Minimal Ghidra 12.2 bridge. All decompilation remains in Ghidra's native engine.
  * Run as a headless postScript after analysis; there must be no concurrent writer.
+ * Every mode except cache-proof leaves the Program unmodified; cache-proof edits it
+ * and is meant for throwaway headless projects.
  */
 public class BinaryRatExport extends GhidraScript {
     private static final int DEFAULT_CHUNK_SIZE = 128;
+    private static final List<String> MODES = List.of("serial", "parallel", "compare",
+        "compare-reverse", "scheduled", "compare-scheduled", "cache-proof");
     private long revision;
     private String programId;
+    private ScheduleSummary summary;
+
+    private enum Mode { SERIAL, PARALLEL, SCHEDULED }
 
     @Override
     protected void run() throws Exception {
         String[] args = getScriptArgs();
         if (args.length < 2 || args.length > 5) {
             throw new IllegalArgumentException("Usage: BinaryRatExport.java OUTPUT " +
-                "serial|parallel|compare|compare-reverse [WORKERS=4] [TIMEOUT_SECONDS=60] [CHUNK_SIZE=128]");
+                String.join("|", MODES) +
+                " [WORKERS=4] [TIMEOUT_SECONDS=60] [CHUNK_SIZE=128]");
         }
         if (!isRunningHeadless() || currentProgram == null) {
             throw new IllegalStateException("A headless postScript with an analyzed Program is required");
@@ -62,9 +79,8 @@ public class BinaryRatExport extends GhidraScript {
             throw new IllegalStateException("Auto-analysis must finish before exporting");
         }
         String mode = args[1];
-        if (!mode.equals("serial") && !mode.equals("parallel") && !mode.equals("compare") &&
-                !mode.equals("compare-reverse")) {
-            throw new IllegalArgumentException("Mode must be serial, parallel, compare, or compare-reverse");
+        if (!MODES.contains(mode)) {
+            throw new IllegalArgumentException("Mode must be one of " + MODES);
         }
         int workers = positiveInt(args, 2, 4, 256, "workers");
         int timeout = positiveInt(args, 3, 60, 86400, "timeout");
@@ -75,27 +91,35 @@ public class BinaryRatExport extends GhidraScript {
             "name:" + currentProgram.getName() : "sha256:" + sha256;
         Path output = Path.of(args[0]).toAbsolutePath().normalize();
         long started = System.nanoTime();
-        if (mode.equals("compare") || mode.equals("compare-reverse")) {
+        if (mode.equals("cache-proof")) {
+            proveCache(output, timeout);
+        }
+        else if (mode.startsWith("compare")) {
+            boolean scheduled = mode.equals("compare-scheduled");
+            String other = scheduled ? "scheduled" : "parallel";
             Path serial = Path.of(output.toString() + ".serial.jsonl");
-            Path parallel = Path.of(output.toString() + ".parallel.jsonl");
+            Path second = Path.of(output.toString() + "." + other + ".jsonl");
+            Mode secondMode = scheduled ? Mode.SCHEDULED : Mode.PARALLEL;
             if (mode.equals("compare-reverse")) {
-                export(parallel, true, workers, timeout, chunkSize);
-                export(serial, false, workers, timeout, chunkSize);
+                export(second, secondMode, workers, timeout, chunkSize);
+                export(serial, Mode.SERIAL, workers, timeout, chunkSize);
             }
             else {
-                export(serial, false, workers, timeout, chunkSize);
-                export(parallel, true, workers, timeout, chunkSize);
+                export(serial, Mode.SERIAL, workers, timeout, chunkSize);
+                export(second, secondMode, workers, timeout, chunkSize);
             }
             checkEpoch();
-            long mismatch = Files.mismatch(serial, parallel);
+            long mismatch = Files.mismatch(serial, second);
             if (mismatch != -1) {
-                throw new IOException("Serial/parallel output differs at byte " + mismatch +
-                    "; inspect " + serial + " and " + parallel);
+                throw new IOException("Serial/" + other + " output differs at byte " + mismatch +
+                    "; inspect " + serial + " and " + second);
             }
-            println("BinaryRat exact serial/parallel comparison passed: " + serial);
+            println("BinaryRat exact serial/" + other + " comparison passed: " + serial);
         }
         else {
-            export(output, mode.equals("parallel"), workers, timeout, chunkSize);
+            Mode single = mode.equals("serial") ? Mode.SERIAL :
+                mode.equals("parallel") ? Mode.PARALLEL : Mode.SCHEDULED;
+            export(output, single, workers, timeout, chunkSize);
         }
         println("BinaryRat export elapsed_seconds=" +
             ((System.nanoTime() - started) / 1_000_000_000.0));
@@ -108,6 +132,31 @@ public class BinaryRatExport extends GhidraScript {
             throw new IllegalArgumentException(label + " must be in [1, " + maximum + "]");
         }
         return value;
+    }
+
+    private static long environment(String name, long fallback) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        long parsed = Long.parseLong(value.trim());
+        if (parsed < 0) {
+            throw new IllegalArgumentException(name + " must not be negative");
+        }
+        return parsed;
+    }
+
+    private static Path engineBinary() {
+        String value = System.getenv("BINARYRAT_ENGINE");
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(
+                "BINARYRAT_ENGINE must name the binaryrat-engine executable for this mode");
+        }
+        Path engine = Path.of(value).toAbsolutePath().normalize();
+        if (!Files.isRegularFile(engine)) {
+            throw new IllegalArgumentException("BINARYRAT_ENGINE does not exist: " + engine);
+        }
+        return engine;
     }
 
     private void checkEpoch() throws Exception {
@@ -126,19 +175,64 @@ public class BinaryRatExport extends GhidraScript {
         decompiler.toggleSyntaxTree(true);
     }
 
-    private void export(Path output, boolean parallel, int workers, int timeout,
-            int chunkSize) throws Exception {
+    private boolean exported(Function function) {
+        MemoryBlock entryBlock = currentProgram.getMemory().getBlock(function.getEntryPoint());
+        // ELF imports may represent unresolved externals as functions in an
+        // uninitialized EXTERNAL block in the ordinary RAM space.
+        return !function.isExternal() && (entryBlock == null || !entryBlock.isExternalBlock());
+    }
+
+    private static void deleteTree(Path root) {
+        try (Stream<Path> walk = Files.walk(root)) {
+            for (Path path : (Iterable<Path>) walk.sorted(Comparator.reverseOrder())::iterator) {
+                Files.deleteIfExists(path);
+            }
+        }
+        catch (IOException ignored) {
+            // Best effort: a leftover temporary cache is harmless.
+        }
+    }
+
+    /** Lease outcomes of one scheduled export, written next to it. */
+    private static final class ScheduleSummary {
+        final JsonObject leases = new JsonObject();
+        long count;
+        long runMillis;
+        long maxWaitMillis;
+        long maxPeakResident;
+        long memoryWatched;
+        long killed;
+
+        synchronized void add(ScheduledDecompiler.Run run) {
+            count++;
+            String status = run.status();
+            leases.addProperty(status, (leases.has(status) ? leases.get(status).getAsLong() : 0) + 1);
+            runMillis += run.runMillis();
+            maxWaitMillis = Math.max(maxWaitMillis, run.waitedMillis());
+            maxPeakResident = Math.max(maxPeakResident, run.peakResidentBytes());
+            memoryWatched += run.memoryWatched() ? 1 : 0;
+            killed += run.killed() ? 1 : 0;
+        }
+    }
+
+    private void export(Path output, Mode mode, int workers, int timeout, int chunkSize)
+            throws Exception {
         long exportStarted = System.nanoTime();
         checkEpoch();
-        println("BinaryRat export starting mode=" + (parallel ? "parallel" : "serial"));
+        String name = mode.name().toLowerCase();
+        println("BinaryRat export starting mode=" + name);
         // Keep the temporary file beside its destination so publication can be atomic.
         Path temporary = Files.createTempFile(output.getParent(), ".binaryrat-", ".jsonl.tmp");
         DecompInterface serialDecompiler = null;
         DecompilerCallback<String> callback = null;
         ExecutorService executor = null;
+        EngineClient engine = null;
+        ScheduledDecompiler scheduler = null;
+        Path engineCache = null;
         boolean published = false;
+        int activeWorkers = 1;
         try {
-            if (parallel) {
+            if (mode == Mode.PARALLEL) {
                 // Reuse the tagged Ghidra pool implementation, with a local executor so
                 // requested concurrency does not mutate Ghidra's shared thread-pool settings.
                 callback = new DecompilerCallback<String>(currentProgram, this::configure) {
@@ -153,6 +247,25 @@ public class BinaryRatExport extends GhidraScript {
                     }
                 };
                 callback.setTimeout(timeout);
+                executor = Executors.newFixedThreadPool(workers);
+                activeWorkers = workers;
+            }
+            else if (mode == Mode.SCHEDULED) {
+                engineCache = Files.createTempDirectory(output.getParent(), ".binaryrat-engine-");
+                engine = EngineClient.start(engineBinary(), engineCache);
+                long leaseTimeout = environment("BINARYRAT_LEASE_TIMEOUT_MS", timeout * 1000L);
+                scheduler = new ScheduledDecompiler(engine, currentProgram, this::configure,
+                    new ScheduledDecompiler.Limits(workers,
+                        environment("BINARYRAT_WORKER_BYTES", 768L << 20),
+                        Runtime.getRuntime().maxMemory(),
+                        environment("BINARYRAT_OTHER_RESERVE_BYTES", 512L << 20),
+                        timeout, environment("BINARYRAT_KILL_GRACE_MS", 5000), leaseTimeout));
+                summary = new ScheduleSummary();
+                activeWorkers = scheduler.workers();
+                println("BinaryRat engine admitted workers=" + activeWorkers + " requested=" +
+                    workers + " configuration=" + scheduler.configuration());
+                // More threads than admitted workers only queue in the engine; the
+                // engine, not this pool, decides how many decompilations run at once.
                 executor = Executors.newFixedThreadPool(workers);
             }
             else {
@@ -171,10 +284,7 @@ public class BinaryRatExport extends GhidraScript {
                     List<Function> functions = new ArrayList<>(chunkSize);
                     while (iterator.hasNext() && functions.size() < chunkSize) {
                         Function function = iterator.next();
-                        MemoryBlock entryBlock = currentProgram.getMemory().getBlock(function.getEntryPoint());
-                        // ELF imports may represent unresolved externals as functions in
-                        // an uninitialized EXTERNAL block in the ordinary RAM space.
-                        if (!function.isExternal() && (entryBlock == null || !entryBlock.isExternalBlock())) {
+                        if (exported(function)) {
                             functions.add(function);
                         }
                         else {
@@ -183,11 +293,14 @@ public class BinaryRatExport extends GhidraScript {
                     }
                     // FunctionIterator is forward ordered; consume futures in that same
                     // order, independent of the order in which workers finish.
-                    if (parallel) {
+                    if (executor != null) {
                         DecompilerCallback<String> activeCallback = callback;
+                        ScheduledDecompiler activeScheduler = scheduler;
                         List<Future<String>> futures = new ArrayList<>(functions.size());
                         for (Function function : functions) {
-                            futures.add(executor.submit(() -> activeCallback.process(function, monitor)));
+                            futures.add(executor.submit(() -> activeScheduler == null ?
+                                activeCallback.process(function, monitor) :
+                                scheduledRecord(activeScheduler, function)));
                         }
                         for (Future<String> future : futures) {
                             String result = await(future);
@@ -212,6 +325,9 @@ public class BinaryRatExport extends GhidraScript {
                 }
             }
             checkEpoch();
+            if (scheduler != null) {
+                writeSummary(output, scheduler, workers);
+            }
             try {
                 Files.move(temporary, output, StandardCopyOption.ATOMIC_MOVE,
                     StandardCopyOption.REPLACE_EXISTING);
@@ -220,9 +336,8 @@ public class BinaryRatExport extends GhidraScript {
                 Files.move(temporary, output, StandardCopyOption.REPLACE_EXISTING);
             }
             published = true;
-            println("BinaryRat exported functions=" + count + " mode=" +
-                (parallel ? "parallel" : "serial") + " workers=" + (parallel ? workers : 1) +
-                " excluded_external=" + excludedExternal +
+            println("BinaryRat exported functions=" + count + " mode=" + name +
+                " workers=" + activeWorkers + " excluded_external=" + excludedExternal +
                 " elapsed_seconds=" + ((System.nanoTime() - exportStarted) / 1_000_000_000.0) +
                 " output=" + output);
         }
@@ -257,7 +372,80 @@ public class BinaryRatExport extends GhidraScript {
             if (serialDecompiler != null) {
                 serialDecompiler.dispose();
             }
+            if (scheduler != null) {
+                scheduler.close();
+            }
+            if (engine != null) {
+                engine.close();
+            }
+            if (engineCache != null) {
+                deleteTree(engineCache);
+            }
             Files.deleteIfExists(temporary);
+        }
+    }
+
+    private String scheduledRecord(ScheduledDecompiler scheduler, Function function)
+            throws Exception {
+        ScheduledDecompiler.Run run = scheduler.decompile(function, monitor);
+        summary.add(run);
+        if (run.traced() == null) {
+            return record(function, new DecompOutput(false, false, true, false,
+                "BinaryRat: the engine did not grant a lease (" + run.status() + ")", "", ""));
+        }
+        return record(function,
+            DecompOutput.stopped(run.traced().results(), run.status(), run.stopReason()));
+    }
+
+    private void writeSummary(Path output, ScheduledDecompiler scheduler, int requested)
+            throws IOException {
+        JsonObject report = new JsonObject();
+        report.addProperty("requested_workers", requested);
+        report.add("engine_configuration", scheduler.configuration());
+        report.add("engine_stats", scheduler.stats());
+        report.add("lease_status_counts", summary.leases);
+        report.addProperty("leases", summary.count);
+        report.addProperty("lease_run_millis_total", summary.runMillis);
+        report.addProperty("max_wait_millis", summary.maxWaitMillis);
+        report.addProperty("max_peak_resident_bytes", summary.maxPeakResident);
+        report.addProperty("memory_watched_leases", summary.memoryWatched);
+        report.addProperty("killed_processes", summary.killed);
+        Files.writeString(Path.of(output.toString() + ".schedule.json"),
+            new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n",
+            StandardCharsets.UTF_8);
+        println("BinaryRat schedule " + report.get("lease_status_counts") + " peak_running=" +
+            report.getAsJsonObject("engine_stats").get("peak_running") + " max_peak_resident_bytes=" +
+            summary.maxPeakResident + " memory_watched=" + summary.memoryWatched);
+    }
+
+    private void proveCache(Path output, int timeout) throws Exception {
+        List<Function> functions = new ArrayList<>();
+        for (Function function : currentProgram.getFunctionManager().getFunctions(true)) {
+            if (exported(function)) {
+                functions.add(function);
+            }
+        }
+        if (functions.isEmpty()) {
+            throw new IllegalStateException("No functions to decompile");
+        }
+        Path cacheDirectory = Files.createTempDirectory(output.getParent(), ".binaryrat-cache-");
+        // Scripts run inside one transaction; close it so each probe change is its own
+        // transaction that can be undone, and reopen it for the script runner to close.
+        end(true);
+        try {
+            CacheProof proof = new CacheProof(currentProgram, monitor, engineBinary(), cacheDirectory,
+                this::configure, programId, functions, timeout, this::println);
+            JsonObject report = proof.run();
+            Files.writeString(output, new GsonBuilder().setPrettyPrinting().create().toJson(report) +
+                "\n", StandardCharsets.UTF_8);
+            if (!report.get("passed").getAsBoolean()) {
+                throw new IllegalStateException("BinaryRat cache proof FAILED; see " + output);
+            }
+            println("BinaryRat cache proof passed: " + output);
+        }
+        finally {
+            start();
+            deleteTree(cacheDirectory);
         }
     }
 
@@ -284,8 +472,11 @@ public class BinaryRatExport extends GhidraScript {
         if (results == null) {
             throw new IOException("Decompiler returned null for " + function.getEntryPoint());
         }
+        return record(function, DecompOutput.of(results));
+    }
+
+    private String record(Function function, DecompOutput output) throws Exception {
         Address entry = function.getEntryPoint();
-        DecompiledFunction decompiled = results.getDecompiledFunction();
         StringBuilder json = new StringBuilder(1024);
         json.append("{\"schema_version\":1,\"program_id\":").append(quote(programId));
         if (revision < 0) {
@@ -311,18 +502,14 @@ public class BinaryRatExport extends GhidraScript {
         }
         json.append(']');
         json.append(",\"name\":").append(quote(function.getName()));
-        json.append(",\"completed\":").append(results.decompileCompleted());
-        json.append(",\"timed_out\":").append(results.isTimedOut());
-        json.append(",\"cancelled\":").append(results.isCancelled());
-        json.append(",\"failed_to_start\":").append(results.failedToStart());
-        json.append(",\"error\":").append(quote(orEmpty(results.getErrorMessage())));
-        json.append(",\"prototype\":").append(quote(decompiled == null ? "" : orEmpty(decompiled.getSignature())));
-        json.append(",\"c\":").append(quote(decompiled == null ? "" : orEmpty(decompiled.getC())));
+        json.append(",\"completed\":").append(output.completed());
+        json.append(",\"timed_out\":").append(output.timedOut());
+        json.append(",\"cancelled\":").append(output.cancelled());
+        json.append(",\"failed_to_start\":").append(output.failedToStart());
+        json.append(",\"error\":").append(quote(output.error()));
+        json.append(",\"prototype\":").append(quote(output.prototype()));
+        json.append(",\"c\":").append(quote(output.c()));
         return json.append('}').toString();
-    }
-
-    private static String orEmpty(String value) {
-        return value == null ? "" : value;
     }
 
     private String bodyHash(Function function) throws Exception {

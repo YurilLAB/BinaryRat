@@ -26,6 +26,15 @@ public:
     [[nodiscard]] std::optional<nlohmann::json> get(const nlohmann::json& key);
     std::size_t invalidate(const std::vector<std::string>& dependencies);
 
+    struct Stored {
+        std::string id;  // key_digest of the record's key
+        std::vector<std::string> dependencies;
+    };
+    // Every valid record. Corrupt artifact files are deleted, as invalidate() does.
+    [[nodiscard]] std::vector<Stored> scan();
+    // Removes the record stored under this key digest. True when one was removed.
+    bool remove(const std::string& id);
+
     [[nodiscard]] static std::string key_digest(const nlohmann::json& key);
 
 private:

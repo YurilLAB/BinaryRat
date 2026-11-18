@@ -109,6 +109,50 @@ def verify_pair(prefix: Path, log: Path) -> dict:
             "phases": phases}
 
 
+def verify_scheduled(prefix: Path, log: Path, workers: int) -> dict:
+    """Engine-admitted decompilation must equal stock serial output byte for byte."""
+    serial = Path(str(prefix) + ".serial.jsonl")
+    scheduled = Path(str(prefix) + ".scheduled.jsonl")
+    content = log.read_text(encoding="utf-8", errors="replace")
+    if "BinaryRat exact serial/scheduled comparison passed:" not in content:
+        raise RuntimeError(f"scheduled comparison marker missing; see {log}")
+    if serial.read_bytes() != scheduled.read_bytes():
+        raise RuntimeError(f"exact output mismatch: {serial}, {scheduled}")
+    summary = json.loads(Path(str(scheduled) + ".schedule.json").read_text())
+    records = sum(1 for _ in load_export(scheduled))
+    engine = summary["engine_stats"]
+    if summary["lease_status_counts"] != {"completed": records}:
+        raise RuntimeError(f"not every lease completed: {summary['lease_status_counts']}")
+    if engine["peak_running"] > summary["engine_configuration"]["workers"] or \
+            summary["engine_configuration"]["workers"] > workers:
+        raise RuntimeError(f"engine ran more decompilations than it admitted workers; see {log}")
+    if summary["engine_configuration"]["memory_watch"] and summary["memory_watched_leases"] != records:
+        raise RuntimeError(f"some decompiler processes were not memory-watched; see {log}")
+    return {"function_count": records, "requested_workers": workers,
+            "admitted_workers": summary["engine_configuration"]["workers"],
+            "peak_running": engine["peak_running"],
+            "max_peak_resident_bytes": summary["max_peak_resident_bytes"],
+            "memory_watched_leases": summary["memory_watched_leases"]}
+
+
+def verify_cache_proof(report_path: Path, log: Path) -> dict:
+    """Every cached result served while the program changed must equal fresh output."""
+    content = log.read_text(encoding="utf-8", errors="replace")
+    report = json.loads(report_path.read_text())
+    if "BinaryRat cache proof passed:" not in content or not report.get("passed"):
+        raise RuntimeError(f"cache proof failed; see {report_path} and {log}")
+    rounds = [entry for entry in report["rounds"] if not entry.get("skipped")]
+    if not any(entry["name"].startswith("NEGATIVE CONTROL") and entry["vouched_but_stale"] > 0
+               for entry in rounds):
+        raise RuntimeError("negative control did not detect the hidden change")
+    if any(entry["served_different_from_fresh"] for entry in rounds
+           if not entry["name"].startswith("NEGATIVE CONTROL")):
+        raise RuntimeError("a cached result differed from fresh decompilation")
+    return {"function_count": report["functions"], "rounds": len(rounds),
+            "skipped_rounds": [entry["name"] for entry in report["rounds"] if entry.get("skipped")],
+            "timing": report.get("timing")}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ghidra", type=Path, required=True)
@@ -117,6 +161,8 @@ def main() -> int:
     parser.add_argument("--workers", type=int, nargs="+", default=[1, 2, 4])
     parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--timeout", type=float, default=1800)
+    parser.add_argument("--engine", type=Path,
+                        help="binaryrat-engine; adds scheduled-decompile and live-cache proof runs")
     args = parser.parse_args()
     if args.repetitions < 1 or any(value < 1 or value > 64 for value in args.workers):
         parser.error("repetitions must be positive and workers must be in 1..64")
@@ -141,7 +187,15 @@ def main() -> int:
                   "Sampling may miss short-lived peaks; phase attribution follows log markers.",
                   "Headless wall time includes import/analysis and BOTH export phases.",
                   "Export timings include worker startup, hashing, serialization and I/O.",
-                  "No type precision/recall or auto-analysis acceleration claim is made."]}
+                  "No type precision/recall or auto-analysis acceleration claim is made.",
+                  "Scheduled and cache-proof runs use small fixtures; they prove exactness "
+                  "and enforcement, not speed on large programs."]}
+    engine = args.engine.resolve() if args.engine else None
+    if engine:
+        if not engine.is_file():
+            raise RuntimeError(f"engine not found: {engine}")
+        os.environ["BINARYRAT_ENGINE"] = str(engine)
+        report["scheduled_runs"], report["cache_proofs"] = [], []
     try:
         for artifact in manifest["artifacts"]:
             binary = (corpus_root / artifact["binary"]).resolve()
@@ -150,6 +204,13 @@ def main() -> int:
             if hashlib.sha256(binary.read_bytes()).hexdigest() != artifact["binary_sha256"]:
                 raise RuntimeError(f"corpus binary hash mismatch: {binary}")
             identity = hashlib.sha256(artifact["id"].encode()).hexdigest()[:12]
+
+            def script(name: str, output: Path, mode: str, workers: int,
+                       binary: Path = binary) -> list[str]:
+                return [str(headless), str(projects), name, "-import", str(binary),
+                        "-overwrite", "-scriptPath", str(PROJECT / "binaryrat/bridge/ghidra_scripts"),
+                        "-postScript", "BinaryRatExport.java", str(output), mode,
+                        str(workers), "60", "128", "-deleteProject"]
             for workers in args.workers:
                 for repetition in range(args.repetitions):
                     name = f"{identity}-w{workers}-r{repetition}"
@@ -174,6 +235,29 @@ def main() -> int:
                                            **measured, **pair})
                     print(f"PASS {artifact['id']} workers={workers} repetition={repetition} "
                           f"functions={pair['function_count']}", flush=True)
+            if engine:
+                workers = max(args.workers)
+                name = f"{identity}-scheduled-w{workers}"
+                prefix, log = destination / name, destination / (name + ".log")
+                for suffix in (".serial.jsonl", ".scheduled.jsonl", ".scheduled.jsonl.schedule.json"):
+                    Path(str(prefix) + suffix).unlink(missing_ok=True)
+                measured = measured_run(script(name, prefix, "compare-scheduled", workers), log,
+                                        args.timeout)
+                if measured["returncode"]:
+                    raise RuntimeError(f"Ghidra process failed; see {log}")
+                report["scheduled_runs"].append({"artifact_id": artifact["id"], **measured,
+                                                 **verify_scheduled(prefix, log, workers)})
+                print(f"PASS {artifact['id']} scheduled workers={workers}", flush=True)
+                name = f"{identity}-cache-proof"
+                proof, log = destination / (name + ".json"), destination / (name + ".log")
+                proof.unlink(missing_ok=True)
+                measured = measured_run(script(name, proof, "cache-proof", 1), log, args.timeout)
+                if measured["returncode"]:
+                    raise RuntimeError(f"Ghidra process failed; see {log}")
+                report["cache_proofs"].append({"artifact_id": artifact["id"],
+                                               "wall_seconds": measured["wall_seconds"],
+                                               **verify_cache_proof(proof, log)})
+                print(f"PASS {artifact['id']} cache proof", flush=True)
         report["correctness_passed"] = True
         report["memory_evidence_complete"] = all(
             not run["memory_sampling_errors"] and all(
