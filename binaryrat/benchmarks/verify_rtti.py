@@ -9,6 +9,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import tempfile
@@ -138,6 +139,21 @@ def saved_project_hashes(project: Path) -> dict[str, str]:
             if (name := path.relative_to(project).as_posix()) not in backups}
 
 
+def log_diagnostic(messages: str) -> str:
+    lines = messages.splitlines()
+    for expression in (r"\.java:\d+: error:", r"REPORT SCRIPT ERROR", r"\bERROR "):
+        for line in lines:
+            if re.search(expression, line):
+                return "".join(character for character in line.strip() if character.isprintable())[:320]
+    return "No Ghidra error line was recorded"
+
+
+def workflow_error(artifact: str, stage: str, error: Exception) -> str:
+    text = f"{artifact} while {stage} [{type(error).__name__}]. {error}"[:1000]
+    clean = "".join(character for character in text if character.isprintable() or character in "\r\n")
+    return "::error::" + clean.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def run_report(headless: Path, binary: Path, output: Path, timeout: int,
                project_readback: bool) -> tuple[dict, dict]:
     log = output.with_suffix(".log")
@@ -153,10 +169,14 @@ def run_report(headless: Path, binary: Path, output: Path, timeout: int,
         shutil.copyfile(TESTS / "BinaryRatRttiInvariants.java", scripts / "BinaryRatRttiInvariants.java")
         command = [str(headless), directory, "rtti"]
         if project_readback:
+            import_log = output.with_suffix(".import.log")
             prepare = measured_run(command + ["-import", str(binary), "-noanalysis"],
-                                   output.with_suffix(".import.log"), timeout, environment)
+                                   import_log, timeout, environment)
             if prepare["returncode"]:
-                raise AssertionError("Ghidra failed to save the disposable RTTI project")
+                diagnostic = log_diagnostic(import_log.read_text(encoding="utf-8", errors="replace"))
+                raise AssertionError(f"Ghidra failed to save the disposable RTTI project "
+                                     f"with exit code {prepare['returncode']}. "
+                                     f"{diagnostic}. See {import_log}")
             before = saved_project_hashes(project)
             if not any(name.startswith("rtti.rep/") for name in before):
                 raise AssertionError("saved RTTI project has no Program artifacts")
@@ -168,18 +188,20 @@ def run_report(headless: Path, binary: Path, output: Path, timeout: int,
             "-postScript", "BinaryRatRecoverRtti.java", str(output),
             "-postScript", "BinaryRatRttiInvariants.java",
         ], log, timeout, environment)
+        messages = log.read_text(encoding="utf-8", errors="replace")
+        if (measured["returncode"] or not output.is_file() or
+                "BINARYRAT_RTTI_REPORT_PUBLISHED" not in messages or
+                "BINARYRAT_RTTI_INVARIANTS_VERIFIED" not in messages or
+                "REPORT SCRIPT ERROR" in messages):
+            raise AssertionError(f"RTTI collection or invariant test failed "
+                                 f"with Ghidra exit code {measured['returncode']}. "
+                                 f"{log_diagnostic(messages)}. See {log}")
         if project_readback:
             after = saved_project_hashes(project)
             changed = sorted(name for name in before.keys() | after.keys()
                              if before.get(name) != after.get(name))
             if changed:
                 raise AssertionError(f"RTTI collection changed saved project artifacts: {changed}")
-    messages = log.read_text(encoding="utf-8", errors="replace")
-    if (measured["returncode"] or not output.is_file() or
-            "BINARYRAT_RTTI_REPORT_PUBLISHED" not in messages or
-            "BINARYRAT_RTTI_INVARIANTS_VERIFIED" not in messages or
-            "REPORT SCRIPT ERROR" in messages):
-        raise AssertionError(f"RTTI collection or invariant test failed. See {log}")
     report = json.loads(output.read_text(encoding="utf-8"))
     if report["schema_version"] != 1 or report["program_id"] != f"sha256:{sha256(binary)}":
         raise AssertionError("RTTI report has the wrong schema or executable identity")
@@ -197,46 +219,65 @@ def main() -> int:
     if not 1 <= args.timeout <= 1800:
         parser.error("timeout must be between 1 and 1800 seconds")
 
-    manifest = json.loads(args.corpus.read_text(encoding="utf-8"))
-    if manifest["schema_version"] != 1 or manifest["status"] != "passed":
-        raise ValueError("passing BinaryRat corpus is required")
-    root = Path(manifest["root"]).resolve(strict=True)
-    selected = set(args.artifact) if args.artifact else CORPUS_IDS
-    artifacts = [row for row in manifest["artifacts"] if row["id"] in selected]
-    if not artifacts or len({row["id"] for row in artifacts}) != len(artifacts) or (
-            args.artifact and len(artifacts) != len(selected)):
-        raise ValueError("missing or duplicate requested RTTI artifacts")
+    artifact_id = "RTTI verifier setup"
+    stage = "reading the corpus manifest"
+    try:
+        manifest = json.loads(args.corpus.read_text(encoding="utf-8"))
+        if manifest["schema_version"] != 1 or manifest["status"] != "passed":
+            raise ValueError("passing BinaryRat corpus is required")
+        root = Path(manifest["root"]).resolve(strict=True)
+        selected = set(args.artifact) if args.artifact else CORPUS_IDS
+        artifacts = [row for row in manifest["artifacts"] if row["id"] in selected]
+        if not artifacts or len({row["id"] for row in artifacts}) != len(artifacts) or (
+                args.artifact and len(artifacts) != len(selected)):
+            raise ValueError("missing or duplicate requested RTTI artifacts")
 
-    headless = launcher(args.ghidra.resolve(strict=True))
-    output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=False)
-    runs = []
-    for artifact in artifacts:
-        binary = (root / artifact["binary"]).resolve(strict=True)
-        if (root not in binary.parents or binary.stat().st_size > 16 * 1024 * 1024 or
-                binary.parent.name != "analysis" or sha256(binary) != artifact["binary_sha256"]):
-            raise ValueError("invalid stripped RTTI fixture")
-        stem = artifact["id"].replace("/", "-")
-        clean, measured = run_report(headless, binary, output / f"{stem}.json", args.timeout, True)
-        expected_abi = {"ELF64": "itanium", "PE32+": "msvc"}[artifact["format"]]
-        if clean["abi"] != expected_abi:
-            raise AssertionError("collector used the wrong C++ ABI")
-        classes = check_hierarchy(clean)
-        corrupt = output / f"{stem}-malformed{binary.suffix}"
-        invalidated = malformed_copy(binary, corrupt, clean, classes)
-        altered, _ = run_report(headless, corrupt, output / f"{stem}-malformed.json", args.timeout, False)
-        altered_classes = classes_by_name(altered)
-        ignored = (all(row["descriptor_address"] != invalidated for row in altered["classes"])
-                   if clean["abi"] == "itanium" else
-                   all(table["address_point"] != invalidated
-                       for row in altered["classes"] for table in row["vtables"]))
-        if not ignored or "Diamond" not in altered_classes:
-            raise AssertionError("malformed RTTI was emitted or unrelated metadata was discarded")
-        runs.append({"artifact": artifact["id"], "abi": clean["abi"], "classes": len(classes),
-                     "malformed_excluded": True, "program_unchanged": True, "measurement": measured})
-        print(f"{artifact['id']} verified {len(classes)} classes and rejected malformed RTTI", flush=True)
-    (output / "report.json").write_text(json.dumps({"passed": True, "runs": runs}, indent=2) + "\n",
-                                        encoding="utf-8")
+        stage = "selecting the host Ghidra launcher"
+        headless = launcher(args.ghidra.resolve(strict=True), windows=os.name == "nt")
+        print(f"RTTI verifier using {headless}", flush=True)
+        stage = "preparing the report directory"
+        output = args.output.resolve()
+        output.mkdir(parents=True, exist_ok=False)
+        runs = []
+        for artifact in artifacts:
+            artifact_id = artifact["id"]
+            stage = "verifying the stripped fixture"
+            binary = (root / artifact["binary"]).resolve(strict=True)
+            if (root not in binary.parents or binary.stat().st_size > 16 * 1024 * 1024 or
+                    binary.parent.name != "analysis" or sha256(binary) != artifact["binary_sha256"]):
+                raise ValueError("invalid stripped RTTI fixture")
+            stem = artifact["id"].replace("/", "-")
+            print(f"Checking RTTI for {artifact['id']}", flush=True)
+            stage = "collecting RTTI and checking read-only invariants"
+            clean, measured = run_report(headless, binary, output / f"{stem}.json", args.timeout, True)
+            expected_abi = {"ELF64": "itanium", "PE32+": "msvc"}[artifact["format"]]
+            if clean["abi"] != expected_abi:
+                raise AssertionError("collector used the wrong C++ ABI")
+            stage = "comparing the class graph and vtable evidence"
+            classes = check_hierarchy(clean)
+            corrupt = output / f"{stem}-malformed{binary.suffix}"
+            stage = "constructing the malformed ABI record"
+            invalidated = malformed_copy(binary, corrupt, clean, classes)
+            stage = "collecting evidence from the malformed fixture"
+            altered, _ = run_report(headless, corrupt, output / f"{stem}-malformed.json", args.timeout, False)
+            stage = "checking rejection of the malformed record"
+            altered_classes = classes_by_name(altered)
+            ignored = (all(row["descriptor_address"] != invalidated for row in altered["classes"])
+                       if clean["abi"] == "itanium" else
+                       all(table["address_point"] != invalidated
+                           for row in altered["classes"] for table in row["vtables"]))
+            if not ignored or "Diamond" not in altered_classes:
+                raise AssertionError("malformed RTTI was emitted or unrelated metadata was discarded")
+            runs.append({"artifact": artifact["id"], "abi": clean["abi"], "classes": len(classes),
+                         "malformed_excluded": True, "program_unchanged": True, "measurement": measured})
+            print(f"{artifact['id']} verified {len(classes)} classes and rejected malformed RTTI", flush=True)
+        stage = "writing the verification summary"
+        (output / "report.json").write_text(json.dumps({"passed": True, "runs": runs}, indent=2) + "\n",
+                                            encoding="utf-8")
+    except Exception as error:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print(workflow_error(artifact_id, stage, error), flush=True)
+        raise
     return 0
 
 

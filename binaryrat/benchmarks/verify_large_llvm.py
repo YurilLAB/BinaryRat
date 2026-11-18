@@ -137,7 +137,7 @@ def run(launch: Path, project: Path, args: list[str], destination: Path, label: 
     return report, logs
 
 
-def launcher(installation: Path, stock_reference: bool = False) -> Path:
+def launcher(installation: Path, stock_reference: bool = False, *, windows: bool = False) -> Path:
     properties = (installation / "Ghidra" / "application.properties").read_text(encoding="utf-8")
     if not re.search(r"^application.version=12\.2\s*$", properties, re.MULTILINE):
         raise ValueError(f"Ghidra 12.2 is required: {installation}")
@@ -147,9 +147,9 @@ def launcher(installation: Path, stock_reference: bool = False) -> Path:
         if not {"application.release.name=PUBLIC",
                 f"application.revision.ghidra={upstream['commit']}"} <= lines:
             raise ValueError(f"stock reference must use the official pinned Ghidra 12.2: {installation}")
-    launch = installation / "support" / "analyzeHeadless"
+    launch = installation / "support" / ("analyzeHeadless.bat" if windows else "analyzeHeadless")
     if not launch.is_file():
-        raise ValueError(f"missing Linux headless launcher: {launch}")
+        raise ValueError(f"missing Ghidra headless launcher: {launch}")
     return launch
 
 

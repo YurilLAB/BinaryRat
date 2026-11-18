@@ -46,6 +46,23 @@ class LargeFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "official pinned"):
                 probe.launcher(installation, stock_reference=True)
 
+    def test_launcher_selects_batch_file_on_windows_from_the_same_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            installation = Path(directory)
+            properties = installation / "Ghidra" / "application.properties"
+            properties.parent.mkdir()
+            properties.write_text("application.version=12.2\n", encoding="utf-8")
+            shell = installation / "support" / "analyzeHeadless"
+            shell.parent.mkdir()
+            shell.touch()
+            batch = shell.with_suffix(".bat")
+            batch.touch()
+            self.assertEqual(probe.launcher(installation), shell)
+            self.assertEqual(probe.launcher(installation, windows=True), batch)
+            batch.unlink()
+            with self.assertRaisesRegex(ValueError, r"analyzeHeadless\.bat$"):
+                probe.launcher(installation, windows=True)
+
 
 class LargeParityTests(unittest.TestCase):
     def setUp(self):
