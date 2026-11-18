@@ -143,8 +143,9 @@ completed file is published without replacing an existing report.
 
 Opt in with `FOLLOW_DEPTH=1` to collect evidence from eligible direct callees
 that receive the selected object base unchanged. This bounded pass checks the
-calling convention and register storage and keeps the call site and callee
-instruction in the report.
+calling convention and register storage and requires the p-code target to match
+the instruction's single decoded direct target. It keeps the call site and
+callee instruction in the report.
 
 For example, select `name:read_packed` and parameter `0` in the stripped C corpus.
 The verifier checks the output against separately read DWARF or PDB. [Corpus and

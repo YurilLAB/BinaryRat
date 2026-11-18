@@ -69,6 +69,11 @@ BR_NOINLINE BR_LAYOUT_ANCHOR uint32_t forward_packed(const PackedRecord *record)
     return read_packed(record) + UINT32_C(1);
 }
 
+/* Distinct layout used by the call-destination override regression. */
+BR_NOINLINE BR_LAYOUT_ANCHOR uint32_t read_alternate_layout(const Record *record) {
+    return (uint32_t) record->samples[3];
+}
+
 int main(void) {
     Record tail = { 2, 3, 1, 0, NULL, { 11 }, { 1, 2, 3, 4 } };
     Record head = { 7, 5, 2, 0, &tail, { 13 }, { 5, 6, 7, 8 } };

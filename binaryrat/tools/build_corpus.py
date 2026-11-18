@@ -189,6 +189,7 @@ def build_one(name: str, tools: tuple, optimization: str, fixture: tuple,
         if identifier == "types":
             command.extend(["-Wl,--export-dynamic-symbol=read_packed",
                             "-Wl,--export-dynamic-symbol=forward_packed",
+                            "-Wl,--export-dynamic-symbol=read_alternate_layout",
                             "-Wl,--export-dynamic-symbol=update_record"])
     run_command(command, fixtures, commands)
     before = inspect_binary(original)

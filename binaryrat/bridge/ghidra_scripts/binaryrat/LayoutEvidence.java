@@ -10,6 +10,7 @@ import java.util.List;
 
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSpace;
+import ghidra.program.model.listing.FlowOverride;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.pcode.HighFunction;
@@ -91,7 +92,7 @@ public final class LayoutEvidence {
 				PcodeOp operation = iterator.next();
 				int opcode = operation.getOpcode();
 				if (collectCalls && opcode == PcodeOp.CALL) {
-					ForwardedCall call = observeCall(operation, function, space, root);
+					ForwardedCall call = observeCall(program, operation, function, space, root);
 					if (call != null) {
 						if (calls.size() >= MAXIMUM_FORWARDING_CALLS) {
 							throw new IOException("function exceeds the direct forwarding call limit");
@@ -153,8 +154,8 @@ public final class LayoutEvidence {
 			function.getAutoParameterCount() == 0 && function.getCallFixup() == null;
 	}
 
-	private static ForwardedCall observeCall(PcodeOp op, Function function, AddressSpace space,
-			Varnode root) {
+	private static ForwardedCall observeCall(Program program, PcodeOp op, Function function,
+			AddressSpace space, Varnode root) {
 		if (op.getNumInputs() != 2) {
 			return null;
 		}
@@ -168,7 +169,8 @@ public final class LayoutEvidence {
 		}
 		try {
 			Relative relative = offset(argument, root, 0);
-			if (relative != null && relative.minimum() == 0 && relative.maximum() == 0) {
+			if (relative != null && relative.minimum() == 0 && relative.maximum() == 0 &&
+					matchesDecodedCall(program, site, target.getAddress())) {
 				return new ForwardedCall(site, Integer.toUnsignedLong(op.getSeqnum().getTime()),
 					target.getAddress(), argument.getAddress());
 			}
@@ -177,6 +179,21 @@ public final class LayoutEvidence {
 			// Overflow cannot establish object identity across the call.
 		}
 		return null;
+	}
+
+	private static boolean matchesDecodedCall(Program program, Address site, Address target) {
+		var instruction = program.getListing().getInstructionAt(site);
+		if (instruction == null || instruction.getFlowOverride() != FlowOverride.NONE) {
+			return false;
+		}
+		var flow = instruction.getFlowType();
+		if (!flow.isCall() || flow.isComputed()) {
+			return false;
+		}
+		// High p-code can redirect calls using Program references. The underlying
+		// instruction's default flows ignore those references.
+		Address[] destinations = instruction.getDefaultFlows();
+		return destinations != null && destinations.length == 1 && target.equals(destinations[0]);
 	}
 
 	private static Access observe(PcodeOp op, Function function, AddressSpace space, Varnode root) {

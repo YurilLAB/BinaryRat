@@ -113,19 +113,25 @@ def oracle_layout(debug: Path, artifact: dict, pdbutil: str) -> dict:
 
 def collect_layout(launcher: Path, binary: Path, prefix: Path, timeout: int,
                    environment: dict[str, str], function: str,
-                   follow_depth: int = 0) -> tuple[dict, str, dict]:
+                   follow_depth: int = 0, override_call: bool = False) -> tuple[dict, str, dict]:
     output, log = prefix.with_suffix(".layout.json"), prefix.with_suffix(".log")
     output.unlink(missing_ok=True)
-    scripts = PROJECT / "binaryrat/bridge/ghidra_scripts"
+    scripts = [str(PROJECT / "binaryrat/bridge/ghidra_scripts")]
+    setup = []
+    if override_call:
+        scripts.append(str(PROJECT / "binaryrat/corpus/ghidra_scripts"))
+        setup = ["-postScript", "BinaryRatOverrideLayoutCallFixture.java",
+                 function, FUNCTION, "read_alternate_layout"]
     with tempfile.TemporaryDirectory(prefix="layout oracle ", dir=prefix.parent) as directory:
         measured = measured_run([
             str(launcher), directory, "fixture", "-import", str(binary), "-readOnly",
-            "-scriptPath", str(scripts), "-postScript", "BinaryRatRecoverLayouts.java",
-            str(output), f"name:{function}", str(PARAMETER_INDEX), "60", str(follow_depth),
-            "-deleteProject",
+            "-scriptPath", ";".join(scripts), *setup,
+            "-postScript", "BinaryRatRecoverLayouts.java", str(output), f"name:{function}",
+            str(PARAMETER_INDEX), "60", str(follow_depth), "-deleteProject",
         ], log, timeout, environment)
-    if measured["returncode"] or not output.is_file() or "REPORT SCRIPT ERROR" in log.read_text(
-            encoding="utf-8", errors="replace"):
+    log_text = log.read_text(encoding="utf-8", errors="replace")
+    if (measured["returncode"] or not output.is_file() or "REPORT SCRIPT ERROR" in log_text or
+            (override_call and "BINARYRAT_LAYOUT_CALL_OVERRIDE_SET" not in log_text)):
         raise RuntimeError(f"Ghidra did not produce a layout for {function} (see {log})")
     return json_file(output), output.name, measured
 
@@ -149,7 +155,16 @@ def check_forwarding(launcher: Path, binary: Path, artifact: dict, oracle: dict,
     metrics = score_fields(fields, oracle)
     if metrics["missing"] or metrics["unexpected"]:
         raise RuntimeError("direct forwarded evidence differs from the packed-layout oracle")
-    return {"passed": True, "evidence": report_name, "metrics": metrics}
+
+    redirected, redirected_name, _ = collect_layout(
+        launcher, binary, args.output / "forward-override", args.timeout,
+        environment, function, 1, override_call=True)
+    if (verified_fields(redirected, artifact, function) or redirected["forwarded_calls"] or
+            redirected["observations"] != local["observations"] or
+            redirected["variable_accesses"] != local["variable_accesses"]):
+        raise RuntimeError("a call override was treated as a decoded direct call")
+    return {"passed": True, "evidence": report_name, "metrics": metrics,
+            "override_excluded": True, "override_evidence": redirected_name}
 
 
 def check_variable_evidence(launcher: Path, binary: Path, debug: Path, artifact: dict,
