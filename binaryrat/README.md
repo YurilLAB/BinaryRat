@@ -92,6 +92,9 @@ isolated settings and repeats the cold and warm checks through its bundled
 engine. CI also reopens a cached project after a function rename made while the
 engine is offline. The verifier checks output records and
 script success messages because Ghidra can return zero after a postScript fails.
+The small Windows corpus records one known stock Ghidra coverage failure in each
+of three MSVC optimization variants. Every exported record participates in the
+exact comparison. [MSVC runtime parity evidence](docs/evidence/msvc-crt-parity.md)
 Linux CI downloads and hash-checks a pinned 130 MB LLVM library, then compares the
 stock-verified export of 384 sampled functions to an independent stock serial run
 byte for byte. [LLVM harness and evidence](docs/evidence/llvm19-linux.md)

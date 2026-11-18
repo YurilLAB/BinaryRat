@@ -30,6 +30,17 @@ PHASE = re.compile(r"BinaryRat export starting mode=" + PHASE_NAME)
 TIMING = re.compile(r"BinaryRat exported functions=(\d+) mode=" + PHASE_NAME + " "
                     r"workers=(\d+) excluded_external=(\d+) elapsed_seconds=([0-9.eE+-]+)")
 
+# Stock 12.2 sometimes cannot decompile this static MSVC 19.52 CRT helper.
+# The separate PDB identifies __GSHandlerCheckCommon in each verified fixture.
+# These hashes cover the exact analyzed body bytes and address ranges.
+MSVC_CRT_BODIES = {
+    "msvc/O1/types": ("ram:140001260", "acaf5da83d08fcacb43565cb74f5335281aadb71ac27f5ae67a8bd5d21dbd517"),
+    "msvc/O2/types": ("ram:1400012d0", "1b87dfa37f3c9194cf5633ae849049f688cd8c8bb5d4640378c749e3be93acca"),
+    "msvc/Ox/types": ("ram:140001300", "8d7bd4dedd921e18b863a6cddd371e1e3cc72ee42a324453bf1110758b2d9b3b"),
+}
+MSVC_CRT_ERROR = ("Low-level Error: Bad instruction count exceeded:\n"
+                  "    ...\n    No pcode could be generated at address: r0x000140020137")
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -138,7 +149,30 @@ def measured_run(argv: list[str], log: Path, timeout: float,
             "memory_sampling_errors": sorted(errors), "sample_interval_seconds": 0.05}
 
 
-def verify_pair(prefix: Path, log: Path) -> dict:
+def decompiler_coverage(path: Path, phase: str, artifact_id: str | None) -> dict:
+    """Count successful outputs and identify the one documented stock CRT limitation."""
+    known = MSVC_CRT_BODIES.get(artifact_id)
+    completed = 0
+    expected_failures = []
+    for record in load_export(path):
+        if record.successful and record.c.strip():
+            completed += 1
+            continue
+        address = str(record.function.entry)
+        body = record.function.body_sha256
+        if (known != (address, body) or expected_failures or record.completed or record.c or
+                record.prototype or record.timed_out or record.cancelled or record.failed_to_start or
+                record.error != MSVC_CRT_ERROR):
+            raise RuntimeError(f"incomplete {phase} decompiler output at {address}; see {path}")
+        expected_failures.append({"address": address, "body_sha256": body,
+                                  "symbol": "__GSHandlerCheckCommon", "error": record.error})
+    if not completed:
+        raise RuntimeError(f"no complete {phase} decompiler output; see {path}")
+    return {"function_count": completed + len(expected_failures), "completed_count": completed,
+            "expected_stock_failures": expected_failures}
+
+
+def verify_pair(prefix: Path, log: Path, *, artifact_id: str | None = None) -> dict:
     serial = Path(str(prefix) + ".serial.jsonl")
     parallel = Path(str(prefix) + ".parallel.jsonl")
     content = log.read_text(encoding="utf-8", errors="replace")
@@ -148,13 +182,7 @@ def verify_pair(prefix: Path, log: Path) -> dict:
         raise RuntimeError(f"expected export missing; see {log}")
     if first_differing_byte(serial, parallel) is not None:
         raise RuntimeError(f"exact output mismatch: {serial}, {parallel}")
-    count = 0
-    for record in load_export(serial):
-        if not record.successful or not record.c.strip():
-            raise RuntimeError(f"empty or incomplete decompiler coverage; see {serial}")
-        count += 1
-    if not count:
-        raise RuntimeError(f"empty or incomplete decompiler coverage; see {serial}")
+    coverage = decompiler_coverage(serial, "serial", artifact_id)
     phases = {}
     for match in TIMING.finditer(content):
         logged_count, mode, workers, excluded, elapsed = match.groups()
@@ -163,16 +191,15 @@ def verify_pair(prefix: Path, log: Path) -> dict:
                         "export_wall_seconds": float(elapsed)}
     if set(phases) != {"serial", "parallel"}:
         raise RuntimeError(f"missing phase timings; see {log}")
-    if any(phase["function_count"] != count for phase in phases.values()):
+    if any(phase["function_count"] != coverage["function_count"] for phase in phases.values()):
         raise RuntimeError("export count differs from parsed record count")
-    return {"exact_match": True, "function_count": count,
-            "completed_count": count,
+    return {"exact_match": True, **coverage,
             "export_sha256": sha256(serial),
             "phases": phases}
 
 
 def verify_scheduled(prefix: Path, log: Path, workers: int,
-                     cache_expected: str = "disabled") -> dict:
+                     cache_expected: str = "disabled", *, artifact_id: str | None = None) -> dict:
     """Engine-admitted decompilation must equal stock serial output byte for byte."""
     if cache_expected not in {"disabled", "cold", "warm"}:
         raise ValueError("cache_expected must be disabled, cold or warm")
@@ -184,13 +211,9 @@ def verify_scheduled(prefix: Path, log: Path, workers: int,
     if first_differing_byte(serial, scheduled) is not None:
         raise RuntimeError(f"exact output mismatch: {serial}, {scheduled}")
     summary = json.loads(Path(str(scheduled) + ".schedule.json").read_text())
-    records = 0
-    for record in load_export(scheduled):
-        if not record.successful or not record.c.strip():
-            raise RuntimeError(f"incomplete scheduled decompiler output; see {scheduled}")
-        records += 1
-    if records == 0:
-        raise RuntimeError(f"empty scheduled decompiler output; see {scheduled}")
+    coverage = decompiler_coverage(scheduled, "scheduled",
+                                   artifact_id if cache_expected == "disabled" else None)
+    records = coverage["function_count"]
     cache = summary["cache"]
     if cache["enabled"] is not (cache_expected != "disabled"):
         raise RuntimeError(f"unexpected persistent cache configuration; see {log}")
@@ -232,7 +255,7 @@ def verify_scheduled(prefix: Path, log: Path, workers: int,
     if (not summary["engine_configuration"]["memory_watch"] or
             summary["memory_watched_leases"] != compute_leases):
         raise RuntimeError(f"scheduled decompiler processes were not all memory-watched; see {log}")
-    return {"function_count": records, "requested_workers": workers,
+    return {"exact_match": True, **coverage, "requested_workers": workers,
             "admitted_workers": admitted, "compute_leases": compute_leases,
             "peak_running": engine["peak_running"],
             "max_peak_resident_bytes": summary["max_peak_resident_bytes"],
@@ -546,7 +569,7 @@ def main() -> int:
                                             environment)
                     if measured["returncode"]:
                         raise RuntimeError(f"Ghidra process failed; see {log}")
-                    pair = verify_pair(prefix, log)
+                    pair = verify_pair(prefix, log, artifact_id=artifact["id"])
                     if pair["phases"]["serial"]["workers"] != 1 or \
                             pair["phases"]["parallel"]["workers"] != workers:
                         raise RuntimeError(f"logged worker counts differ from requested configuration; see {log}")
@@ -554,7 +577,7 @@ def main() -> int:
                                            "repetition": repetition, "phase_order": mode,
                                            **measured, **pair})
                     print(f"PASS {artifact['id']} workers={workers} repetition={repetition} "
-                          f"functions={pair['function_count']}", flush=True)
+                          f"functions={pair['function_count']} completed={pair['completed_count']}", flush=True)
             if engine:
                 workers = max(args.workers)
                 name = f"{identity}-scheduled-w{workers}"
@@ -565,9 +588,10 @@ def main() -> int:
                                         args.timeout, environment)
                 if measured["returncode"]:
                     raise RuntimeError(f"Ghidra process failed; see {log}")
-                report["scheduled_runs"].append({"artifact_id": artifact["id"], **measured,
-                                                 **verify_scheduled(prefix, log, workers)})
-                print(f"PASS {artifact['id']} scheduled workers={workers}", flush=True)
+                scheduled = verify_scheduled(prefix, log, workers, artifact_id=artifact["id"])
+                report["scheduled_runs"].append({"artifact_id": artifact["id"], **measured, **scheduled})
+                print(f"PASS {artifact['id']} scheduled workers={workers} "
+                      f"functions={scheduled['function_count']} completed={scheduled['completed_count']}", flush=True)
                 name = f"{identity}-cache-proof"
                 proof, log = destination / (name + ".json"), destination / (name + ".log")
                 proof.unlink(missing_ok=True)

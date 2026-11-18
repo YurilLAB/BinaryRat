@@ -1,4 +1,4 @@
-"""Checks that persistent-cache evidence cannot pass by doing fresh work.
+"""Regression tests for decompiler parity and persistent-cache evidence.
 
 SPDX-License-Identifier: Apache-2.0
 Copyright 2026 YurilLAB.
@@ -99,6 +99,118 @@ class ProcessMeasurementTests(unittest.TestCase):
                 with self.subTest(timeout=timeout), self.assertRaises(ValueError):
                     verify_ghidra.measured_run([], Path(directory) / "invalid.log", timeout)
             spawn.assert_not_called()
+
+
+class KnownStockFailureTests(unittest.TestCase):
+    stock_error = ("Low-level Error: Bad instruction count exceeded:\n    ...\n"
+                   "    No pcode could be generated at address: r0x000140020137")
+    crt_bodies = {
+        "O1": ("140001260", "acaf5da83d08fcacb43565cb74f5335281aadb71ac27f5ae67a8bd5d21dbd517"),
+        "O2": ("1400012d0", "1b87dfa37f3c9194cf5633ae849049f688cd8c8bb5d4640378c749e3be93acca"),
+        "Ox": ("140001300", "8d7bd4dedd921e18b863a6cddd371e1e3cc72ee42a324453bf1110758b2d9b3b"),
+    }
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.prefix = Path(directory.name) / "fixture"
+        self.log = Path(directory.name) / "fixture.log"
+
+    def known_failure(self, optimization="O1"):
+        successful, failed = rows()
+        address, digest = self.crt_bodies[optimization]
+        failed.update(address=address, name=f"FUN_{address}", body_sha256=digest, c="", prototype="",
+                      completed=False, error=self.stock_error)
+        return successful, failed
+
+    def compare(self, mode, records, artifact_id="msvc/O1/types", *, candidate=None,
+                cache_state="disabled"):
+        evidence(self.prefix, self.log, cache_state)
+        if mode == "parallel":
+            count = len(records)
+            self.log.write_text(
+                "BinaryRat exact serial/parallel comparison passed:\n"
+                f"BinaryRat exported functions={count} mode=serial workers=1 excluded_external=0 elapsed_seconds=1\n"
+                f"BinaryRat exported functions={count} mode=parallel workers=2 excluded_external=0 elapsed_seconds=1\n",
+                encoding="utf-8")
+        for phase, data in (("serial", records), (mode, records if candidate is None else candidate)):
+            export = Path(str(self.prefix) + f".{phase}.jsonl")
+            export.write_text("".join(json.dumps(row) + "\n" for row in data), encoding="utf-8")
+        if mode == "parallel":
+            return verify_ghidra.verify_pair(self.prefix, self.log, artifact_id=artifact_id)
+        return verify_ghidra.verify_scheduled(self.prefix, self.log, 2, cache_state, artifact_id=artifact_id)
+
+    def test_known_crt_failures_remain_in_parity_and_are_reported(self):
+        for mode in ("parallel", "scheduled"):
+            for optimization in self.crt_bodies:
+                with self.subTest(mode=mode, optimization=optimization):
+                    result = self.compare(mode, self.known_failure(optimization), f"msvc/{optimization}/types")
+                    self.assertEqual(result["function_count"], 2)
+                    self.assertEqual(result["completed_count"], 1)
+                    failure, = result["expected_stock_failures"]
+                    address, digest = self.crt_bodies[optimization]
+                    self.assertEqual(failure["address"].split(":")[-1], address)
+                    self.assertEqual(failure["body_sha256"], digest)
+                    self.assertEqual(failure["symbol"], "__GSHandlerCheckCommon")
+                    self.assertEqual(failure["error"], self.stock_error)
+                    if mode == "scheduled":
+                        self.assertEqual(result["compute_leases"], 2)
+
+    def test_unexpected_failure_in_either_mode_is_rejected(self):
+        successful, failure = self.known_failure()
+        changes = (
+            {"address": "1400012d0"},
+            {"address_space": "other"},
+            {"body_sha256": "c" * 64},
+            {"error": self.stock_error + " changed"},
+            {"completed": True},
+            {"timed_out": True},
+            {"cancelled": True},
+            {"failed_to_start": True},
+            {"prototype": "int partial(void)"},
+            {"c": "partial output"},
+        )
+        for mode in ("parallel", "scheduled"):
+            for change in changes:
+                with self.subTest(mode=mode, change=change), self.assertRaisesRegex(RuntimeError, "incomplete"):
+                    self.compare(mode, [successful, failure | change])
+            for artifact_id in (None, "msvc/Od/types", "msvc/O1/classes", "msvc-arm64/O1/types",
+                                "msvc/O2/types"):
+                with self.subTest(mode=mode, artifact_id=artifact_id), self.assertRaisesRegex(
+                        RuntimeError, "incomplete"):
+                    self.compare(mode, [successful, failure], artifact_id)
+            with self.subTest(mode=mode), self.assertRaisesRegex(RuntimeError, "incomplete.*ram:1010"):
+                _, extra = rows()
+                extra.update(completed=False, c="")
+                self.compare(mode, [successful, failure, extra])
+
+    def test_successful_exports_need_no_exception_for_known_fixture(self):
+        for mode in ("parallel", "scheduled"):
+            with self.subTest(mode=mode):
+                result = self.compare(mode, rows())
+                self.assertEqual(result["function_count"], 2)
+                self.assertEqual(result["completed_count"], 2)
+                self.assertEqual(result["expected_stock_failures"], [])
+
+    def test_parity_mismatch_cannot_be_classified_as_an_expected_failure(self):
+        records = self.known_failure()
+        candidate = [records[0], records[1] | {"error": self.stock_error + " changed"}]
+        for mode in ("parallel", "scheduled"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(RuntimeError, "exact output mismatch"):
+                self.compare(mode, records, candidate=candidate)
+
+    def test_empty_and_all_incomplete_exports_are_rejected(self):
+        _, failure = self.known_failure()
+        for mode in ("parallel", "scheduled"):
+            for records in ([], [failure]):
+                with self.subTest(mode=mode, count=len(records)), self.assertRaisesRegex(
+                        RuntimeError, "no complete"):
+                    self.compare(mode, records)
+
+    def test_cache_enabled_runs_still_require_complete_output(self):
+        for state in ("cold", "warm"):
+            with self.subTest(state=state), self.assertRaisesRegex(RuntimeError, "incomplete scheduled"):
+                self.compare("scheduled", self.known_failure(), cache_state=state)
 
 
 class ScheduledEvidenceTests(unittest.TestCase):
