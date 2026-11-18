@@ -15,6 +15,7 @@ namespace {
 struct FieldEvidence {
     std::set<std::string> evidence_ids;
     std::set<std::uint64_t> strides;
+    std::map<StorageView, std::set<std::string>> typed_views;
 };
 
 using FieldKey = std::pair<std::uint64_t, std::uint64_t>;
@@ -50,7 +51,60 @@ std::optional<RejectionReason> validate(const AccessObservation& observation,
     return std::nullopt;
 }
 
+bool supported_view(const AccessObservation& observation) {
+    if (!observation.storage_view || observation.stride) {
+        return false;
+    }
+    const auto width = observation.width;
+    switch (*observation.storage_view) {
+        case StorageView::integer:
+            return width == 1 || width == 2 || width == 4 || width == 8;
+        case StorageView::floating_point:
+            return width == 4 || width == 8;
+    }
+    return false;
+}
+
+void append_union_candidate(RecoveredLayout& layout, std::uint64_t offset,
+                            std::vector<UnionView> views) {
+    std::map<std::string, std::size_t> occurrences;
+    for (const auto& view : views) {
+        for (const auto& id : view.evidence_ids) {
+            ++occurrences[id];
+        }
+    }
+    for (auto& view : views) {
+        // Conflicting labels invalidate that evidence, even when other
+        // independent loads support the same shared storage.
+        std::erase_if(view.evidence_ids, [&](const auto& id) { return occurrences.at(id) > 1; });
+    }
+    std::erase_if(views, [](const auto& view) { return view.evidence_ids.empty(); });
+
+    std::size_t evidence_count = 0;
+    bool has_integer = false;
+    bool has_float = false;
+    for (const auto& view : views) {
+        has_integer |= view.kind == StorageView::integer;
+        has_float |= view.kind == StorageView::floating_point;
+        evidence_count += view.evidence_ids.size();
+    }
+    if (has_integer && has_float) {
+        const auto support = static_cast<double>(evidence_count);
+        layout.union_candidates.push_back({offset, std::move(views), support / (support + 1.0)});
+    }
+}
+
 }  // namespace
+
+std::string_view to_string(StorageView view) noexcept {
+    switch (view) {
+        case StorageView::integer:
+            return "integer";
+        case StorageView::floating_point:
+            return "floating_point";
+    }
+    return "unknown";
+}
 
 std::string_view to_string(RejectionReason reason) noexcept {
     switch (reason) {
@@ -92,12 +146,16 @@ LayoutRecoveryResult recover_layouts(
         if (observation.stride) {
             evidence.strides.insert(*observation.stride);
         }
+        if (supported_view(observation)) {
+            evidence.typed_views[*observation.storage_view].insert(observation.evidence_id);
+        }
     }
 
     for (const auto& [object_id, field_map] : objects) {
         RecoveredLayout layout;
         layout.object_id = object_id;
         layout.fields.reserve(field_map.size());
+        std::map<std::uint64_t, std::vector<UnionView>> union_views;
         for (const auto& [key, evidence] : field_map) {
             RecoveredField field;
             field.offset = key.first;
@@ -117,7 +175,14 @@ LayoutRecoveryResult recover_layouts(
             layout.has_overlapping_stride |= field.stride_overlaps_access;
             layout.minimum_extent =
                 std::max(layout.minimum_extent, field.offset + field.width);
+            for (const auto& [kind, evidence_ids] : evidence.typed_views) {
+                union_views[field.offset].push_back(
+                    {kind, field.width, {evidence_ids.begin(), evidence_ids.end()}});
+            }
             layout.fields.push_back(std::move(field));
+        }
+        for (auto& [offset, views] : union_views) {
+            append_union_candidate(layout, offset, std::move(views));
         }
 
         // Sorted intervals allow marking every interval that overlaps another

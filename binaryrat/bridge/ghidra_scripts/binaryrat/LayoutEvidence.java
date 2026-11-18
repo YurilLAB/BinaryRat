@@ -26,12 +26,12 @@ import ghidra.util.task.TaskMonitor;
 public final class LayoutEvidence {
 	public static final long MAXIMUM_EXTENT = 1L << 20;
 	public static final int MAXIMUM_ACCESSES = 4_096;
-	private static final int MAXIMUM_OPS = 32_768;
+	public static final int MAXIMUM_OPS = 32_768;
 	private static final int MAXIMUM_FORWARDING_CALLS = 32;
 	private static final int MAXIMUM_DEFINITION_DEPTH = 32;
 
 	public record Access(Address address, long pcodeOrder, String operation, long offset,
-			long maximumOffset, long width, long stride) {
+			long maximumOffset, long width, long stride, UnionEvidence.Use typedUse) {
 	}
 
 	public record ForwardedCall(Address address, long pcodeOrder, Address callee,
@@ -58,6 +58,12 @@ public final class LayoutEvidence {
 
 	public static Capture collect(Program program, HighFunction high, int parameterIndex,
 			boolean includeCalls, TaskMonitor monitor) throws IOException, CancelledException {
+		return collect(program, high, parameterIndex, includeCalls, monitor, MAXIMUM_OPS);
+	}
+
+	public static Capture collect(Program program, HighFunction high, int parameterIndex,
+			boolean includeCalls, TaskMonitor monitor, int remainingOperations)
+			throws IOException, CancelledException {
 		LocalSymbolMap symbols = high.getLocalSymbolMap();
 		if (parameterIndex < 0 || parameterIndex >= symbols.getNumParams()) {
 			throw new IOException("decompiler has no parameter at index " + parameterIndex);
@@ -74,6 +80,7 @@ public final class LayoutEvidence {
 		List<Access> accesses = new ArrayList<>();
 		List<ForwardedCall> calls = new ArrayList<>();
 		boolean collectCalls = includeCalls && hasDefaultPrototype(program, high);
+		int operationLimit = Math.min(MAXIMUM_OPS, remainingOperations);
 		int operations = 0;
 		int unresolved = 0;
 		// Use block membership. Ghidra 12.2's HighFunction decoder installs ops in
@@ -86,8 +93,10 @@ public final class LayoutEvidence {
 			Iterator<PcodeOp> iterator = block.getIterator();
 			while (iterator.hasNext()) {
 				monitor.checkCancelled();
-				if (++operations > MAXIMUM_OPS) {
-					throw new IOException("function exceeds the p-code operation limit");
+				if (++operations > operationLimit) {
+					throw new IOException(operationLimit < MAXIMUM_OPS ?
+						"layout traversal exceeds the total p-code operation limit" :
+						"function exceeds the p-code operation limit");
 				}
 				PcodeOp operation = iterator.next();
 				int opcode = operation.getOpcode();
@@ -103,7 +112,7 @@ public final class LayoutEvidence {
 				if (opcode != PcodeOp.LOAD && opcode != PcodeOp.STORE) {
 					continue;
 				}
-				Access access = observe(operation, function, space, root);
+				Access access = observe(operation, function, space, root, monitor);
 				if (access == null) {
 					unresolved++;
 					continue;
@@ -120,18 +129,17 @@ public final class LayoutEvidence {
 		return new Capture(List.copyOf(accesses), List.copyOf(calls), unresolved, operations);
 	}
 
-	/** Checks first-slot storage and prototype before transferring an object-start assumption. */
-	public static boolean acceptsForwardedInput(Program program, HighFunction high,
-			Address argumentStorage) {
+	/** Returns the verified first-slot storage for an object-start transfer, if supported. */
+	public static Address forwardedInputStorage(Program program, HighFunction high) {
 		LocalSymbolMap symbols = high.getLocalSymbolMap();
 		if (symbols.getNumParams() != 1 || !hasDefaultPrototype(program, high)) {
-			return false;
+			return null;
 		}
 		Varnode input = entryInput(program, symbols, 0);
-		return input != null && input.getAddress().equals(argumentStorage);
+		return input == null || !input.getAddress().isRegisterAddress() ? null : input.getAddress();
 	}
 
-	private static Varnode entryInput(Program program, LocalSymbolMap symbols, int parameterIndex) {
+	static Varnode entryInput(Program program, LocalSymbolMap symbols, int parameterIndex) {
 		var symbol = symbols.getParamSymbol(parameterIndex);
 		if (symbol == null || !(symbol.getHighVariable() instanceof HighParam parameter) ||
 				parameter.getSlot() != parameterIndex) {
@@ -196,7 +204,9 @@ public final class LayoutEvidence {
 		return destinations != null && destinations.length == 1 && target.equals(destinations[0]);
 	}
 
-	private static Access observe(PcodeOp op, Function function, AddressSpace space, Varnode root) {
+	/** Collects relative evidence from a LOAD or STORE operation. */
+	static Access observe(PcodeOp op, Function function, AddressSpace space, Varnode root,
+			TaskMonitor monitor) throws CancelledException {
 		boolean load = op.getOpcode() == PcodeOp.LOAD;
 		int inputCount = load ? 2 : 3;
 		if (op.getNumInputs() != inputCount || !constant(op.getInput(0)) ||
@@ -214,9 +224,14 @@ public final class LayoutEvidence {
 					(relative.minimum() < 0 || relative.maximum() > MAXIMUM_EXTENT - value.getSize()))) {
 				return null;
 			}
+			UnionEvidence.Use typedUse = null;
+			if (load && relative.minimum() == relative.maximum() && relative.minimum() >= 0 &&
+					relative.minimum() <= MAXIMUM_EXTENT - value.getSize()) {
+				typedUse = UnionEvidence.classify(op, function, monitor);
+			}
 			return new Access(address, Integer.toUnsignedLong(op.getSeqnum().getTime()),
 				op.getMnemonic(), relative.minimum(), relative.maximum(), value.getSize(),
-				relative.stride());
+				relative.stride(), typedUse);
 		}
 		catch (ArithmeticException overflow) {
 			return null;

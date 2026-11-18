@@ -38,14 +38,22 @@ tasks.named('buildExtension', Zip) {
     archiveBaseName = "BinaryRat-ghidra-${version}-${osDir}"
     preserveFileTimestamps = false
     reproducibleFileOrder = true
-    def shippedScripts = ['BinaryRatExport.java', 'BinaryRatRecoverLayouts.java']
+    def shippedScripts = ['BinaryRatExport.java', 'BinaryRatRecoverLayouts.java',
+        'BinaryRatRecoverRtti.java', 'BinaryRatReviewLayout.java']
     eachFile { entry ->
+        if (entry.path.startsWith('BinaryRat/installed_scripts/')) {
+            entry.exclude()
+        }
         // The bridge package is loaded by Ghidra's ordinary Java script compiler.
         if (entry.path.startsWith('BinaryRat/ghidra_scripts/') &&
             !entry.path.startsWith('BinaryRat/ghidra_scripts/binaryrat/') &&
             !shippedScripts.contains(entry.name)) {
             entry.exclude()
         }
+    }
+    // This script imports the extension jar, so keep it separate from source-only scripts.
+    from(files('installed_scripts/BinaryRatReviewLayout.java')) {
+        into 'BinaryRat/ghidra_scripts'
     }
     from(engine) {
         into "BinaryRat/os/${osDir}"

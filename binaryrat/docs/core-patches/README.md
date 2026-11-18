@@ -1,6 +1,8 @@
 # Core patch ledger
 
-**Current Ghidra runtime/core patches: none.**
+## Runtime patches
+
+- [No-return analyzer candidate checks](no-return-candidate-checks.md)
 
 The new C++ project, Python package, headless script, corpus and CI are additive.
 The root README has a marked BinaryRat introduction; upstream LICENSE/NOTICE are

@@ -141,15 +141,50 @@ The report uses an executable SHA-256 identity. Variable accesses appear as
 separate bounded ranges, while exact offsets drive field proposals. The
 completed file is published without replacing an existing report.
 
-Opt in with `FOLLOW_DEPTH=1` to collect evidence from eligible direct callees
-that receive the selected object base unchanged. This bounded pass checks the
-calling convention and register storage and requires the p-code target to match
-the instruction's single decoded direct target. It keeps the call site and
-callee instruction in the report.
+Set `FOLLOW_DEPTH` to 1 through 4 to collect evidence from eligible direct
+callees that receive the selected object base unchanged. The pass checks calling
+convention and register storage and requires the p-code target to match the
+instruction's single decoded direct target. It visits each verified callee once,
+keeps all equally short incoming call paths, and bounds the total decompiles,
+p-code operations, and evidence. At depths above 1 the call records include the
+caller and hop for reconstruction.
+
+`union_candidates` highlights exact loads at the same offset whose independently
+observed consumers interpret the bytes as integers and floating-point values.
+Each view points to the load and the typed operation. The candidate captures
+shared storage, which a union or a byte reinterpretation can both produce. The
+ordinary field alternatives remain in the report. Evidence strength counts
+distinct supporting observations. [Confidence calibration](../docs/evidence/confidence-calibration.md)
 
 For example, select `name:read_packed` and parameter `0` in the stripped C corpus.
 The verifier checks the output against separately read DWARF or PDB. [Corpus and
 accuracy checks](../corpus/README.md)
+
+### Read-only C++ RTTI
+
+Run `BinaryRatRecoverRtti.java OUTPUT_JSON` as a headless postScript after
+auto-analysis. The report records class names, direct bases, virtual inheritance,
+and validated vtable address points and slots. It retains the address of the
+metadata that supports each finding. The collector validates Itanium ELF and
+MSVC PE64 metadata on supported architectures and bounds the amount of scanned
+memory and reported evidence. [RTTI regression](../benchmarks/verify_rtti.py)
+
+### Reviewed structure creation
+
+Use the installed extension on a saved local Program. Run
+`BinaryRatReviewLayout.java preview REPORT STRUCTURE_NAME` as a headless
+postScript with `-process PROGRAM -noanalysis`. Review the field extents and
+cited instructions, then pass the printed approval code to
+`BinaryRatReviewLayout.java accept REPORT STRUCTURE_NAME APPROVAL_CODE`.
+Acceptance uses a writable headless processing run. Check the creation message
+and Ghidra's save result for persistence.
+
+The approval covers the report bytes, exact destination, and current state of
+the cited function bodies. Acceptance creates a fresh structure under
+`/BinaryRat/Reviewed`, with opaque byte-width components and provenance in
+one native undoable transaction. It rejects overlaps, variable-offset evidence,
+and existing destination names. This action creates the type for later use
+in the project.
 
 ## Scheduled decompilation
 

@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the actual C++ process, persistence, validation, and recovery."""
+from collections import Counter, defaultdict
 import json
 from pathlib import Path
 import queue
+import random
 import subprocess
 import sys
 import tempfile
@@ -99,6 +101,70 @@ class ProtocolTests(unittest.TestCase):
             response = self.run_requests(root, [dict(id="overflow", op="types.recover",
                                                     observations=[observation])])[0]
         self.assertFalse(response["ok"])
+
+    def test_union_candidates_retain_typed_access_provenance(self):
+        access = dict(object_id="object", offset=12, object_start_known=True)
+        integer = dict(access, width=4, evidence_id="int-load", storage_view="integer")
+        floating = dict(access, width=8, evidence_id="float-load", storage_view="floating_point")
+        with tempfile.TemporaryDirectory() as root:
+            response, invalid = self.run_requests(root, [
+                dict(id="typed", op="types.recover", observations=[floating, integer]),
+                dict(id="invalid", op="types.recover",
+                     observations=[dict(integer, storage_view="unknown")]),
+            ])
+        self.assertTrue(response["ok"], response)
+        candidate, = response["result"]["layouts"][0]["union_candidates"]
+        self.assertEqual(candidate["offset"], 12)
+        self.assertEqual(candidate["views"], [
+            dict(kind="integer", width=4, evidence_ids=["int-load"]),
+            dict(kind="floating_point", width=8, evidence_ids=["float-load"]),
+        ])
+        self.assertFalse(invalid["ok"])
+
+    def test_seeded_union_candidate_aggregation(self):
+        randomizer = random.Random(0xB17A7)
+        requests = []
+        expected = []
+        supported = {"integer": (1, 2, 4, 8), "floating_point": (4, 8)}
+        for index in range(320):
+            observations = []
+            slots = defaultdict(lambda: defaultdict(set))
+            for _ in range(randomizer.randrange(1, 33)):
+                obj = randomizer.choice(("a", "b", ""))
+                offset = randomizer.choice((-1, 0, 2, 8, 32))
+                width = randomizer.choice((0, 1, 2, 4, 8, 16))
+                identity = randomizer.choice(("", "a", "b", "c", f"unique-{len(observations)}"))
+                kind = randomizer.choice(tuple(supported))
+                known = randomizer.randrange(5) != 0
+                stride = randomizer.choice((None, None, None, 0, 8))
+                observations.append(dict(object_id=obj, offset=offset, width=width, evidence_id=identity,
+                                         storage_view=kind, object_start_known=known, stride=stride))
+                if (obj and identity and known and stride is None and
+                        0 <= offset <= 32 - width and width in supported[kind]):
+                    slots[obj, offset][kind, width].add(identity)
+            candidates = []
+            for (obj, offset), alternatives in sorted(slots.items()):
+                counts = Counter(identity for identities in alternatives.values() for identity in identities)
+                views = [(kind, width, sorted(identity for identity in identities if counts[identity] == 1))
+                         for (kind, width), identities in alternatives.items()]
+                views = sorted((view for view in views if view[2]))
+                if {kind for kind, _, _ in views} == set(supported):
+                    candidates.append((obj, offset, views))
+            expected.append(candidates)
+            randomizer.shuffle(observations)
+            requests.append(dict(id=str(index), op="types.recover", maximum_extent=32,
+                                 observations=observations))
+        self.assertTrue(any(expected), "fixture generated no candidate cases")
+        with tempfile.TemporaryDirectory() as root:
+            responses = self.run_requests(root, requests)
+        for response, candidates in zip(responses, expected, strict=True):
+            self.assertTrue(response["ok"], response)
+            actual = [(layout["object_id"], candidate["offset"],
+                       sorted((view["kind"], view["width"], view["evidence_ids"])
+                              for view in candidate["views"]))
+                      for layout in response["result"]["layouts"]
+                      for candidate in layout["union_candidates"]]
+            self.assertEqual(actual, candidates)
 
 
 class Session:

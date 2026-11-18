@@ -4,15 +4,46 @@
 
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import platform
+import re
 import tempfile
 from zipfile import ZipFile
 
 from verify_ghidra import PROJECT, check_persistent_cache, measured_run
 from verify_type_accuracy import json_file, verified_fields
+
+
+def verify_review_cli(project: list[str], report: Path, output: Path, environment: dict[str, str]) -> dict:
+    name = "BinaryRatCliReview"
+    preview_log = output / "review-preview.log"
+    preview = measured_run(project + ["-postScript", "BinaryRatReviewLayout.java", "preview",
+                                      str(report), name], preview_log, 300, environment)
+    preview_text = preview_log.read_text(encoding="utf-8", errors="replace")
+    codes = re.findall(r'"approvalCode"\s*:\s*"([a-f0-9]{64})"', preview_text)
+    if (preview["returncode"] or len(codes) != 1 or "REPORT SCRIPT ERROR" in preview_text or
+            "Imported layout evidence for analyst review" not in preview_text):
+        raise RuntimeError(f"packaged layout preview failed (see {preview_log})")
+
+    accept_log = output / "review-accept.log"
+    accepted = measured_run(project + ["-postScript", "BinaryRatReviewLayout.java", "accept",
+                                       str(report), name, codes[0]], accept_log, 300, environment)
+    marker = "BINARYRAT_REVIEWED_LAYOUT_CREATED /BinaryRat/Reviewed/" + name
+    accept_text = accept_log.read_text(encoding="utf-8", errors="replace")
+    if (accepted["returncode"] or marker not in accept_text or "REPORT SCRIPT ERROR" in accept_text or
+            "Save succeeded for processed file:" not in accept_text):
+        raise RuntimeError(f"packaged layout acceptance failed (see {accept_log})")
+    reopen_log = output / "review-reopen.log"
+    measured_run(project + ["-postScript", "BinaryRatReviewLayout.java", "preview", str(report),
+                            name], reopen_log, 300, environment)
+    if "The destination type or its prior review record already exists" not in reopen_log.read_text(
+            encoding="utf-8", errors="replace"):
+        raise RuntimeError(f"reviewed layout did not survive project reopen (see {reopen_log})")
+    return {"passed": True, "preview_log": preview_log.name, "accept_log": accept_log.name,
+            "reopen_log": reopen_log.name}
 
 
 def main() -> None:
@@ -34,11 +65,19 @@ def main() -> None:
         names = set(package.namelist())
         if (len(names) != len(package.namelist()) or engine_entry not in names or
                 "BinaryRat/Module.manifest" not in names or
+                "BinaryRat/ghidra_scripts/binaryrat/RttiEvidence.java" not in names or
+                any(name.startswith("BinaryRat/installed_scripts/") and name.endswith(".java")
+                    for name in names) or
                 {name for name in names if name.endswith(".java") and
                  name.count("/") == 2} != {
                      "BinaryRat/ghidra_scripts/BinaryRatExport.java",
-                     "BinaryRat/ghidra_scripts/BinaryRatRecoverLayouts.java"}):
+                     "BinaryRat/ghidra_scripts/BinaryRatRecoverLayouts.java",
+                     "BinaryRat/ghidra_scripts/BinaryRatRecoverRtti.java",
+                     "BinaryRat/ghidra_scripts/BinaryRatReviewLayout.java"}):
             raise RuntimeError("unexpected extension contents")
+        with ZipFile(io.BytesIO(package.read("BinaryRat/lib/BinaryRat.jar"))) as library:
+            if "binaryrat/writeback/ProtectedLayoutWriteBack.class" not in library.namelist():
+                raise RuntimeError("extension is missing the protected layout write-back service")
         for name in ("LICENSE", "NOTICE"):
             if package.read(f"BinaryRat/{name}") != (PROJECT / name).read_bytes():
                 raise RuntimeError(f"missing or altered extension {name}")
@@ -62,6 +101,7 @@ def main() -> None:
     headless = args.ghidra.resolve() / "support" / (
         "analyzeHeadless.bat" if windows else "analyzeHeadless")
     install_scripts = Path(__file__).resolve().parent / "ghidra_scripts"
+    writeback_scripts = Path(__file__).resolve().parent / "writeback_scripts"
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     report_path = output / "report.json"
@@ -91,20 +131,41 @@ def main() -> None:
         proof = check_persistent_cache(headless, fixture, None, "installed", output, 2, 300,
                                        environment)
         layout_proof = None
+        writeback_proof = None
         if artifact["id"].endswith("/types"):
             layout = output / "installed-layout.json"
             layout.unlink(missing_ok=True)
             layout_log = output / "installed-layout.log"
+            scripts = ["-postScript", "BinaryRatRecoverLayouts.java", str(layout), "name:read_packed",
+                       "0", "60"]
+            proof_args = [str(layout)]
+            if artifact["id"] == "gcc/O0/types":
+                forwarded = output / "installed-forwarded-layout.json"
+                forwarded.unlink(missing_ok=True)
+                scripts.extend(["-postScript", "BinaryRatRecoverLayouts.java", str(forwarded),
+                                "name:forward_packed", "0", "60", "1"])
+                proof_args.append(str(forwarded))
             extraction = measured_run(
-                [str(headless), str(root), "installed-layout", "-import", str(fixture), "-readOnly",
-                 "-postScript", "BinaryRatRecoverLayouts.java", str(layout), "name:read_packed",
-                 "0", "60", "-deleteProject"], layout_log, 300, environment)
-            if extraction["returncode"] or not layout.is_file():
+                [str(headless), str(root), "installed-layout", "-import", str(fixture), *scripts],
+                layout_log, 300, environment)
+            if extraction["returncode"] or any(not Path(file).is_file() for file in proof_args):
                 raise RuntimeError(f"packaged layout extractor did not complete (see {layout_log})")
             fields = verified_fields(json_file(layout), artifact)
             if {(field["offset"], field["width"]) for field in fields} != {(0, 1), (1, 4)}:
                 raise RuntimeError(f"packaged extractor did not recover the packed fields (see {layout_log})")
             layout_proof = {"passed": True, "fields": len(fields), "report": layout.name}
+            writeback_log = output / "protected-layout.log"
+            project = [str(headless), str(root), "installed-layout", "-process", fixture.name, "-noanalysis"]
+            writeback = measured_run(
+                [*project,
+                 "-scriptPath", str(writeback_scripts), "-postScript", "BinaryRatProtectedLayoutProof.java",
+                 *proof_args], writeback_log, 300, environment)
+            if (writeback["returncode"] or "BINARYRAT_PROTECTED_LAYOUT_PROOF_OK" not in
+                    writeback_log.read_text(encoding="utf-8", errors="replace")):
+                raise RuntimeError(f"packaged write-back service proof failed (see {writeback_log})")
+            writeback_proof = {"passed": True, "log": writeback_log.name,
+                               "wall_seconds": writeback["wall_seconds"],
+                               "cli": verify_review_cli(project, layout, output, environment)}
         # An explicit typo must be reported even if a bundled engine is available.
         rejected = root / "rejected.jsonl"
         reject_log = output / "invalid-override.log"
@@ -120,7 +181,8 @@ def main() -> None:
     report = {"passed": True, "platform": os_dir, "archive": archive.name,
               "engine_sha256": engine_sha256, "fixture": artifact["id"],
               "isolated_install": True, "explicit_invalid_override_rejected": True,
-              "stock_parity_and_persistence": proof, "packaged_layout_evidence": layout_proof}
+              "stock_parity_and_persistence": proof, "packaged_layout_evidence": layout_proof,
+              "protected_layout_writeback": writeback_proof}
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Installed BinaryRat extension passed stock parity and persistence: {report_path}")
 

@@ -136,6 +136,13 @@ json recover_types(const json& request) {
         observation.object_start_known = item.at("object_start_known").get<bool>();
         if (item.contains("stride") && !item.at("stride").is_null())
             observation.stride = unsigned_value(item.at("stride"), "stride");
+        if (item.contains("storage_view")) {
+            const auto view = string_field(item, "storage_view");
+            using binaryrat::types::StorageView;
+            if (view == "integer") observation.storage_view = StorageView::integer;
+            else if (view == "floating_point") observation.storage_view = StorageView::floating_point;
+            else throw std::invalid_argument("unsupported storage_view");
+        }
         observations.push_back(std::move(observation));
     }
     binaryrat::types::LayoutRecoveryOptions options;
@@ -146,6 +153,7 @@ json recover_types(const json& request) {
                    {"score_kind", "uncalibrated_evidence_strength"}};
     for (const auto& layout : recovered.layouts) {
         json fields = json::array();
+        json union_candidates = json::array();
         for (const auto& field : layout.fields) {
             fields.push_back({{"offset", field.offset}, {"width", field.width},
                 {"stride", field.stride ? json(*field.stride) : json(nullptr)},
@@ -154,7 +162,17 @@ json recover_types(const json& request) {
                 {"stride_conflict", field.stride_conflict},
                 {"stride_overlaps_access", field.stride_overlaps_access}});
         }
+        for (const auto& candidate : layout.union_candidates) {
+            json views = json::array();
+            for (const auto& view : candidate.views) {
+                views.push_back({{"kind", binaryrat::types::to_string(view.kind)},
+                    {"width", view.width}, {"evidence_ids", view.evidence_ids}});
+            }
+            union_candidates.push_back({{"offset", candidate.offset},
+                {"views", std::move(views)}, {"evidence_strength", candidate.evidence_strength}});
+        }
         result["layouts"].push_back({{"object_id", layout.object_id}, {"fields", fields},
+            {"union_candidates", std::move(union_candidates)},
             {"minimum_extent", layout.minimum_extent}, {"has_overlaps", layout.has_overlaps},
             {"has_stride_conflicts", layout.has_stride_conflicts},
             {"has_overlapping_stride", layout.has_overlapping_stride}});

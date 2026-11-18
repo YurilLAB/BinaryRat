@@ -12,6 +12,13 @@
 
 namespace binaryrat::types {
 
+enum class StorageView {
+    integer,
+    floating_point,
+};
+
+[[nodiscard]] std::string_view to_string(StorageView view) noexcept;
+
 // Preliminary layout evidence, not a recovered source-language type. An access
 // must be relative to a separately established object start; an interior or
 // unknown pointer base is insufficient evidence for a layout.
@@ -22,6 +29,8 @@ struct AccessObservation {
     std::optional<std::uint64_t> stride;
     std::string evidence_id;
     bool object_start_known{false};
+    // An exact load that reached a width-preserving typed operation.
+    std::optional<StorageView> storage_view{std::nullopt};
 };
 
 struct LayoutRecoveryOptions {
@@ -67,11 +76,26 @@ struct RecoveredField {
     }
 };
 
+struct UnionView {
+    StorageView kind;
+    std::uint64_t width;
+    std::vector<std::string> evidence_ids;
+};
+
+struct UnionCandidate {
+    std::uint64_t offset;
+    std::vector<UnionView> views;
+    double evidence_strength;
+};
+
 struct RecoveredLayout {
     std::string object_id;
     // Exact (offset, width) observations are grouped. Gaps are left unknown;
-    // overlapping fields are alternatives, never automatically made a union.
+    // overlapping fields remain separate alternatives.
     std::vector<RecoveredField> fields;
+    // Independently typed loads at the same start suggest a shared storage
+    // location. These candidates cannot establish a source-language union.
+    std::vector<UnionCandidate> union_candidates;
     // A lower bound only: neither an exact object size nor an array bound.
     std::uint64_t minimum_extent{0};
     bool has_overlaps{false};
@@ -86,8 +110,7 @@ struct LayoutRecoveryResult {
     std::vector<RejectedObservation> rejected;
 };
 
-// Pure evidence aggregation. Does not mutate observations, inspect a binary,
-// infer class/union semantics, or write to a Ghidra program database.
+// Pure evidence aggregation. Does not inspect a binary or write to a Program.
 [[nodiscard]] LayoutRecoveryResult recover_layouts(
     const std::vector<AccessObservation>& observations,
     LayoutRecoveryOptions options = {});

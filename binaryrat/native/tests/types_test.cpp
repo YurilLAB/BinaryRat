@@ -85,6 +85,59 @@ void same_offset_different_widths() {
     require(layout.fields[0].overlaps_other_fields &&
                 layout.fields[1].overlaps_other_fields,
             "equal-start overlaps not marked");
+    require(layout.union_candidates.empty(), "overlap alone invented a union candidate");
+}
+
+void typed_union_candidates() {
+    auto integer = access("object", 24, 4, "integer-use");
+    integer.storage_view = StorageView::integer;
+    auto floating = access("object", 24, 8, "float-use");
+    floating.storage_view = StorageView::floating_point;
+    const auto recovered = recover_layouts({floating, integer, floating});
+    const auto& layout = recovered.layouts.at(0);
+    require(layout.fields.size() == 2, "typed evidence replaced the layout fields");
+    const auto& candidate = layout.union_candidates.at(0);
+    require(layout.union_candidates.size() == 1 && candidate.offset == 24,
+            "same-slot typed loads did not create exactly one candidate");
+    require(candidate.views.size() == 2 &&
+                candidate.views[0].kind == StorageView::integer &&
+                candidate.views[0].width == 4 &&
+                candidate.views[0].evidence_ids == std::vector<std::string>{"integer-use"} &&
+                candidate.views[1].kind == StorageView::floating_point &&
+                candidate.views[1].width == 8 &&
+                candidate.views[1].evidence_ids == std::vector<std::string>{"float-use"} &&
+                std::abs(candidate.evidence_strength - 2.0 / 3.0) < 1e-12,
+            "union view order or distinct support incorrect");
+
+    floating.width = integer.width;
+    auto same_width = recover_layouts({integer, floating});
+    require(!same_width.layouts[0].has_overlaps &&
+                same_width.layouts[0].union_candidates.size() == 1,
+            "a shared slot of equal width lost its separate typed interpretations");
+    floating.evidence_id = integer.evidence_id;
+    require(recover_layouts({integer, floating}).layouts[0].union_candidates.empty(),
+            "two labels for one access supplied independent typed evidence");
+    auto another_integer = integer;
+    another_integer.evidence_id = "another-int";
+    auto another_float = floating;
+    another_float.evidence_id = "another-float";
+    const auto with_conflict = recover_layouts({integer, floating, another_integer, another_float});
+    const auto& resolved = with_conflict.layouts[0].union_candidates.at(0);
+    require(resolved.views[0].evidence_ids == std::vector<std::string>{"another-int"} &&
+                resolved.views[1].evidence_ids == std::vector<std::string>{"another-float"},
+            "conflicting evidence was retained alongside independent loads");
+    floating.evidence_id = "other";
+    floating.offset += 1;
+    require(recover_layouts({integer, floating}).layouts[0].union_candidates.empty(),
+            "overlap with a different start created a candidate");
+    floating.offset = integer.offset;
+    floating.stride = 8;
+    require(recover_layouts({integer, floating}).layouts[0].union_candidates.empty(),
+            "variable-offset evidence created an exact union candidate");
+    floating.stride.reset();
+    floating.width = 2;
+    require(recover_layouts({integer, floating}).layouts[0].union_candidates.empty(),
+            "an unsupported floating width created a candidate");
 }
 
 void stride_is_evidence_only() {
@@ -210,13 +263,14 @@ int main() {
         deduplicate_evidence();
         overlapping_alternatives();
         same_offset_different_widths();
+        typed_union_candidates();
         stride_is_evidence_only();
         conflicting_and_overlapping_strides();
         abstain_without_object_origin();
         invalid_observations();
         checked_arithmetic_and_limits();
         empty_and_permutation_stability();
-        std::cout << "type layout recovery: 10 test cases passed\n";
+        std::cout << "type layout recovery: 11 test cases passed\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
         std::cerr << "type layout recovery test failed: " << error.what() << '\n';

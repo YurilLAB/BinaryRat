@@ -102,38 +102,105 @@ def verified_fields(export: dict, artifact: dict, function: str = FUNCTION) -> l
     return fields
 
 
-def oracle_layout(debug: Path, artifact: dict, pdbutil: str) -> dict:
+def oracle_layout(debug: Path, artifact: dict, pdbutil: str, name: str = REFERENCE_TYPE) -> dict:
     if artifact["format"] == "ELF64":
-        return read_dwarf_layout(debug, REFERENCE_TYPE)
+        return read_dwarf_layout(debug, name)
     if artifact["format"] == "PE32+":
         from pdb_oracle import read_pdb_layout
-        return read_pdb_layout(debug, REFERENCE_TYPE, pdbutil)
+        return read_pdb_layout(debug, name, pdbutil)
     raise ValueError("unsupported corpus debug format")
+
+
+def run_layouts(launcher: Path, binary: Path, log: Path, timeout: int,
+                environment: dict[str, str], selections: list[tuple[Path, str, int]],
+                override_call: bool = False) -> dict:
+    scripts = [str(PROJECT / "binaryrat/bridge/ghidra_scripts")]
+    setup = []
+    if override_call:
+        _, function, _ = selections[0]
+        scripts.append(str(PROJECT / "binaryrat/corpus/ghidra_scripts"))
+        setup = ["-postScript", "BinaryRatOverrideLayoutCallFixture.java",
+                 function, FUNCTION, "read_alternate_layout"]
+    extraction = []
+    for output, function, depth in selections:
+        output.unlink(missing_ok=True)
+        extraction.extend(["-postScript", "BinaryRatRecoverLayouts.java", str(output),
+                           f"name:{function}", str(PARAMETER_INDEX), "60", str(depth)])
+    with tempfile.TemporaryDirectory(prefix="layout oracle ", dir=log.parent) as directory:
+        measured = measured_run([
+            str(launcher), directory, "fixture", "-import", str(binary), "-readOnly",
+            "-scriptPath", ";".join(scripts), *setup, *extraction, "-deleteProject",
+        ], log, timeout, environment)
+    log_text = log.read_text(encoding="utf-8", errors="replace")
+    if (measured["returncode"] or "REPORT SCRIPT ERROR" in log_text or
+            any(not output.is_file() for output, _, _ in selections) or
+            (override_call and "BINARYRAT_LAYOUT_CALL_OVERRIDE_SET" not in log_text)):
+        raise RuntimeError(f"Ghidra did not produce the selected layouts (see {log})")
+    return measured
 
 
 def collect_layout(launcher: Path, binary: Path, prefix: Path, timeout: int,
                    environment: dict[str, str], function: str,
                    follow_depth: int = 0, override_call: bool = False) -> tuple[dict, str, dict]:
     output, log = prefix.with_suffix(".layout.json"), prefix.with_suffix(".log")
-    output.unlink(missing_ok=True)
-    scripts = [str(PROJECT / "binaryrat/bridge/ghidra_scripts")]
-    setup = []
-    if override_call:
-        scripts.append(str(PROJECT / "binaryrat/corpus/ghidra_scripts"))
-        setup = ["-postScript", "BinaryRatOverrideLayoutCallFixture.java",
-                 function, FUNCTION, "read_alternate_layout"]
-    with tempfile.TemporaryDirectory(prefix="layout oracle ", dir=prefix.parent) as directory:
-        measured = measured_run([
-            str(launcher), directory, "fixture", "-import", str(binary), "-readOnly",
-            "-scriptPath", ";".join(scripts), *setup,
-            "-postScript", "BinaryRatRecoverLayouts.java", str(output), f"name:{function}",
-            str(PARAMETER_INDEX), "60", str(follow_depth), "-deleteProject",
-        ], log, timeout, environment)
-    log_text = log.read_text(encoding="utf-8", errors="replace")
-    if (measured["returncode"] or not output.is_file() or "REPORT SCRIPT ERROR" in log_text or
-            (override_call and "BINARYRAT_LAYOUT_CALL_OVERRIDE_SET" not in log_text)):
-        raise RuntimeError(f"Ghidra did not produce a layout for {function} (see {log})")
+    measured = run_layouts(launcher, binary, log, timeout, environment,
+                           [(output, function, follow_depth)], override_call)
     return json_file(output), output.name, measured
+
+
+def verify_union_views(export: dict, control: dict, artifact: dict,
+                       oracle: dict, control_oracle: dict) -> dict:
+    fields = verified_fields(export, artifact, "read_overlay_number")
+    control_fields = verified_fields(control, artifact, "read_separate_numbers")
+    if oracle["kind"] != "union" or control_oracle["kind"] != "struct":
+        raise ValueError("the union and its control must have different aggregate kinds")
+    metrics = score_fields(fields, oracle)
+    control_metrics = score_fields(control_fields, control_oracle)
+    if metrics["missing"] or metrics["unexpected"] or control_metrics["missing"] or control_metrics["unexpected"]:
+        raise RuntimeError("union or control fields do not match their separate debug oracles")
+    if export["revision"] != control["revision"]:
+        raise RuntimeError("collecting the union evidence modified the Program")
+
+    inferred, = export["layouts"]
+    candidate, = inferred["union_candidates"]
+    if any(layout["union_candidates"] for layout in control["layouts"]):
+        raise RuntimeError("separate integer and floating fields produced a union candidate")
+    views = candidate["views"]
+    if {view["kind"] for view in views} != {"integer", "floating_point"} or len(views) != 2:
+        raise RuntimeError("the union candidate is missing a typed member view")
+    if {(candidate["offset"], view["width"]) for view in views} != footprint(oracle["members"]):
+        raise RuntimeError("union candidate extent differs from the union oracle")
+
+    observations = {row["evidence_id"]: row for row in export["observations"]}
+    used = set()
+    for view in views:
+        for identity in view["evidence_ids"]:
+            row = observations[identity]
+            typed_use = row["typed_use"]
+            prefix = "FLOAT_" if view["kind"] == "floating_point" else "INT_"
+            if (identity in used or row["operation"] != "LOAD" or row["storage_view"] != view["kind"]
+                    or row["offset"] != candidate["offset"] or row["width"] != view["width"]
+                    or not typed_use["operation"].startswith(prefix)):
+                raise RuntimeError("union view lacks independent typed p-code evidence")
+            used.add(identity)
+    if len(used) < 2 or {row.get("storage_view") for row in control["observations"]} != {
+            "integer", "floating_point"}:
+        raise RuntimeError("union or control evidence is missing an independent typed load")
+    return metrics
+
+
+def check_union_views(launcher: Path, binary: Path, debug: Path, artifact: dict,
+                      prefix: Path, args: argparse.Namespace, environment: dict[str, str]) -> dict:
+    positive = prefix.with_suffix(".union.json")
+    negative = prefix.with_suffix(".union-control.json")
+    measured = run_layouts(launcher, binary, prefix.with_suffix(".union.log"), args.timeout,
+                           environment, [(positive, "read_overlay_number", 0),
+                                         (negative, "read_separate_numbers", 0)])
+    oracle = oracle_layout(debug, artifact, args.pdbutil, "OverlayNumber")
+    control_oracle = oracle_layout(debug, artifact, args.pdbutil, "SeparateNumberViews")
+    metrics = verify_union_views(json_file(positive), json_file(negative), artifact, oracle, control_oracle)
+    return {"passed": True, "evidence": positive.name, "control_evidence": negative.name,
+            "oracle": oracle, "metrics": metrics, "measured": measured}
 
 
 def check_forwarding(launcher: Path, binary: Path, artifact: dict, oracle: dict,
@@ -238,6 +305,12 @@ def evaluate(args: argparse.Namespace, report: dict) -> None:
             totals[index] += metrics[key]
         print(f"{artifact['id']} {oracle['kind']} footprint: "
               f"precision={metrics['precision']} recall={metrics['recall']}", flush=True)
+        if artifact["optimization"] in ("O0", "Od"):
+            union = check_union_views(launcher, binary, debug, artifact, prefix, args, environment)
+            report["union_views"][artifact["id"]] = union
+            totals = groups.setdefault("union", [0, 0, 0])
+            for index, key in enumerate(("matched", "unexpected", "missing")):
+                totals[index] += union["metrics"][key]
 
     report["by_reference_kind"] = {kind: rates(*counts) for kind, counts in groups.items()}
     if any(score["unexpected"] or score["missing"] for score in report["by_reference_kind"].values()):
@@ -259,10 +332,10 @@ def main() -> int:
         parser.error("timeout must be in [1, 3600] seconds")
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
-    report = {"schema_version": 1, "passed": False, "fixtures": [],
-              "scope": "Byte-range recovery for analyst-selected PackedRecord fixture roots",
+    report = {"schema_version": 1, "passed": False, "fixtures": [], "union_views": {},
+              "scope": "Byte ranges for analyst-selected packed structures and typed union views",
               "limitations": ["Field offsets and widths only. No source names or type semantics are scored.",
-                              "Only structure footprint accuracy is measured for this fixture.",
+                              "Union evaluation uses one source family and a separate-storage control.",
                               "Intervals shared by multiple declared members count once."]}
     try:
         evaluate(args, report)

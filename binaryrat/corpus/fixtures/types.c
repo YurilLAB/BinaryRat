@@ -18,6 +18,16 @@ typedef union Payload {
     uint8_t bytes[8];
 } Payload;
 
+typedef union OverlayNumber {
+    uint32_t word;
+    double real;
+} OverlayNumber;
+
+typedef struct SeparateNumberViews {
+    uint32_t word;
+    double real;
+} SeparateNumberViews;
+
 typedef struct Record {
     int32_t id;
     uint16_t flags;
@@ -72,6 +82,23 @@ BR_NOINLINE BR_LAYOUT_ANCHOR uint32_t forward_packed(const PackedRecord *record)
 /* Distinct layout used by the call-destination override regression. */
 BR_NOINLINE BR_LAYOUT_ANCHOR uint32_t read_alternate_layout(const Record *record) {
     return (uint32_t) record->samples[3];
+}
+
+/* Volatile keeps two scalar loads visible across compiler optimization levels. */
+BR_NOINLINE BR_LAYOUT_ANCHOR uint32_t read_overlay_number(
+        const volatile OverlayNumber *number, int floating_view) {
+    if (floating_view) {
+        return number->real < -4.25 ? UINT32_C(11) : UINT32_C(27);
+    }
+    return number->word ^ UINT32_C(0x6597db42);
+}
+
+BR_NOINLINE BR_LAYOUT_ANCHOR uint32_t read_separate_numbers(
+        const volatile SeparateNumberViews *number, int floating_view) {
+    if (floating_view) {
+        return number->real < -4.25 ? UINT32_C(11) : UINT32_C(27);
+    }
+    return number->word ^ UINT32_C(0x6597db42);
 }
 
 int main(void) {

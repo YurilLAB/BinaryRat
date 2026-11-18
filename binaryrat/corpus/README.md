@@ -56,3 +56,29 @@ for ground truth; do not assume hard-coded host offsets. Optimized debug
 information can omit source facts. Future scoring must report missing facts
 and denominator exclusions explicitly rather than silently treating them as
 correct recoveries.
+
+## C++ RTTI evidence
+
+Run `BinaryRatRecoverRtti.java OUTPUT_JSON` as a headless postScript on a
+Ghidra 12.2 Program. The script reports ABI-encoded class names, direct bases,
+virtual-base flags, known offsets, and vtable address points with their first
+executable slot. Each record carries the metadata address that supports it.
+Virtual bases keep their ABI displacement fields and have no fixed object offset.
+
+The collector covers little-endian x86-64 and AArch64. Itanium ELF needs applied
+absolute relocations to the runtime type-info vtables. MSVC PE32+ needs DIR64
+relocations, revision-1 complete object locators, and valid hierarchy descriptors.
+Table results describe address points with executable first slots and can include
+construction tables. The collector stops at 200,000 relocation visits, 1,024
+classes, 16,384 total base records, or 4,096 tables. It bounds hierarchy depth
+and checks the Program revision before publishing a new file.
+
+```sh
+python binaryrat/benchmarks/verify_rtti.py --ghidra /path/to/ghidra_12.2_PUBLIC \
+  --corpus build/corpus/manifest.json --output build/ghidra-report/rtti
+```
+
+The verifier compares the stripped C++ fixture against its known single,
+multiple, and virtual inheritance. It also corrupts one RTTI field, checks
+stale and cancelled reads, and compares saved project hashes before and after
+collection.

@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// Modified by BinaryRat to avoid redundant database reads during no-return discovery.
 package ghidra.app.plugin.core.analysis;
 
 import java.util.*;
@@ -20,7 +21,6 @@ import java.util.*;
 import ghidra.app.cmd.function.CreateFunctionCmd;
 import ghidra.app.plugin.core.clear.ClearFlowAndRepairCmd;
 import ghidra.app.services.*;
-import ghidra.app.tablechooser.AddressableRowObject;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.options.Options;
 import ghidra.program.model.address.*;
@@ -74,8 +74,6 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
 	private Program program;
 	private TaskMonitor monitor;
 
-	private List<NoReturnLocations> reasonList = null;
-
 	private Address lastGetNextFuncAddress = null;  // last addr used for getNextFunction()
 	private Address nextFunction = null;            // last return nextFunction
 	
@@ -105,7 +103,6 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
 		try {
 			this.program = prog;
 			this.monitor = monitor;
-			this.reasonList = new ArrayList<>();
 			lastGetNextFuncAddress = null;
 			
 			isX86 = checkForX86(program);
@@ -149,7 +146,6 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
 		finally {
 			this.program = null;
 			this.monitor = null;
-			this.reasonList = null;
 		}
 		return true;
 	}
@@ -362,7 +358,7 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
 			}
 
 			// check for indications the called instruction doesn't return
-			if (!checkNonReturningIndicators(inst, noReturnSet)) {
+			if (!checkNonReturningIndicators(inst)) {
 				continue;
 			}
 
@@ -383,6 +379,7 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
 				int count = 1;
 				ReferenceIterator refsTo = cp.getReferenceManager().getReferencesTo(target);
 				for (Reference reference : refsTo) {
+					monitor.checkCancelled();
 					if (!reference.getReferenceType().isCall()) {
 						continue;
 					}
@@ -399,7 +396,7 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
 						continue;
 					}
 					Instruction oinst = cp.getListing().getInstructionAt(fromAddress);
-					if (oinst == null || !checkNonReturningIndicators(oinst, noReturnSet)) {
+					if (oinst == null || !checkNonReturningIndicators(oinst)) {
 						continue;
 					}
 
@@ -415,9 +412,6 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
 				if (count < evidenceThresholdFunctions) {
 					// if function only calls non-returning functions
 					if (targetOnlyCallsNoReturn(cp, target, noReturnSet)) {
-						NoReturnLocations location =
-							new NoReturnLocations(target, null, "Calls only non-returing function");
-						reasonList.add(location);
 						noReturnSet.add(target);
 						continue;
 					}
@@ -532,95 +526,43 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
 	}
 
 	/**
-	 * Check for issues around a calling instruction that indicate the called function
-	 * may not return.  Example issues: calls refs right after, bad instruction, data after,
-	 * data ref after.
-	 * 
-	 * @param callInst - instruction to check
-	 * @param noReturnFunctions - set of functions that are already non-returning
-	 * 
-	 * @return true if there are indications the called function does not return
-	 * @throws CancelledException if monitor cancelled
+	 * Checks for non-returning evidence along the call's fall-through path.
 	 */
-	private boolean checkNonReturningIndicators(Instruction callInst, AddressSet noReturnFunctions)
-			throws CancelledException {
-
-		// check the address the instruction will return to
+	private boolean checkNonReturningIndicators(Instruction callInst) throws CancelledException {
 		Address fallThru = callInst.getFallThrough();
-
-		FunctionManager funcManager = program.getFunctionManager();
-		Function callingFunc = funcManager.getFunctionContaining(callInst.getMinAddress());
-
-		Address target = null;
-		Address[] flows = callInst.getFlows();
-		if (flows != null && flows.length > 0) {
-			target = flows[0];
-		}
-
-		// get the address of the next function after this instruction
+		Address callAddress = callInst.getMinAddress();
+		FunctionManager functionManager = program.getFunctionManager();
 		Address nextFuncAddr = getFunctionAfter(fallThru);
-
 		Listing listing = program.getListing();
+
 		while (fallThru != null) {
-			/* check for a function after this call */
+			monitor.checkCancelled();
 			if (nextFuncAddr != null && nextFuncAddr.equals(fallThru)) {
-				NoReturnLocations location =
-					new NoReturnLocations(target, fallThru, "Function defined after call");
-				reasonList.add(location);
-				return true;
-			}
-			/* code block model detects flow into data */
-			CodeUnit cu = listing.getCodeUnitAt(fallThru);
-			if (cu == null || cu instanceof Data) {
-				NoReturnLocations location = new NoReturnLocations(target, callInst.getMinAddress(),
-					"Falls into data after call");
-				reasonList.add(location);
-				return true;
-			}
-			Instruction instr = (Instruction) cu;
-
-			/* check for codeblock containing a function */
-			if (nextFuncAddr != null && cu.contains(nextFuncAddr)) {
-				NoReturnLocations location = new NoReturnLocations(target, fallThru,
-					"Function defined in instruction after call");
-				reasonList.add(location);
 				return true;
 			}
 
-			// check for inconsistent (data/call) references at fallthru after call
-			if (hasInconsistentRefsTo(fallThru, funcManager, callingFunc, target)) {
+			// A missing instruction at the exact fall-through covers undefined and defined data.
+			Instruction instr = listing.getInstructionAt(fallThru);
+			if (instr == null) {
+				return true;
+			}
+			if (nextFuncAddr != null && instr.contains(nextFuncAddr)) {
+				return true;
+			}
+			if (hasInconsistentRefsTo(fallThru, functionManager, callAddress)) {
 				return true;
 			}
 
-			// check for defined data after
-			Data data = listing.getDefinedDataAt(fallThru);
-			if (data != null) {
-				NoReturnLocations location =
-					new NoReturnLocations(target, fallThru, "Data after call");
-				reasonList.add(location);
+			// On x86, INT3 padding after a call indicates a non-returning call.
+			if (isX86 && instr.getMnemonicString().equals("INT3")) {
 				return true;
 			}
 
-			// on x86 INT3 after a call indicates a non-returning call from alignment padding
-			if (isX86) {
-				Instruction fallInstr = listing.getInstructionContaining(fallThru);
-				if (fallInstr != null &&  fallInstr.getMnemonicString().equals("INT3")) {
-					NoReturnLocations location =
-							new NoReturnLocations(target, fallThru, "INT3 interrupt after call");
-					reasonList.add(location);
-					return true;
-				}
-			}
-			
-			// get the next instruction in fallthru chain
-			fallThru = null;
-			if (instr.getFlowType().isFallthrough()) {
-				fallThru = instr.getFallThrough();
-			}
+			fallThru = instr.getFlowType().isFallthrough() ? instr.getFallThrough() : null;
 		}
 		return false;
 	}
-	
+
 	/**
 	 * Get all flows that have already been added to instruction.
 	 * If there are none and this is an indirect, get the function at
@@ -654,59 +596,35 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
 	}
 	
 	/**
-	 * Return true if fallThru address has inconsistent (data/call) references to it.
-	 * Adds the reason for non-returning reason to no return locations list.
-	 * 
-	 * @param addr location to check for read/write references
-	 * @param funcManager function manager
-	 * @param callingFunc function containing call that is being checked
-	 * @param calledAddr address being called
-	 * @return true if inconsistent references found in fallthru address chain after call
+	 * Checks for incoming call or data references that are inconsistent with fall-through.
 	 */
-	private boolean hasInconsistentRefsTo(Address addr, FunctionManager funcManager,
-			Function callingFunc, Address calledAddr) {
-		if (program.getReferenceManager().hasReferencesTo(addr)) {
-			ReferenceIterator refIterTo = program.getReferenceManager().getReferencesTo(addr);
-			while (refIterTo.hasNext()) {
-				Reference reference = refIterTo.next();
-				RefType refType = reference.getReferenceType();
-				if (refType.isRead() || refType.isWrite()) {
-					// Check function the reference is coming from
-					// is the same function as the call is in
-					//    This is a better indicator of non-returning
-					// Random references from another function could be bad disassembly
-					// or references.  This is especially true if there is only one
-					// example for a calling reference.
+	private boolean hasInconsistentRefsTo(Address addr, FunctionManager functionManager,
+			Address callAddress) throws CancelledException {
+		ReferenceManager references = program.getReferenceManager();
+		if (!references.hasReferencesTo(addr)) {
+			return false;
+		}
 
-					// TODO: if this is done before functions are created from calls
-					//       then this check will do nothing
-					if (callingFunc != null) {
-						Address fromAddress = reference.getFromAddress();
-						Function function =
-							funcManager.getFunctionContaining(fromAddress);
-						// The reference must come from an address within this function
-						// before this the function call (reference fromAddress)
-						// this should get rid of considering spurious/bad data references from other functions
-						if ((fromAddress.compareTo(addr) < 0) && callingFunc.equals(function)) {
-							NoReturnLocations location =
-								new NoReturnLocations(calledAddr, reference.getToAddress(),
-									"Data Reference from same function after call");
-							reasonList.add(location);
-							return true;
-						}
-					}
-					else {
-						// only consider references after call if the call location is not in a function
-						NoReturnLocations location = new NoReturnLocations(calledAddr,
-							reference.getToAddress(), "Data Reference after call");
-						reasonList.add(location);
+		Function callingFunction = null;
+		ReferenceIterator incoming = references.getReferencesTo(addr);
+		while (incoming.hasNext()) {
+			monitor.checkCancelled();
+			Reference reference = incoming.next();
+			RefType type = reference.getReferenceType();
+			if (type.isCall()) {
+				return true;
+			}
+			if (type.isRead() || type.isWrite()) {
+				// Only data references need to resolve the caller's containing function.
+				if (callingFunction == null) {
+					callingFunction = functionManager.getFunctionContaining(callAddress);
+					if (callingFunction == null) {
 						return true;
 					}
 				}
-				if (refType.isCall()) {
-					NoReturnLocations location = new NoReturnLocations(calledAddr,
-						reference.getToAddress(), "Call Reference after call");
-					reasonList.add(location);
+				Address from = reference.getFromAddress();
+				if (from.compareTo(addr) < 0 &&
+					callingFunction.equals(functionManager.getFunctionContaining(from))) {
 					return true;
 				}
 			}
@@ -882,42 +800,5 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
 		createBookmarksEnabled =
 			options.getBoolean(OPTION_NAME_CREATE_BOOKMARKS, createBookmarksEnabled);
 
-	}
-
-	class NoReturnLocations implements AddressableRowObject {
-		private Address addr;
-		private Address whyAddr;
-		private String explanation;
-
-		NoReturnLocations(Address suspectNoRetAddr, Address whyAddr, String explanation) {
-			this.addr = suspectNoRetAddr;
-			this.whyAddr = whyAddr;
-			this.explanation = explanation;
-
-			// log.appendMsg(toString());
-		}
-
-		@Override
-		public Address getAddress() {
-			return getNoReturnAddr();
-		}
-
-		public Address getNoReturnAddr() {
-			return addr;
-		}
-
-		public Address getWhyAddr() {
-			return whyAddr;
-		}
-
-		public String getExplanation() {
-			return explanation;
-		}
-
-		@Override
-		public String toString() {
-			return "NoReturn At:" + getAddress() + "  because: " + getExplanation() +
-				(whyAddr != null ? " at " + whyAddr : "");
-		}
 	}
 }

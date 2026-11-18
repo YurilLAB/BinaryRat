@@ -8,8 +8,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -40,8 +42,23 @@ import ghidra.program.model.symbol.SymbolType;
 public class BinaryRatRecoverLayouts extends GhidraScript {
 	private static final long MAXIMUM_FUNCTION_BYTES = 65_536;
 	private static final int MAXIMUM_SYMBOL_MATCHES = 4_096;
+	private static final int MAXIMUM_FOLLOW_DEPTH = 4;
 	private static final int MAXIMUM_FORWARDED_CALLEES = 4;
+	private static final int MAXIMUM_CALLEE_TARGETS = 12;
+	private static final int MAXIMUM_DECOMPILE_ATTEMPTS = 12;
+	private static final int MAXIMUM_FORWARDED_EDGES = 128;
+	private static final int MAXIMUM_TOTAL_OPS = (MAXIMUM_FORWARDED_CALLEES + 1) * LayoutEvidence.MAXIMUM_OPS;
+	private static final int NOT_VISITED = -1;
 	private long revision;
+
+	private record Visit(Address entry, int depth, List<LayoutEvidence.ForwardedCall> calls) {
+	}
+
+	private record CalleeInput(Address storage, int firstDepth) {
+	}
+
+	private record TraversalStats(int pcodeOps, int unresolved, int decompileAttempts) {
+	}
 
 	@Override
 	protected void run() throws Exception {
@@ -62,8 +79,8 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 		if (parameterIndex < 0 || timeout < 1 || timeout > 600) {
 			throw new IllegalArgumentException("parameter index must be nonnegative and timeout 1–600 seconds");
 		}
-		if (followDepth < 0 || followDepth > 1) {
-			throw new IllegalArgumentException("follow depth must be 0 or 1");
+		if (followDepth < 0 || followDepth > MAXIMUM_FOLLOW_DEPTH) {
+			throw new IllegalArgumentException("follow depth must be between 0 and " + MAXIMUM_FOLLOW_DEPTH);
 		}
 		Path output = Path.of(args[0]).toAbsolutePath().normalize();
 		if (Files.exists(output, LinkOption.NOFOLLOW_LINKS)) {
@@ -183,35 +200,11 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 			JsonArray observations = new JsonArray();
 			JsonArray variableAccesses = new JsonArray();
 			JsonArray calls = new JsonArray();
-			int pcodeOps;
-			int unresolved;
+			TraversalStats stats;
 			try (ScheduledDecompiler decompiler = new ScheduledDecompiler(engine, currentProgram,
 					this::configure, limits)) {
-				var root = LayoutEvidence.collect(currentProgram, readHighFunction(decompiler, function),
-					parameterIndex, followDepth > 0, monitor);
-				pcodeOps = root.pcodeOps();
-				unresolved = root.unresolvedAccesses();
-				appendObservations(observations, variableAccesses, root, object, entry, false);
-				for (var target : groupCallees(root.calls(), entry).entrySet()) {
-					checkCurrent();
-					Function callee = currentProgram.getFunctionManager().getFunctionAt(target.getKey());
-					if (!supportedFunction(callee)) {
-						continue;
-					}
-					HighFunction high = readHighFunction(decompiler, callee);
-					var accepted = target.getValue().stream().filter(call ->
-						LayoutEvidence.acceptsForwardedInput(currentProgram, high, call.argumentStorage())).toList();
-					if (accepted.isEmpty()) {
-						continue;
-					}
-					var capture = LayoutEvidence.collect(currentProgram, high, 0, false, monitor);
-					pcodeOps += capture.pcodeOps();
-					unresolved += capture.unresolvedAccesses();
-					appendObservations(observations, variableAccesses, capture, object, target.getKey(), true);
-					for (var call : accepted) {
-						calls.add(callRecord(call));
-					}
-				}
+				stats = collectLayouts(decompiler, function, parameterIndex, followDepth, object,
+					observations, variableAccesses, calls);
 			}
 			checkCurrent();
 			JsonObject request = new JsonObject();
@@ -231,14 +224,82 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 			report.addProperty("parameter_index", parameterIndex);
 			report.addProperty("assumption", "analyst_selected_object_start");
 			report.addProperty("analysis_mode", "read_only_layout_evidence");
-			report.addProperty("pcode_ops", pcodeOps);
-			report.addProperty("unresolved_accesses", unresolved);
+			report.addProperty("pcode_ops", stats.pcodeOps());
+			report.addProperty("unresolved_accesses", stats.unresolved());
 			report.addProperty("follow_depth", followDepth);
+			if (followDepth > 1) {
+				report.addProperty("decompile_attempts", stats.decompileAttempts());
+			}
 			report.add("forwarded_calls", calls);
 			report.add("observations", observations);
 			report.add("variable_accesses", variableAccesses);
 			return report;
 		}
+	}
+
+	private TraversalStats collectLayouts(ScheduledDecompiler decompiler, Function function,
+			int parameterIndex, int followDepth, String object, JsonArray observations,
+			JsonArray variableAccesses, JsonArray calls) throws Exception {
+		Address entry = function.getEntryPoint();
+		var root = LayoutEvidence.collect(currentProgram, readHighFunction(decompiler, function),
+			parameterIndex, followDepth > 0, monitor);
+		int pcodeOps = root.pcodeOps();
+		int unresolved = root.unresolvedAccesses();
+		appendObservations(observations, variableAccesses, root, object, entry, false);
+		var pending = new ArrayDeque<Visit>();
+		pending.add(new Visit(entry, 0, root.calls()));
+		Map<Address, CalleeInput> inputs = new HashMap<>();
+		int decompileAttempts = 1;
+		while (!pending.isEmpty()) {
+			var parent = pending.removeFirst();
+			int depth = parent.depth() + 1;
+			for (var target : groupCallees(parent, entry).entrySet()) {
+				checkCurrent();
+				Address address = target.getKey();
+				CalleeInput known = inputs.get(address);
+				if (known != null && known.firstDepth() != NOT_VISITED) {
+					// Keep alternate equally short paths, with one copy of each function's
+					// evidence. Omitting longer paths also keeps cycles out of provenance.
+					if (known.firstDepth() == depth) {
+						appendCalls(calls, parent, target.getValue(), known.storage(), followDepth);
+					}
+					continue;
+				}
+				if (known != null && target.getValue().stream().noneMatch(
+						call -> call.argumentStorage().equals(known.storage()))) {
+					continue;
+				}
+				if (known == null && inputs.size() >= MAXIMUM_CALLEE_TARGETS) {
+					throw new IOException("layout traversal exceeds the distinct callee limit");
+				}
+				Function callee = currentProgram.getFunctionManager().getFunctionAt(address);
+				if (!supportedFunction(callee)) {
+					inputs.put(address, new CalleeInput(null, NOT_VISITED));
+					continue;
+				}
+				if (++decompileAttempts > MAXIMUM_DECOMPILE_ATTEMPTS) {
+					throw new IOException("layout traversal exceeds the decompilation attempt limit");
+				}
+				HighFunction high = readHighFunction(decompiler, callee);
+				Address storage = LayoutEvidence.forwardedInputStorage(currentProgram, high);
+				if (!appendCalls(calls, parent, target.getValue(), storage, followDepth)) {
+					// A later caller may agree with the storage. Retain only its address,
+					// then decompile again if needed rather than pinning HighFunction state.
+					inputs.put(address, new CalleeInput(storage, NOT_VISITED));
+					continue;
+				}
+				var capture = LayoutEvidence.collect(currentProgram, high, 0, depth < followDepth,
+					monitor, MAXIMUM_TOTAL_OPS - pcodeOps);
+				pcodeOps += capture.pcodeOps();
+				unresolved += capture.unresolvedAccesses();
+				appendObservations(observations, variableAccesses, capture, object, address, true);
+				inputs.put(address, new CalleeInput(storage, depth));
+				if (!capture.calls().isEmpty()) {
+					pending.addLast(new Visit(address, depth, capture.calls()));
+				}
+			}
+		}
+		return new TraversalStats(pcodeOps, unresolved, decompileAttempts);
 	}
 
 	private HighFunction readHighFunction(ScheduledDecompiler decompiler, Function function)
@@ -257,12 +318,11 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 		return decompiled.getHighFunction();
 	}
 
-	private static Map<Address, List<LayoutEvidence.ForwardedCall>> groupCallees(
-			List<LayoutEvidence.ForwardedCall> calls, Address root) throws IOException {
+	private static Map<Address, List<LayoutEvidence.ForwardedCall>> groupCallees(Visit parent,
+			Address root) throws IOException {
 		Map<Address, List<LayoutEvidence.ForwardedCall>> byCallee = new LinkedHashMap<>();
-		for (var call : calls) {
-			// At depth 1 a self-call is the only cycle that would re-extract the root.
-			if (call.callee().equals(root)) {
+		for (var call : parent.calls()) {
+			if (call.callee().equals(root) || call.callee().equals(parent.entry())) {
 				continue;
 			}
 			byCallee.computeIfAbsent(call.callee(), ignored -> new ArrayList<>()).add(call);
@@ -297,6 +357,16 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 			}
 			else {
 				observation.addProperty("offset", access.offset());
+				var use = access.typedUse();
+				if (use != null) {
+					observation.addProperty("storage_view", use.kind());
+					JsonObject typedUse = new JsonObject();
+					typedUse.addProperty("address_space", use.address().getAddressSpace().getName());
+					typedUse.addProperty("address", hex(use.address()));
+					typedUse.addProperty("pcode_order", use.pcodeOrder());
+					typedUse.addProperty("operation", use.operation());
+					observation.add("typed_use", typedUse);
+				}
 			}
 			String prefix = forwarded ? object + "/callee/" + hex(function) : object;
 			observation.addProperty("evidence_id", prefix + "/" + site.getAddressSpace().getName() +
@@ -311,7 +381,24 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 		}
 	}
 
-	private static JsonObject callRecord(LayoutEvidence.ForwardedCall call) {
+	private static boolean appendCalls(JsonArray calls, Visit parent,
+			List<LayoutEvidence.ForwardedCall> candidates, Address storage, int followDepth)
+			throws IOException {
+		boolean accepted = false;
+		for (var call : candidates) {
+			if (!call.argumentStorage().equals(storage)) {
+				continue;
+			}
+			if (calls.size() >= MAXIMUM_FORWARDED_EDGES) {
+				throw new IOException("layout report exceeds the total forwarding call limit");
+			}
+			calls.add(callRecord(call, parent, followDepth));
+			accepted = true;
+		}
+		return accepted;
+	}
+
+	private static JsonObject callRecord(LayoutEvidence.ForwardedCall call, Visit parent, int followDepth) {
 		JsonObject record = new JsonObject();
 		record.addProperty("address_space", call.address().getAddressSpace().getName());
 		record.addProperty("address", hex(call.address()));
@@ -319,6 +406,11 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 		record.addProperty("callee_address_space", call.callee().getAddressSpace().getName());
 		record.addProperty("callee_address", hex(call.callee()));
 		record.addProperty("callee_parameter_index", 0);
+		if (followDepth > 1) {
+			record.addProperty("caller_address_space", parent.entry().getAddressSpace().getName());
+			record.addProperty("caller_address", hex(parent.entry()));
+			record.addProperty("hop", parent.depth() + 1);
+		}
 		return record;
 	}
 

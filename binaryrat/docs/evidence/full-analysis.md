@@ -58,6 +58,37 @@ prerequisite for evaluating a speedup.
 [Disassembly command](https://github.com/NationalSecurityAgency/ghidra/blob/Ghidra_12.2_build/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/disassemble/DisassembleCommand.java) ·
 [Instruction insertion](https://github.com/NationalSecurityAgency/ghidra/blob/Ghidra_12.2_build/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CodeManager.java#L408)
 
+### Longer LLVM trial
+
+A fresh stock import of the same LLVM digest used an 8 GiB heap, a 3-CPU
+Ghidra limit, and a 1,320-second analysis deadline. It ran for 1,353.168 seconds
+end to end and peaked at 8,862,904,320 bytes of sampled process-tree RSS.
+Ghidra logged 1,982 application error lines, including function-body repair
+overlaps, and exited with status 0 after reporting the analysis timeout.
+The profiler classified the result as failed.
+
+The largest task times recorded before interruption were Call-Fixup Installer
+(545.544 s), Non-Returning Functions - Discovered (423.770 s), and Disassemble
+(181.786 s). Other verification jobs shared the host. The results identify
+work to investigate and leave whole-program LLVM equivalence open. [Focused no-return benchmark](../core-patches/no-return-candidate-checks.md)
+
+### No-return candidate on the whole data-heavy control
+
+Two fresh stock imports and two fresh candidate imports completed with identical
+inventories on the 104,871,768-byte control. Each had 12 functions, 66
+instructions, and the inventory digest recorded above. The runs used a 2 GiB
+heap, a 2-CPU Ghidra limit, and alternating order. The candidate loaded the
+updated analyzer class in an otherwise stock installation.
+
+| Installation | Analysis wall range | Sampled peak process-tree RSS range |
+| --- | ---: | ---: |
+| Stock | 15.089–85.628 s | 1,011,892,224–1,056,477,184 bytes |
+| No-return candidate | 19.953–31.614 s | 859,295,744–1,055,428,608 bytes |
+
+The control validates equivalent completed work on a large mapped image.
+Host contention and the small instruction count make this comparison
+unsuitable for estimating an analysis speedup.
+
 ## Reproduce
 
 From the repository root, set `JAVA_HOME` to a JDK 25 installation. Use an
