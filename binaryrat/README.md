@@ -71,8 +71,9 @@ from exporter-phase times; it does not claim large-binary speedup.
 ## Remaining milestones
 
 See [architecture](docs/ARCHITECTURE.md). Interprocedural inference, RTTI/class
-recovery, calibrated confidence, protected transactional write-back and persistent
-reversal, automatic incremental invalidation, the persistent Ghidra daemon,
+recovery, calibrated confidence, protected analysis-coordinated write-back,
+native undo/redo integration and proposal-level revert, automatic incremental
+invalidation, the persistent Ghidra daemon,
 and 100 MB+ benchmark gates are not complete. Debug-oracle generation currently
 preserves ground truth; precision/recall scoring is a later implementation gate.
 

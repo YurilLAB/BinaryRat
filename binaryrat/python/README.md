@@ -2,7 +2,9 @@
 
 The standard-library client keeps the **native C++ engine** alive across requests.
 It does not keep Ghidra or a JVM alive, invoke PyGhidra, or mutate a Ghidra program.
-The Java bridge exports decompilation snapshots separately. These boundaries are
+The Java bridge exports versioned decompilation records separately, validating
+the Program modification number before and after reading; these are not database
+snapshots. These boundaries are
 intentional MVP limits; a persistent Ghidra owner remains future work.
 
 Install with `python -m pip install ./binaryrat/python`. Python 3.10+ is required.
@@ -16,7 +18,7 @@ for decompilation in load_export("functions.jsonl"):
 
 with EngineClient("./build/binaryrat-engine", cache_dir="./cache") as engine:
     print(engine.ping())
-    # Supply identities from an actual snapshot and the complete analysis options.
+    # Supply validated program-state identities and the complete analysis options.
     key = dict(schema_version=1, ghidra_version="12.2", program_id="example",
                revision=1, address_space="ram", address="1000",
                body_sha256="a" * 64, options_digest="b" * 64)

@@ -57,8 +57,9 @@ freshly imported program has been analyzed.
 - Work and result buffers are bounded by the chunk size, plus native worker
   memory. This is **not** an adaptive memory budget; size workers accordingly.
 - GUI use and active auto-analysis are rejected. The modification number is
-  checked during waits and between chunks. This detects concurrent changes and
-  aborts export, but is not snapshot isolation. The caller must enforce the
+  checked before reading, during waits, between chunks, and before publication.
+  This is optimistic validation: a detected change discards the export. It does
+  not provide a database snapshot. The caller must enforce the
   documented headless, no-concurrent-writer precondition.
 - JSONL is UTF-8 with LF newlines and deterministic ASCII JSON escaping. Raw
   decompiled C and prototype strings are preserved, including whitespace, after
