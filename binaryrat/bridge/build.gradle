@@ -40,8 +40,9 @@ tasks.named('buildExtension', Zip) {
     reproducibleFileOrder = true
     def checksum = destinationDirectory.file(archiveFileName.map { it + '.sha256' })
     outputs.file(checksum)
+    def installedScripts = ['BinaryRatReviewLayout.java', 'BinaryRatBrowseLayout.java']
     def shippedScripts = ['BinaryRatExport.java', 'BinaryRatRecoverLayouts.java',
-        'BinaryRatRecoverRtti.java', 'BinaryRatReviewLayout.java']
+        'BinaryRatRecoverRtti.java'] + installedScripts
     eachFile { entry ->
         if (entry.path.startsWith('BinaryRat/installed_scripts/')) {
             entry.exclude()
@@ -53,8 +54,8 @@ tasks.named('buildExtension', Zip) {
             entry.exclude()
         }
     }
-    // This script imports the extension jar, so keep it separate from source-only scripts.
-    from(files('installed_scripts/BinaryRatReviewLayout.java')) {
+    // These scripts import the extension JAR and run from the installed module.
+    from(fileTree('installed_scripts') { include installedScripts }) {
         into 'BinaryRat/ghidra_scripts'
     }
     from(engine) {

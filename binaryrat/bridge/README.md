@@ -57,6 +57,18 @@ stock decompiler process. CodeBrowser asks before replacing an export or its
 report. The current Program stays read-only to the exporter. A Program change
 detected during export stops publication.
 
+### Inspect a possible structure in CodeBrowser
+
+1. Install the extension and let auto-analysis finish. In **Window → Script Manager**, enable **In Tool** for `BinaryRatRecoverLayouts.java` and `BinaryRatBrowseLayout.java`.
+2. Put the cursor inside the function that uses the suspected structure. Choose **Tools → BinaryRat → Recover Layout at Cursor**, enter the zero-based parameter index, and choose a new JSON file. For a first look, keep the direct-call depth at zero. Increase it to include supported calls that receive the same object pointer.
+3. Open **Tools → BinaryRat → Browse Layout Evidence** and select that JSON file. Filter or sort the table by field offset, access width, function or operation. Double-click a row to navigate to its instruction in the Listing.
+
+For example, the corpus function `read_packed` reads a four-byte field starting at byte offset 1 of parameter 0. The corresponding table row takes you to the load, where you can inspect the surrounding instructions before deciding how to type the field. Overlapping widths remain visible as alternatives.
+
+The table shows exact field accesses. New reports fingerprint each cited instruction whose bytes Ghidra can read. The **Instruction bytes** column shows **Verified** for matching bytes and **Unrecorded** when a report lacks the fingerprint, including older reports. The p-code operation is the one recorded when the report was generated. Generate a fresh report to see how a changed signature or type affects recovery. Both actions leave the Program read-only.
+
+CI opens the installed extension in CodeBrowser, runs both actions on the packed-structure fixture and checks the resulting Listing address. The `gui-layout/report.json` artifact records the recovery and navigation times, including script compilation and dialogs. [Desktop verification](../benchmarks/verify_gui_layout.py)
+
 ## Run headless
 
 Use the official `Ghidra_12.2_build` distribution and JDK 25. Run this as a

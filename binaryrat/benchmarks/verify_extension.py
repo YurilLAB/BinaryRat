@@ -13,7 +13,8 @@ import re
 import tempfile
 from zipfile import ZipFile
 
-from verify_ghidra import PROJECT, check_persistent_cache, measured_run, sha256
+from verify_ghidra import PROJECT, check_persistent_cache, measured_run, saved_project_hashes, sha256
+from verify_layout_parser import verify_parser
 from verify_type_accuracy import json_file, verified_fields
 
 
@@ -86,14 +87,16 @@ def main() -> None:
                     for name in names) or
                 {name for name in names if name.endswith(".java") and
                  name.count("/") == 2} != {
+                     "BinaryRat/ghidra_scripts/BinaryRatBrowseLayout.java",
                      "BinaryRat/ghidra_scripts/BinaryRatExport.java",
                      "BinaryRat/ghidra_scripts/BinaryRatRecoverLayouts.java",
                      "BinaryRat/ghidra_scripts/BinaryRatRecoverRtti.java",
                      "BinaryRat/ghidra_scripts/BinaryRatReviewLayout.java"}):
             raise RuntimeError("unexpected extension contents")
         with ZipFile(io.BytesIO(package.read("BinaryRat/lib/BinaryRat.jar"))) as library:
-            if "binaryrat/writeback/ProtectedLayoutWriteBack.class" not in library.namelist():
-                raise RuntimeError("extension is missing the protected layout write-back service")
+            if not {"binaryrat/writeback/ProtectedLayoutWriteBack.class",
+                    "binaryrat/writeback/LayoutEvidenceBrowser.class"} <= set(library.namelist()):
+                raise RuntimeError("extension is missing a layout review service")
         for name in ("LICENSE", "NOTICE"):
             if package.read(f"BinaryRat/{name}") != (PROJECT / name).read_bytes():
                 raise RuntimeError(f"missing or altered extension {name}")
@@ -104,6 +107,7 @@ def main() -> None:
                 raise RuntimeError(f"altered bundled license {relative}")
         engine_sha256 = hashlib.sha256(package.read(engine_entry)).hexdigest()
 
+    parser_proof = verify_parser(args.ghidra, archive, output)
     manifest = json.loads(args.corpus.read_text(encoding="utf-8"))
     if manifest.get("status") != "passed" or not manifest.get("artifacts"):
         raise RuntimeError("corpus manifest is incomplete or failed")
@@ -143,6 +147,7 @@ def main() -> None:
         proof = check_persistent_cache(headless, fixture, None, "installed", output, 2, 300,
                                        environment)
         layout_proof = None
+        browse_proof = None
         writeback_proof = None
         if artifact["id"].endswith("/types"):
             layout = output / "installed-layout.json"
@@ -179,6 +184,29 @@ def main() -> None:
             layout_proof = {"passed": True, "fields": len(fields), "report": layout.name}
             writeback_log = output / "protected-layout.log"
             project = [str(headless), str(root), "installed-layout", "-process", fixture.name, "-noanalysis"]
+            before = saved_project_hashes(root, "installed-layout")
+            browse_log = output / "browse-layout.log"
+            browse = measured_run([
+                *project, "-readOnly", "-scriptPath", str(writeback_scripts),
+                "-postScript", "BinaryRatBrowseLayout.java",
+                "-postScript", "BinaryRatBrowseLayoutProof.java", *proof_args,
+            ], browse_log, 300, environment)
+            browse_text = browse_log.read_text(encoding="utf-8", errors="replace")
+            match = re.findall(r"BINARYRAT_BROWSE_LAYOUT_OK reports=(\d+) rows=(\d+)", browse_text)
+            if (browse["returncode"] or len(match) != 1 or int(match[0][0]) != len(proof_args) or
+                    int(match[0][1]) < len(proof_args) or
+                    "Browse Layout Evidence requires a CodeBrowser window." not in browse_text or
+                    "Processing read-only project file:" not in browse_text or
+                    "REPORT SCRIPT ERROR" in browse_text):
+                raise RuntimeError(f"packaged evidence browser proof failed (see {browse_log})")
+            after = saved_project_hashes(root, "installed-layout")
+            if before != after:
+                changed = sorted(name for name in before.keys() | after.keys()
+                                 if before.get(name) != after.get(name))
+                raise RuntimeError(f"browsing layout evidence changed saved project files: {changed}")
+            browse_proof = {"passed": True, "reports": len(proof_args), "rows": int(match[0][1]),
+                            "unchanged_project_files": len(before), "wall_seconds": browse["wall_seconds"],
+                            "log": browse_log.name}
             writeback = measured_run(
                 [*project,
                  "-scriptPath", str(writeback_scripts), "-postScript", "BinaryRatProtectedLayoutProof.java",
@@ -207,6 +235,7 @@ def main() -> None:
               "engine_sha256": engine_sha256, "fixture": artifact["id"],
               "isolated_install": True, "explicit_invalid_override_rejected": True,
               "stock_parity_and_persistence": proof, "packaged_layout_evidence": layout_proof,
+              "packaged_layout_browser": browse_proof, "layout_parser": parser_proof,
               "protected_layout_writeback": writeback_proof}
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Installed BinaryRat extension passed stock parity and persistence: {report_path}")

@@ -53,7 +53,8 @@ See the [engine protocol](protocol/README.md) and [Python service](python/README
   instruction evidence. Scores express uncalibrated support.
 - A Java adapter using Ghidra's existing `DecompInterface` and
   `DecompilerCallback`, with a strict raw comparator and stock-verified export.
-- An installable extension with the native engine and a CodeBrowser export action.
+- An installable extension with the native engine, CodeBrowser decompilation
+  exports, layout recovery at the cursor and a navigable field evidence table.
   [Build and install](bridge/README.md#install-the-extension)
 - Typed Python access to functions, references, datatypes, and decompilation in
   saved Programs. Separate local clients can share one read-only Ghidra JVM.

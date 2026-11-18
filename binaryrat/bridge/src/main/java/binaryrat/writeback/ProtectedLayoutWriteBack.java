@@ -2,14 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 package binaryrat.writeback;
 
+import static binaryrat.writeback.LayoutReport.*;
+
 import java.io.IOException;
-import java.io.StringReader;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.ByteBuffer;
-import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -19,27 +17,18 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
-import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.google.gson.JsonPrimitive;
-import com.google.gson.Strictness;
-import com.google.gson.stream.JsonReader;
-import com.google.gson.stream.JsonToken;
 
 import ghidra.app.plugin.core.analysis.AnalysisWorker;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.program.model.address.Address;
-import ghidra.program.model.address.AddressOutOfBoundsException;
 import ghidra.program.model.address.AddressRange;
 import ghidra.program.model.data.CategoryPath;
 import ghidra.program.model.data.DataType;
@@ -48,11 +37,9 @@ import ghidra.program.model.data.DataTypePath;
 import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.StructureDataType;
 import ghidra.program.model.data.Undefined;
-import ghidra.program.model.listing.FlowOverride;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.mem.MemoryAccessException;
-import ghidra.program.model.pcode.PcodeOp;
 import ghidra.util.SystemUtilities;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
@@ -71,10 +58,7 @@ public final class ProtectedLayoutWriteBack {
 	private static final int MAXIMUM_FIELDS = 128;
 	private static final int MAXIMUM_OBSERVATIONS = 4096;
 	private static final int MAXIMUM_EVIDENCE_PER_FIELD = 512;
-	private static final int MAXIMUM_FUNCTIONS = 32;
 	private static final int MAXIMUM_FUNCTION_BYTES = 65_536;
-	private static final int MAXIMUM_FOLLOW_DEPTH = 4;
-	private static final int MAXIMUM_FORWARDING_EDGES = 128;
 	private static final HexFormat HEX = HexFormat.of();
 	private static final ReentrantLock WRITE = new ReentrantLock();
 
@@ -136,34 +120,11 @@ public final class ProtectedLayoutWriteBack {
 		long revision = program.getModificationNumber();
 		DataTypePath destination = new DataTypePath(CATEGORY, name);
 		checkAvailable(program, destination);
-		byte[] input = readReport(report);
+		byte[] input = readReport(report, MAXIMUM_REPORT_BYTES);
 		String reportHash = HEX.formatHex(digest().digest(input));
-		JsonObject artifact = parseReport(input);
-		integer(artifact.get("schema_version"), 1, 1, "schema_version");
-		if (!"read_only_layout_evidence".equals(string(artifact.get("analysis_mode"), "analysis_mode")) ||
-				!"analyst_selected_object_start".equals(string(artifact.get("assumption"), "assumption"))) {
-			throw new IOException("Expected a BinaryRat read-only layout report");
-		}
-
-		String executableHash = program.getExecutableSHA256();
-		if (executableHash == null || !executableHash.matches("[0-9a-fA-F]{64}")) {
-			throw new IOException("Review requires a Program with an executable SHA-256");
-		}
-		String programId = "sha256:" + executableHash.toLowerCase(Locale.ROOT);
-		if (!programId.equals(string(artifact.get("program_id"), "program_id")) ||
-				!program.getLanguageID().toString().equals(
-					string(artifact.get("language_id"), "language_id")) ||
-				!program.getCompilerSpec().getCompilerSpecID().toString().equals(
-					string(artifact.get("compiler_spec_id"), "compiler_spec_id"))) {
-			throw new IOException("Layout report is from a different executable or architecture");
-		}
-
-		JsonObject functionJson = object(artifact.get("function"), "function");
-		String spaceName = string(functionJson.get("address_space"), "address_space");
-		String offsetText = string(functionJson.get("address"), "address");
-		Function function = findFunction(program, spaceName, offsetText);
-		String reportedName = string(functionJson.get("name"), "function name");
-		int parameter = integer(artifact.get("parameter_index"), 0, 255, "parameter_index");
+		JsonObject artifact = parseReport(input, monitor);
+		var target = target(program, artifact, 255);
+		Function function = target.function();
 		if (artifact.has("variable_accesses") &&
 				!array(artifact.get("variable_accesses"), "variable_accesses").isEmpty()) {
 			throw new IOException("Variable-offset accesses require further review");
@@ -173,7 +134,7 @@ public final class ProtectedLayoutWriteBack {
 			throw new IOException("Review requires exactly one layout");
 		}
 		JsonObject layout = object(layouts.get(0), "layout");
-		String objectId = programId + "/" + spaceName + "/" + offsetText + "/param/" + parameter;
+		String objectId = target.objectId();
 		if (!objectId.equals(string(layout.get("object_id"), "object_id"))) {
 			throw new IOException("Layout object id does not identify its declared target");
 		}
@@ -182,8 +143,8 @@ public final class ProtectedLayoutWriteBack {
 		List<Field> fields = fields(program, layout, extent, objectId,
 			array(artifact.get("observations"), "observations"), citedFunctions, monitor);
 		String code = approvalCode(program, destination, reportHash, citedFunctions, monitor);
-		Review review = new Review(program.getName(), function.getName(true), reportedName,
-			parameter, destination.getPath(), extent, fields, reportHash, code);
+		Review review = new Review(program.getName(), function.getName(true), target.reportedName(),
+			target.parameter(), destination.getPath(), extent, fields, reportHash, code);
 		monitor.checkCancelled();
 		checkRevision(program, revision);
 		return new Prepared(program, revision, destination, review);
@@ -343,116 +304,6 @@ public final class ProtectedLayoutWriteBack {
 		}
 	}
 
-	private static void checkRevision(Program program, long revision) throws IOException {
-		if (program.isClosed() || program.getModificationNumber() != revision) {
-			throw new IOException("The reviewed Program changed or closed; prepare a fresh review");
-		}
-	}
-
-	private static Function findFunction(Program program, String spaceName, String offsetText)
-			throws IOException {
-		Address entry = readAddress(program, spaceName, offsetText);
-		Function function = program.getFunctionManager().getFunctionAt(entry);
-		if (function == null || function.isExternal() || function.isThunk()) {
-			throw new IOException("Report target must identify a local, non-thunk function");
-		}
-		return function;
-	}
-
-	private static Address readAddress(Program program, String spaceName, String offsetText)
-			throws IOException {
-		if (!offsetText.matches("0|[1-9a-f][0-9a-f]{0,15}")) {
-			throw new IOException("Invalid layout report address");
-		}
-		var space = program.getAddressFactory().getAddressSpace(spaceName);
-		if (space == null || !space.isMemorySpace()) {
-			throw new IOException("Unknown function address space");
-		}
-		long offset = Long.parseUnsignedLong(offsetText, 16);
-		Address entry;
-		try {
-			entry = space.getAddressInThisSpaceOnly(offset);
-		}
-		catch (AddressOutOfBoundsException failure) {
-			throw new IOException("Function address exceeds its space", failure);
-		}
-		if (entry.getOffset() != offset) {
-			throw new IOException("Report address exceeds its selected space");
-		}
-		return entry;
-	}
-
-	/** Validate every reported transfer, including intermediate functions with no field accesses. */
-	private static Map<Address, Function> forwardingPath(Program program, JsonObject report,
-			Function root, TaskMonitor monitor) throws IOException, CancelledException {
-		int limit = integer(report.get("follow_depth"), 0, MAXIMUM_FOLLOW_DEPTH, "follow_depth");
-		JsonArray calls = array(report.get("forwarded_calls"), "forwarded_calls");
-		if (calls.size() > MAXIMUM_FORWARDING_EDGES || limit == 0 && !calls.isEmpty()) {
-			throw new IOException("Forwarded calls exceed the report's traversal limits");
-		}
-		Map<Address, Function> functions = new TreeMap<>();
-		functions.put(root.getEntryPoint(), root);
-		Map<Address, Integer> depths = new HashMap<>();
-		depths.put(root.getEntryPoint(), 0);
-		var reached = new HashSet<Address>();
-		reached.add(root.getEntryPoint());
-		for (var element : calls) {
-			monitor.checkCancelled();
-			JsonObject edge = object(element, "forwarded call");
-			int hop = limit == 1 ? 1 : integer(edge.get("hop"), 1, limit, "hop");
-			Function caller = limit == 1 ? root : findFunction(program,
-				string(edge.get("caller_address_space"), "caller address space"),
-				string(edge.get("caller_address"), "caller address"));
-			Function callee = findFunction(program,
-				string(edge.get("callee_address_space"), "callee address space"),
-				string(edge.get("callee_address"), "callee address"));
-			Address site = readAddress(program, string(edge.get("address_space"), "call address space"),
-				string(edge.get("address"), "call address"));
-			integer(edge.get("callee_parameter_index"), 0, 0, "callee_parameter_index");
-			if ((hop == 1 && !caller.equals(root)) ||
-					depths.computeIfAbsent(caller.getEntryPoint(), k -> hop - 1) != hop - 1 ||
-					depths.computeIfAbsent(callee.getEntryPoint(), k -> hop) != hop) {
-				throw new IOException("Inconsistent forwarded call path");
-			}
-			if (!caller.getBody().contains(site) || !currentDirectCall(program, site, callee)) {
-				throw new IOException("Forwarded call no longer matches the reviewed instruction");
-			}
-			functions.put(caller.getEntryPoint(), caller);
-			functions.put(callee.getEntryPoint(), callee);
-			if (functions.size() > MAXIMUM_FUNCTIONS) {
-				throw new IOException("Reviewed functions exceed the review limit");
-			}
-			reached.add(callee.getEntryPoint());
-		}
-		// Every non-root caller needs a validated incoming edge at the preceding depth.
-		if (!reached.containsAll(functions.keySet())) {
-			throw new IOException("Disconnected forwarded call path");
-		}
-		return functions;
-	}
-
-	private static boolean currentDirectCall(Program program, Address site, Function callee) {
-		var instruction = program.getListing().getInstructionAt(site);
-		if (instruction == null || instruction.getFlowOverride() != FlowOverride.NONE ||
-				!instruction.getFlowType().isCall() || instruction.getFlowType().isComputed() ||
-				callee.getCallFixup() != null) {
-			return false;
-		}
-		Address target = callee.getEntryPoint();
-		Address[] decoded = instruction.getDefaultFlows();
-		if (decoded == null || decoded.length != 1 || !target.equals(decoded[0])) {
-			return false;
-		}
-		// The effective p-code includes primary call-reference overrides. They can
-		// redirect a call without changing its bytes, prototype, or decoded flow.
-		for (PcodeOp op : instruction.getPcode(true)) {
-			if (op.getOpcode() == PcodeOp.CALL && target.equals(op.getInput(0).getAddress())) {
-				return true;
-			}
-		}
-		return false;
-	}
-
 	private static String approvalCode(Program program, DataTypePath destination, String reportHash,
 			Map<Address, Function> citedFunctions, TaskMonitor monitor) throws IOException, CancelledException {
 		var file = program.getDomainFile();
@@ -593,118 +444,15 @@ public final class ProtectedLayoutWriteBack {
 			string(observation.get("function_address"), "function_address"));
 		Address address = readAddress(program, string(observation.get("address_space"), "address_space"),
 			string(observation.get("address"), "address"));
-		if (!function.getBody().contains(address) || program.getListing().getInstructionAt(address) == null) {
+		var instruction = program.getListing().getInstructionAt(address);
+		if (!function.getBody().contains(address) || instruction == null) {
 			throw new IOException("Field evidence must cite a current instruction in its reported function");
 		}
+		verifyInstructionBytes(observation, instruction);
 		if (!citedFunctions.containsKey(function.getEntryPoint())) {
 			throw new IOException("Field evidence must cite the root or a verified forwarded function");
 		}
 		return new Evidence(id, function.getEntryPoint().toString(true), address.toString(true), operation);
-	}
-
-	private static byte[] readReport(Path path) throws IOException {
-		if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
-			throw new IOException("Choose a regular BinaryRat layout report file");
-		}
-		try (var input = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
-			byte[] bytes = input.readNBytes(MAXIMUM_REPORT_BYTES + 1);
-			if (bytes.length > MAXIMUM_REPORT_BYTES) {
-				throw new IOException("Layout report exceeds the review byte limit");
-			}
-			return bytes;
-		}
-	}
-
-	private static JsonObject parseReport(byte[] bytes) throws IOException {
-		String text = StandardCharsets.UTF_8.newDecoder()
-			.onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
-			.decode(ByteBuffer.wrap(bytes)).toString();
-		try (JsonReader reader = new JsonReader(new StringReader(text))) {
-			reader.setStrictness(Strictness.STRICT);
-			reader.setNestingLimit(32);
-			JsonObject report = object(readJson(reader), "report");
-			if (reader.peek() != JsonToken.END_DOCUMENT) {
-				throw new IOException("Extra content after layout report");
-			}
-			return report;
-		}
-	}
-
-	private static JsonElement readJson(JsonReader reader) throws IOException {
-		return switch (reader.peek()) {
-			case BEGIN_OBJECT -> {
-				JsonObject result = new JsonObject();
-				reader.beginObject();
-				while (reader.hasNext()) {
-					String name = reader.nextName();
-					if (result.has(name)) {
-						throw new IOException("Duplicate layout report property");
-					}
-					result.add(name, readJson(reader));
-				}
-				reader.endObject();
-				yield result;
-			}
-			case BEGIN_ARRAY -> {
-				JsonArray result = new JsonArray();
-				reader.beginArray();
-				while (reader.hasNext()) {
-					result.add(readJson(reader));
-				}
-				reader.endArray();
-				yield result;
-			}
-			case BOOLEAN -> new JsonPrimitive(reader.nextBoolean());
-			case NUMBER -> JsonParser.parseString(reader.nextString());
-			case STRING -> new JsonPrimitive(reader.nextString());
-			case NULL -> {
-				reader.nextNull();
-				yield JsonNull.INSTANCE;
-			}
-			default -> throw new IOException("Invalid layout report JSON value");
-		};
-	}
-
-	private static JsonObject object(JsonElement value, String name) throws IOException {
-		if (value == null || !value.isJsonObject()) {
-			throw new IOException("Expected a JSON object for " + name);
-		}
-		return value.getAsJsonObject();
-	}
-
-	private static JsonArray array(JsonElement value, String name) throws IOException {
-		if (value == null || !value.isJsonArray()) {
-			throw new IOException("Expected a JSON array for " + name);
-		}
-		return value.getAsJsonArray();
-	}
-
-	private static boolean flag(JsonElement value, String name) throws IOException {
-		if (!(value instanceof JsonPrimitive primitive) || !primitive.isBoolean()) {
-			throw new IOException("Expected a JSON boolean for " + name);
-		}
-		return primitive.getAsBoolean();
-	}
-
-	private static String string(JsonElement value, String name) throws IOException {
-		if (!(value instanceof JsonPrimitive primitive) || !primitive.isString() ||
-				primitive.getAsString().isBlank() || primitive.getAsString().length() > 1024) {
-			throw new IOException("Invalid string for " + name);
-		}
-		return primitive.getAsString();
-	}
-
-	private static int integer(JsonElement value, int minimum, int maximum, String name)
-			throws IOException {
-		if (!(value instanceof JsonPrimitive primitive) || !primitive.isNumber() ||
-				!primitive.getAsString().matches("0|[1-9][0-9]{0,8}")) {
-			throw new IOException("Expected an unsigned decimal integer for " + name);
-		}
-		int number = Integer.parseInt(primitive.getAsString());
-		if (number < minimum || number > maximum) {
-			throw new IOException("Out-of-range layout value for " + name);
-		}
-		return number;
 	}
 
 	private static MessageDigest digest() {

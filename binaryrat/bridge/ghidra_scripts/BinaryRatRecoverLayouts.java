@@ -1,8 +1,10 @@
 // Collect read-only layout evidence from a selected Ghidra function parameter.
 // @category BinaryRat
+// @menupath Tools.BinaryRat.Recover Layout at Cursor
 // Copyright 2026 YurilLAB
 // SPDX-License-Identifier: Apache-2.0
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -18,6 +20,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Stream;
 
+import javax.swing.JFileChooser;
+
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -25,20 +29,28 @@ import com.google.gson.JsonObject;
 import binaryrat.EngineClient;
 import binaryrat.LayoutEvidence;
 import binaryrat.ScheduledDecompiler;
+import generic.hash.HashUtilities;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.script.GhidraScript;
+import ghidra.app.services.CodeViewerService;
+import ghidra.app.services.ProgramManager;
+import ghidra.features.base.values.GhidraValuesMap;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolIterator;
 import ghidra.program.model.symbol.SymbolType;
+import ghidra.util.MessageType;
+import ghidra.util.Swing;
+import ghidra.util.exception.CancelledException;
 
-/** Headless entrypoint for the C++ layout evidence solver. It makes no Program edits. */
+/** CodeBrowser and headless entrypoints for the read-only C++ layout evidence solver. */
 public class BinaryRatRecoverLayouts extends GhidraScript {
 	private static final long MAXIMUM_FUNCTION_BYTES = 65_536;
 	private static final int MAXIMUM_SYMBOL_MATCHES = 4_096;
@@ -49,7 +61,12 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 	private static final int MAXIMUM_FORWARDED_EDGES = 128;
 	private static final int MAXIMUM_TOTAL_OPS = (MAXIMUM_FORWARDED_CALLEES + 1) * LayoutEvidence.MAXIMUM_OPS;
 	private static final int NOT_VISITED = -1;
+	private static final String PARAMETER = "Parameter index";
+	private static final String DEPTH = "Direct-call depth";
 	private long revision;
+
+	private record Request(Function function, int parameter, int timeout, int depth, Path output) {
+	}
 
 	private record Visit(Address entry, int depth, List<LayoutEvidence.ForwardedCall> calls) {
 	}
@@ -62,35 +79,24 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 
 	@Override
 	protected void run() throws Exception {
-		String[] args = getScriptArgs();
-		if (!isRunningHeadless() || currentProgram == null || args.length < 3 || args.length > 5) {
-			throw new IllegalArgumentException("Use as a headless postScript: " +
-				"BinaryRatRecoverLayouts.java OUTPUT_JSON ENTRY_HEX|name:FUNCTION " +
-				"PARAM_INDEX [TIMEOUT_SECONDS [FOLLOW_DEPTH]]");
+		if (currentProgram == null) {
+			throw new IllegalStateException("Open an analyzed Program before recovering layout evidence");
 		}
-		// Release GhidraScript's empty transaction before taking any analysis inputs.
+		// Release the script's empty transaction before reading the Program or prompting.
 		end(true);
-		if (AutoAnalysisManager.getAnalysisManager(currentProgram).isAnalyzing()) {
+		revision = currentProgram.getModificationNumber();
+		var analysis = AutoAnalysisManager.getAnalysisManager(currentProgram);
+		if (analysis.isAnalyzing()) {
 			throw new IllegalStateException("auto-analysis must finish before layout extraction");
 		}
-		int parameterIndex = Integer.parseInt(args[2]);
-		int timeout = args.length >= 4 ? Integer.parseInt(args[3]) : 30;
-		int followDepth = args.length == 5 ? Integer.parseInt(args[4]) : 0;
-		if (parameterIndex < 0 || timeout < 1 || timeout > 600) {
-			throw new IllegalArgumentException("parameter index must be nonnegative and timeout 1–600 seconds");
+		Request request = isRunningHeadless() ? headlessRequest() : desktopRequest();
+		checkCurrent();
+		if (analysis.isAnalyzing()) {
+			throw new IllegalStateException("auto-analysis must finish before layout extraction");
 		}
-		if (followDepth < 0 || followDepth > MAXIMUM_FOLLOW_DEPTH) {
-			throw new IllegalArgumentException("follow depth must be between 0 and " + MAXIMUM_FOLLOW_DEPTH);
-		}
-		Path output = Path.of(args[0]).toAbsolutePath().normalize();
+		Path output = request.output().toAbsolutePath().normalize();
 		if (Files.exists(output, LinkOption.NOFOLLOW_LINKS)) {
 			throw new IOException("layout evidence destination already exists: " + output);
-		}
-		revision = currentProgram.getModificationNumber();
-		checkCurrent();
-		Function function = selectFunction(args[1]);
-		if (!supportedFunction(function)) {
-			throw new IOException("select a local non-thunk function within the 64 KiB body limit");
 		}
 
 		String hash = currentProgram.getExecutableSHA256();
@@ -100,7 +106,8 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 		String programId = "sha256:" + hash.toLowerCase(Locale.ROOT);
 		Path workspace = Files.createTempDirectory(output.getParent(), ".binaryrat-layout-");
 		try {
-			JsonObject result = recover(workspace, function, parameterIndex, timeout, followDepth, programId);
+			JsonObject result = recover(workspace, request.function(), request.parameter(),
+				request.timeout(), request.depth(), programId);
 			Path staged = workspace.resolve("report.json");
 			String content = new GsonBuilder().serializeNulls().setPrettyPrinting().create().toJson(result);
 			Files.writeString(staged, content + "\n", StandardCharsets.UTF_8);
@@ -125,6 +132,97 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 			catch (IOException cleanup) {
 				printerr("Unable to clean up temporary layout workspace: " + cleanup.getMessage());
 			}
+		}
+	}
+
+	private Request headlessRequest() throws Exception {
+		String[] args = getScriptArgs();
+		if (args.length < 3 || args.length > 5) {
+			throw new IllegalArgumentException("Use as a headless postScript: " +
+				"BinaryRatRecoverLayouts.java OUTPUT_JSON ENTRY_HEX|name:FUNCTION " +
+				"PARAM_INDEX [TIMEOUT_SECONDS [FOLLOW_DEPTH]]");
+		}
+		int index = Integer.parseInt(args[2]);
+		int timeout = args.length >= 4 ? Integer.parseInt(args[3]) : 30;
+		int depth = args.length == 5 ? Integer.parseInt(args[4]) : 0;
+		if (timeout < 1 || timeout > 600) {
+			throw new IllegalArgumentException("timeout must be 1–600 seconds");
+		}
+		String error = parameterError(index, depth);
+		if (error != null) {
+			throw new IllegalArgumentException(error);
+		}
+		return new Request(requireSupported(selectFunction(args[1])), index, timeout, depth, Path.of(args[0]));
+	}
+
+	private Request desktopRequest() throws Exception {
+		Address cursor = currentAddress;
+		checkCursor(cursor);
+		Function function = requireSupported(getFunctionContaining(cursor));
+		Address entry = function.getEntryPoint();
+		GhidraValuesMap values = new GhidraValuesMap();
+		values.defineInt(PARAMETER, 0);
+		values.defineInt(DEPTH, 0);
+		values.setValidator((input, status) -> {
+			String error = input.hasValue(PARAMETER) && input.hasValue(DEPTH) ?
+				parameterError(input.getInt(PARAMETER), input.getInt(DEPTH)) : "Enter both numbers";
+			if (error != null) {
+				status.setStatusText(error, MessageType.ERROR);
+			}
+			return error == null;
+		});
+		setReusePreviousChoices(false);
+		askValues("Recover Layout at Cursor",
+			"Function " + function.getName(true) + " at " + entry +
+			"\nSelect a zero-based decompiler parameter index. Use depth 0 for this function only.",
+			values);
+		checkCursor(cursor);
+		int index = values.getInt(PARAMETER);
+		File selected = Swing.runNow(() -> {
+			JFileChooser chooser = new JFileChooser();
+			chooser.setDialogTitle("Save BinaryRat Layout Report");
+			chooser.setSelectedFile(new File("layout-" + hex(entry) + "-param-" +
+				index + ".json"));
+			return chooser.showSaveDialog(state.getTool().getToolFrame()) == JFileChooser.APPROVE_OPTION ?
+				chooser.getSelectedFile() : null;
+		});
+		if (selected == null) {
+			throw new CancelledException();
+		}
+		checkCursor(cursor);
+		return new Request(function, index, 30, values.getInt(DEPTH), selected.toPath());
+	}
+
+	private Function requireSupported(Function function) throws IOException {
+		if (!supportedFunction(function)) {
+			throw new IOException("select a local non-thunk function within the 64 KiB body limit");
+		}
+		return function;
+	}
+
+	private static String parameterError(int index, int depth) {
+		if (index < 0) {
+			return "parameter index must be nonnegative";
+		}
+		return depth < 0 || depth > MAXIMUM_FOLLOW_DEPTH ?
+			"follow depth must be between 0 and " + MAXIMUM_FOLLOW_DEPTH : null;
+	}
+
+	private void checkCursor(Address cursor) throws Exception {
+		checkCurrent();
+		// The script's state is a snapshot. Read the connected Listing on the EDT to
+		// detect a tab switch or cursor movement while either dialog was open.
+		Boolean matches = Swing.runNow(() -> {
+			var tool = state.getTool();
+			var viewer = tool == null ? null : tool.getService(CodeViewerService.class);
+			var manager = tool == null ? null : tool.getService(ProgramManager.class);
+			var location = viewer == null ? null : viewer.getCurrentLocation();
+			return cursor != null && manager != null && manager.getCurrentProgram() == currentProgram &&
+				location != null && location.getProgram() == currentProgram && cursor.equals(location.getAddress());
+		});
+		checkCurrent();
+		if (!Boolean.TRUE.equals(matches)) {
+			throw new IllegalStateException("Select the function in the active Listing and run recovery again");
 		}
 	}
 
@@ -365,10 +463,12 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 					typedUse.addProperty("address", hex(use.address()));
 					typedUse.addProperty("pcode_order", use.pcodeOrder());
 					typedUse.addProperty("operation", use.operation());
+					addInstructionDigest(typedUse, use.address());
 					observation.add("typed_use", typedUse);
 				}
 			}
 			String prefix = forwarded ? object + "/callee/" + hex(function) : object;
+			addInstructionDigest(observation, site);
 			observation.addProperty("evidence_id", prefix + "/" + site.getAddressSpace().getName() +
 				"/" + hex(site) + "/" + access.pcodeOrder());
 			observation.addProperty("function_address", hex(function));
@@ -381,7 +481,7 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 		}
 	}
 
-	private static boolean appendCalls(JsonArray calls, Visit parent,
+	private boolean appendCalls(JsonArray calls, Visit parent,
 			List<LayoutEvidence.ForwardedCall> candidates, Address storage, int followDepth)
 			throws IOException {
 		boolean accepted = false;
@@ -398,8 +498,9 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 		return accepted;
 	}
 
-	private static JsonObject callRecord(LayoutEvidence.ForwardedCall call, Visit parent, int followDepth) {
+	private JsonObject callRecord(LayoutEvidence.ForwardedCall call, Visit parent, int followDepth) {
 		JsonObject record = new JsonObject();
+		addInstructionDigest(record, call.address());
 		record.addProperty("address_space", call.address().getAddressSpace().getName());
 		record.addProperty("address", hex(call.address()));
 		record.addProperty("pcode_order", call.pcodeOrder());
@@ -412,6 +513,27 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 			record.addProperty("hop", parent.depth() + 1);
 		}
 		return record;
+	}
+
+	private void addInstructionDigest(JsonObject row, Address site) {
+		var instruction = currentProgram.getListing().getInstructionAt(site);
+		if (instruction == null) {
+			return;
+		}
+		int length = instruction.getParsedLength();
+		if (length <= 0 || length > MAXIMUM_FUNCTION_BYTES) {
+			return;
+		}
+		try {
+			// Parsed bytes include a tail that a Listing length override may hide.
+			byte[] bytes = instruction.getParsedBytes();
+			if (bytes.length == length) {
+				row.addProperty("instruction_sha256", HashUtilities.getHash("SHA-256", bytes));
+			}
+		}
+		catch (MemoryAccessException unavailable) {
+			// Some synthetic p-code sites have no readable instruction bytes.
+		}
 	}
 
 	private static long reserve(String name, long fallback) {
@@ -436,7 +558,7 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 
 	private void checkCurrent() throws Exception {
 		monitor.checkCancelled();
-		if (revision != currentProgram.getModificationNumber()) {
+		if (currentProgram.isClosed() || revision != currentProgram.getModificationNumber()) {
 			throw new IllegalStateException("Program changed during layout evidence extraction");
 		}
 	}

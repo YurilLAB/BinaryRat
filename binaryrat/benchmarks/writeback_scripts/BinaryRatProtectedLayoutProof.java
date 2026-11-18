@@ -80,6 +80,13 @@ public class BinaryRatProtectedLayoutProof extends GhidraScript {
 				.set(0, new JsonPrimitive("missing-evidence-id")), "matching observed access");
 			reject(input, artifact, altered -> altered.getAsJsonArray("observations")
 				.add(altered.getAsJsonArray("observations").get(0)), "Duplicate layout observation");
+			reject(input, artifact, altered -> {
+				var observation = altered.getAsJsonArray("observations").get(0).getAsJsonObject();
+				String hash = observation.get("instruction_sha256").getAsString();
+				observation.addProperty("instruction_sha256",
+					(hash.startsWith("0") ? "1" : "0") + hash.substring(1));
+			}, "Instruction bytes differ");
+			println("PASS protected preview rejected a changed instruction digest");
 			reject(input, artifact, altered -> altered.addProperty("program_id", "sha256:" + "0".repeat(64)),
 				"different executable");
 			Files.writeString(input, "{\"schema_version\":1," + Files.readString(report).substring(1));

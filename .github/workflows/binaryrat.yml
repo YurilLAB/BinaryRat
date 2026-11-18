@@ -78,7 +78,7 @@ jobs:
         name: Install compiler and AArch64 cross-toolchain matrix
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          sudo apt-get install -y clang gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu xvfb xauth
       - name: Build native C++ engine
         run: cmake -S binaryrat -B build/binaryrat
       - run: cmake --build build/binaryrat --config Release --parallel 2
@@ -155,6 +155,17 @@ jobs:
                           "--ghidra", os.environ["GHIDRA_INSTALL_DIR"], "--archive", str(archive),
                           "--corpus", "build/corpus/manifest.json",
                           "--output", "build/ghidra-report/extension"], check=True)
+      - name: Recover a layout at the CodeBrowser cursor and navigate to its evidence
+        shell: python
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          archive, = Path("binaryrat/bridge/dist").glob("BinaryRat-ghidra-*.zip")
+          display = [] if os.name == "nt" else ["xvfb-run", "-a"]
+          subprocess.run([*display, sys.executable, "binaryrat/benchmarks/verify_gui_layout.py",
+                          "--ghidra", "build/ghidra/ghidra_12.2_PUBLIC", "--archive", str(archive),
+                          "--corpus", "build/corpus/manifest.json", "--output", "build/ghidra-report/gui-layout"],
+                         check=True)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: binaryrat-extension-${{ matrix.os }}-${{ matrix.revision }}
