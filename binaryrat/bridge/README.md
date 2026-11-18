@@ -22,6 +22,18 @@ export GHIDRA_INSTALL_DIR=/path/to/ghidra_12.2_PUBLIC
 ```
 
 On Windows use `gradlew.bat` and the path to `binaryrat-engine.exe`.
+The build emits a SHA-256 sidecar next to the ZIP. After transferring both
+files, verify them from the destination directory. On Linux run
+`sha256sum --check <archive>.zip.sha256`. On Windows PowerShell, set
+`$zip` to the exact ZIP filename and run:
+
+```powershell
+$expected = ((Get-Content -LiteralPath "$zip.sha256" -Raw -ErrorAction Stop) -split ' ')[0]
+if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256 -ErrorAction Stop).Hash -ne $expected) {
+    throw "BinaryRat extension checksum mismatch"
+}
+```
+
 In the Ghidra project window, open **File → Install Extensions**, add the ZIP
 from `binaryrat/bridge/dist`, and restart Ghidra. The ZIP includes the matching
 native engine, the bridge sources, and their license notices.

@@ -38,6 +38,8 @@ tasks.named('buildExtension', Zip) {
     archiveBaseName = "BinaryRat-ghidra-${version}-${osDir}"
     preserveFileTimestamps = false
     reproducibleFileOrder = true
+    def checksum = destinationDirectory.file(archiveFileName.map { it + '.sha256' })
+    outputs.file(checksum)
     def shippedScripts = ['BinaryRatExport.java', 'BinaryRatRecoverLayouts.java',
         'BinaryRatRecoverRtti.java', 'BinaryRatReviewLayout.java']
     eachFile { entry ->
@@ -70,5 +72,12 @@ tasks.named('buildExtension', Zip) {
         if (!engine.isPresent() || !engine.get().isFile() || !engine.get().canExecute()) {
             throw new GradleException('Use -PbinaryratEngine=ABSOLUTE_PATH to a built host engine')
         }
+    }
+    doLast {
+        def zip = archiveFile.get().asFile
+        def digest = java.security.MessageDigest.getInstance('SHA-256')
+        zip.eachByte(64 * 1024) { buffer, length -> digest.update(buffer, 0, length) }
+        // GNU sha256sum binary mode; bind the digest to the portable basename.
+        checksum.get().asFile.setText("${HexFormat.of().formatHex(digest.digest())} *${zip.name}\n", 'UTF-8')
     }
 }

@@ -7,6 +7,33 @@ reads saved Ghidra programs through PyGhidra 3.2.0 and Ghidra 12.2.
 Install with `python -m pip install ./binaryrat/python`. Python 3.10+ is required.
 No runtime Python dependencies are required.
 
+## Analyst tools
+
+Install the Python package to get two read-only commands. Both run on saved
+BinaryRat reports without starting a JVM or opening the Ghidra project.
+
+```sh
+binaryrat-diff before.serial.jsonl after.serial.jsonl
+binaryrat-diff before.serial.jsonl after.serial.jsonl --json
+binaryrat-explain read_packed.json --offset 0x1
+```
+
+`binaryrat-diff` lists functions whose exported names, body ranges, byte
+digests, prototypes, C text or decompilation status changed. It matches on
+address space and entry offset and checks that each file describes a single
+revision of the same SHA-256-identified executable. For a useful comparison,
+keep the same load addresses and export selection. A function present in only
+one capture is reported as added or removed. The exit code is 0 for identical
+records, 1 for differences and 2 for invalid inputs.
+
+`binaryrat-explain` shows which recorded instructions support a proposed
+field. Supply a byte offset, or omit `--offset` to inspect the layout for the
+report’s root function and parameter. A report can include overlapping fields
+and bounded indexed accesses. Field support counts measure observed evidence.
+[Generate the input reports](../bridge/README.md#read-only-layout-evidence)
+
+## Python API
+
 ```python
 from binaryrat import EngineClient, load_export
 

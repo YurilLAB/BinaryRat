@@ -13,6 +13,7 @@ BinaryRat is an open-source reverse-engineering project for Linux and Windows, b
 - **Layout and C++ recovery** traces field and shared-storage evidence through direct calls and reports Itanium and MSVC class relationships and vtables.
 - **Reviewed type creation** lets an analyst approve a new structure with provenance and native Ghidra undo.
 - **Desktop and scripting access** provides exports from CodeBrowser and headless Ghidra, plus typed Python access to saved Programs through PyGhidra.
+- **BinaryRat analyst tools** compare two decompiler exports with `binaryrat-diff` and show which instructions support a proposed field with `binaryrat-explain`. Both work offline on saved reports.
 
 ## Project status
 
@@ -22,8 +23,8 @@ The no-return analyzer runs faster on a controlled call-heavy fixture. Whole-pro
 
 ## Guides
 
-- [Build and test BinaryRat](binaryrat/README.md)
-- [Install and use the Ghidra extension](binaryrat/bridge/README.md#install-the-extension)
+- [Build and test BinaryRat](binaryrat/README.md) · [Install the Ghidra extension](binaryrat/bridge/README.md#install-the-extension)
+- [Adopt BinaryRat in a Ghidra team](binaryrat/docs/ADOPTION.md) · [Contact the maintainer](.github/SUPPORT.md)
 
 ## License
 

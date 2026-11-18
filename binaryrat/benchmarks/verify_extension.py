@@ -13,8 +13,19 @@ import re
 import tempfile
 from zipfile import ZipFile
 
-from verify_ghidra import PROJECT, check_persistent_cache, measured_run
+from verify_ghidra import PROJECT, check_persistent_cache, measured_run, sha256
 from verify_type_accuracy import json_file, verified_fields
+
+
+def verify_archive_checksum(archive: Path) -> str:
+    digest = sha256(archive)
+    # Compare against the requested archive. Never open a path supplied by the sidecar.
+    expected = f"{digest} *{archive.name}".encode("utf-8")
+    with archive.with_suffix(archive.suffix + ".sha256").open("rb") as stream:
+        record = stream.read(len(expected) + 3)
+    if record not in (expected + b"\n", expected + b"\r\n"):
+        raise ValueError(f"Incorrect SHA-256 checksum or archive name for {archive.name}")
+    return digest
 
 
 def verify_review_cli(project: list[str], report: Path, output: Path, environment: dict[str, str]) -> dict:
@@ -61,6 +72,11 @@ def main() -> None:
     engine_name = "binaryrat-engine.exe" if windows else "binaryrat-engine"
     engine_entry = f"BinaryRat/os/{os_dir}/{engine_name}"
     archive = args.archive.resolve()
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    report_path = output / "report.json"
+    report_path.unlink(missing_ok=True)
+    archive_sha256 = verify_archive_checksum(archive)
     with ZipFile(archive) as package:
         names = set(package.namelist())
         if (len(names) != len(package.namelist()) or engine_entry not in names or
@@ -102,10 +118,6 @@ def main() -> None:
         "analyzeHeadless.bat" if windows else "analyzeHeadless")
     install_scripts = Path(__file__).resolve().parent / "ghidra_scripts"
     writeback_scripts = Path(__file__).resolve().parent / "writeback_scripts"
-    output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    report_path = output / "report.json"
-    report_path.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="extension test ", dir=output) as temporary:
         root = Path(temporary)
         settings = root / "settings"
@@ -191,6 +203,7 @@ def main() -> None:
             raise RuntimeError(f"explicit invalid engine override did not fail; see {reject_log}")
 
     report = {"passed": True, "platform": os_dir, "archive": archive.name,
+              "archive_sha256": archive_sha256,
               "engine_sha256": engine_sha256, "fixture": artifact["id"],
               "isolated_install": True, "explicit_invalid_override_rejected": True,
               "stock_parity_and_persistence": proof, "packaged_layout_evidence": layout_proof,

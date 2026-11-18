@@ -11,6 +11,10 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "yurillab"}]
 
+[project.scripts]
+binaryrat-diff = "binaryrat.export_diff:main"
+binaryrat-explain = "binaryrat.layout_explain:main"
+
 [project.optional-dependencies]
 live = ["pyghidra==3.2.0"]
 

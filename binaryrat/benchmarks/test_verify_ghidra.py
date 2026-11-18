@@ -47,6 +47,32 @@ def evidence(prefix: Path, log: Path, state: str, revision: int = 4) -> dict:
     return summary
 
 
+class SavedProjectTests(unittest.TestCase):
+    def test_only_rotating_index_backups_are_excluded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "example.gpr"
+            marker.touch()
+            idata = root / "example.rep/idata"
+            nested = idata / "00"
+            nested.mkdir(parents=True)
+            paths = [idata / name for name in ("~index.bak", "~journal.bak", "~index.dat")]
+            paths.append(nested / "~index.bak")
+            for path in paths:
+                path.write_bytes(b"original")
+            before = verify_ghidra.saved_project_hashes(root, "example")
+            self.assertEqual(before.keys(), {"example.gpr", "example.rep/idata/~index.dat",
+                                             "example.rep/idata/00/~index.bak"})
+            for path in paths[:2]:
+                path.write_bytes(b"rotated")
+            self.assertEqual(verify_ghidra.saved_project_hashes(root, "example"), before)
+            paths[2].write_bytes(b"changed")
+            self.assertNotEqual(verify_ghidra.saved_project_hashes(root, "example"), before)
+            marker.unlink()
+            with self.assertRaises(FileNotFoundError):
+                verify_ghidra.saved_project_hashes(root, "example")
+
+
 class ProcessMeasurementTests(unittest.TestCase):
     def test_denied_process_list_still_times_out_and_reaps_root(self):
         children = []

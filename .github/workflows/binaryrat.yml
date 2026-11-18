@@ -84,8 +84,11 @@ jobs:
       - run: cmake --build build/binaryrat --config Release --parallel 2
       - name: Native C++ tests
         run: ctest --test-dir build/binaryrat -C Release --output-on-failure
-      - name: Install Python API and pinned benchmark dependencies
-        run: python -m pip install -e binaryrat/python -r binaryrat/requirements-test.txt
+      - name: Build and install the offline analyst wheel and benchmark dependencies
+        run: |
+          python -m pip wheel --no-deps --wheel-dir build/wheelhouse ./binaryrat/python
+          python -m pip install --no-index --find-links build/wheelhouse binaryrat
+          python -m pip install -r binaryrat/requirements-test.txt
       - name: Python API and live native-client tests
         env:
           BINARYRAT_ENGINE: ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
@@ -155,7 +158,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: binaryrat-extension-${{ matrix.os }}-${{ matrix.revision }}
-          path: binaryrat/bridge/dist/BinaryRat-ghidra-*.zip
+          path: |
+            binaryrat/bridge/dist/BinaryRat-ghidra-*.zip
+            binaryrat/bridge/dist/BinaryRat-ghidra-*.zip.sha256
           if-no-files-found: error
       - if: runner.os == 'Linux'
         name: Verify exact stock output on the pinned LLVM 19 large-binary sample
@@ -173,6 +178,14 @@ jobs:
             --engine build/binaryrat/binaryrat-engine --output build/ghidra-report/llvm19
       - name: Stock versus BinaryRat Ghidra integration and benchmark evidence
         run: python binaryrat/benchmarks/verify_ghidra.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report --workers 1 2 4 --repetitions 1 --engine ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
+      - name: Verify BinaryRat analyst commands against real exports and layout evidence
+        run: python binaryrat/benchmarks/verify_analyst_tools.py --exports-dir build/ghidra-report --layout build/ghidra-report/extension/installed-layout.json --output build/ghidra-report/analyst-tools.json
+      - if: runner.os == 'Linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: binaryrat-analyst-wheel-${{ matrix.revision }}
+          path: build/wheelhouse/binaryrat-*-py3-none-any.whl
+          if-no-files-found: error
       - name: Reopen a cached Ghidra project after an offline edit
         env:
           BINARYRAT_ENGINE: ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
@@ -280,7 +293,7 @@ jobs:
         name: Install native source-build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bison flex zip unzip
+          sudo apt-get install -y build-essential bison flex zip unzip xvfb xauth
       - if: runner.os == 'Linux'
         name: Fetch upstream source-build dependencies
         run: ./gradlew -I gradle/support/fetchDependencies.gradle -DhideDownloadProgress -DnoEclipse --no-daemon
@@ -295,20 +308,43 @@ jobs:
         name: Build complete Ghidra fork using its pinned Gradle wrapper
         shell: pwsh
         run: .\gradlew.bat buildGhidra --parallel --max-workers=2 --no-daemon
+      - name: Prepare the official baseline and this commit's source distribution
+        shell: python
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          subprocess.run([sys.executable, "-m", "pip", "install", "-r", "binaryrat/requirements-test.txt"], check=True)
+          subprocess.run([sys.executable, "binaryrat/tools/fetch_ghidra.py", "--output", "build/ghidra-stock"], check=True)
+          archive, = Path("build/dist").glob("ghidra_*.zip")
+          dest = Path("build/source-install")
+          dest.mkdir()
+          extract = (["tar", "-xf", str(archive), "-C", str(dest)] if os.name == "nt"
+                     else ["unzip", "-q", str(archive), "-d", str(dest)])
+          subprocess.run(extract, check=True)
+          candidate, = dest.glob("ghidra_*")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              print(f"BINARYRAT_CANDIDATE={candidate.resolve()}", file=env)
+      - name: Open a saved Ghidra investigation and load an unchanged stock-built plugin
+        shell: python
+        env:
+          EXPECTED_REVISION: ${{ matrix.revision }}
+        run: |
+          import os, subprocess, sys
+          common = ["--stock-ghidra", "build/ghidra-stock/ghidra_12.2_PUBLIC",
+                    "--candidate-ghidra", os.environ["BINARYRAT_CANDIDATE"]]
+          subprocess.run([sys.executable, "binaryrat/benchmarks/verify_project_interop.py", *common,
+                          "--candidate-revision", os.environ["EXPECTED_REVISION"],
+                          "--output", "build/reports/project-interop"], check=True)
+          display = [] if os.name == "nt" else ["xvfb-run", "-a"]
+          subprocess.run([*display, sys.executable, "binaryrat/benchmarks/verify_plugin_compatibility.py",
+                          *common, "--candidate-revision", os.environ["EXPECTED_REVISION"],
+                          "--output", "build/reports/plugin-compatibility"], check=True)
       - if: runner.os == 'Linux'
         name: Compare stock and source-built no-return analyzer effects
         shell: bash
         run: |
-          python -m pip install -r binaryrat/requirements-test.txt
-          python binaryrat/tools/fetch_ghidra.py --output build/ghidra-stock
-          shopt -s nullglob
-          packages=(build/dist/ghidra_*.zip)
-          test "${#packages[@]}" -eq 1
-          unzip -q "${packages[0]}" -d build/no-return-build
-          candidates=(build/no-return-build/ghidra_*)
-          test "${#candidates[@]}" -eq 1
-          python binaryrat/benchmarks/verify_no_return.py --stock-ghidra build/ghidra-stock/ghidra_12.2_PUBLIC --candidate-ghidra "${candidates[0]}" --output build/reports/no-return-parity
-          python binaryrat/benchmarks/benchmark_no_return.py --stock-ghidra build/ghidra-stock/ghidra_12.2_PUBLIC --candidate-ghidra "${candidates[0]}" --output build/reports/no-return-timing --timeout 150
+          python binaryrat/benchmarks/verify_no_return.py --stock-ghidra build/ghidra-stock/ghidra_12.2_PUBLIC --candidate-ghidra "$BINARYRAT_CANDIDATE" --output build/reports/no-return-parity
+          python binaryrat/benchmarks/benchmark_no_return.py --stock-ghidra build/ghidra-stock/ghidra_12.2_PUBLIC --candidate-ghidra "$BINARYRAT_CANDIDATE" --output build/reports/no-return-timing --timeout 150
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

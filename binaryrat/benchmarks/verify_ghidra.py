@@ -39,6 +39,20 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def saved_project_hashes(directory: Path, project_name: str) -> dict[str, str]:
+    """Hash the project marker, live indices and all saved Program artifacts."""
+    repository = directory / f"{project_name}.rep"
+    marker = directory / f"{project_name}.gpr"
+    # IndexedLocalFileSystem can rotate these two backup copies on a read-only open.
+    backups = {repository / "idata" / name for name in ("~index.bak", "~journal.bak")}
+    files = {path.relative_to(directory).as_posix(): sha256(path)
+             for path in repository.rglob("*") if path.is_file() and path not in backups}
+    if not files:
+        raise ValueError(f"No saved project artifacts in {repository}")
+    files[marker.name] = sha256(marker)
+    return files
+
+
 def first_differing_byte(left: Path, right: Path) -> int | None:
     """Return the first raw byte offset, including a length-only difference."""
     with left.open("rb") as a, right.open("rb") as b:

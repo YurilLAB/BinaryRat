@@ -17,7 +17,7 @@ import tempfile
 from elftools.elf.constants import P_FLAGS
 from elftools.elf.elffile import ELFFile
 
-from verify_ghidra import PROJECT, measured_run
+from verify_ghidra import PROJECT, measured_run, saved_project_hashes
 from verify_large_llvm import launcher, sha256
 
 CORPUS_IDS = {
@@ -150,15 +150,6 @@ def writable_elf_names_copy(binary: Path, output: Path) -> None:
     output.write_bytes(image)
 
 
-def saved_project_hashes(project: Path) -> dict[str, str]:
-    names = [project / "rtti.gpr", *(project / "rtti.rep").rglob("*")]
-    # IndexedLocalFileSystem may rotate these backup copies on a read-only headless
-    # open. The live index and all saved Program artifacts must remain identical.
-    backups = {"rtti.rep/idata/~index.bak", "rtti.rep/idata/~journal.bak"}
-    return {name: sha256(path) for path in names if path.is_file()
-            if (name := path.relative_to(project).as_posix()) not in backups}
-
-
 def log_diagnostic(messages: str) -> str:
     lines = messages.splitlines()
     for expression in (r"\.java:\d+: error:", r"REPORT SCRIPT ERROR", r"\bERROR "):
@@ -197,9 +188,7 @@ def run_report(headless: Path, binary: Path, output: Path, timeout: int,
                 raise AssertionError(f"Ghidra failed to save the disposable RTTI project "
                                      f"with exit code {prepare['returncode']}. "
                                      f"{diagnostic}. See {import_log}")
-            before = saved_project_hashes(project)
-            if not any(name.startswith("rtti.rep/") for name in before):
-                raise AssertionError("saved RTTI project has no Program artifacts")
+            before = saved_project_hashes(project, "rtti")
             entry = ["-process", binary.name]
         else:
             entry = ["-import", str(binary)]
@@ -218,7 +207,7 @@ def run_report(headless: Path, binary: Path, output: Path, timeout: int,
                                  f"with Ghidra exit code {measured['returncode']}. "
                                  f"{log_diagnostic(messages)}. See {log}")
         if project_readback:
-            after = saved_project_hashes(project)
+            after = saved_project_hashes(project, "rtti")
             changed = sorted(name for name in before.keys() | after.keys()
                              if before.get(name) != after.get(name))
             if changed:
