@@ -4,6 +4,7 @@
 """Drive layout recovery and navigation in a real CodeBrowser on a disposable project."""
 
 import argparse
+from collections import deque
 import hashlib
 import json
 import os
@@ -21,7 +22,9 @@ HERE = Path(__file__).resolve().parent
 def run(command, log, env, timeout):
     result = measured_run(command, log, timeout, env)
     if result["returncode"]:
-        raise RuntimeError(f"GUI fixture command failed. See {log}")
+        with log.open(encoding="utf-8", errors="replace") as output:
+            tail = "".join(deque(output, maxlen=25))
+        raise RuntimeError(f"GUI fixture command failed. See {log}\n{tail}")
     return log.read_text(encoding="utf-8", errors="replace")
 
 
@@ -53,6 +56,9 @@ def main():
         cache.mkdir()
         env = os.environ | {"XDG_CONFIG_HOME": str(settings), "XDG_CACHE_HOME": str(cache)}
         env["JAVA_TOOL_OPTIONS"] = env.get("JAVA_TOOL_OPTIONS", "") + f' "-Duser.home={home}"'
+        if os.name == "nt":
+            # Ghidra's launch.bat sets -Duser.home from USERPROFILE after JAVA_TOOL_OPTIONS.
+            env["USERPROFILE"] = str(home)
         env.pop("BINARYRAT_ENGINE", None)
         env.pop("BINARYRAT_CACHE_DIR", None)
         prep = run([str(launcher), str(work), "layout", "-import", str(binary), "-max-cpu", "2",
@@ -62,8 +68,10 @@ def main():
         if "BinaryRat test extension installed" not in prep or "REPORT SCRIPT ERROR" in prep:
             raise ValueError("Extension installation or Program preparation failed")
 
-        installed, = settings.glob("*/*/Extensions/BinaryRat")
-        probe = installed.parent / "LayoutNavigationTest"
+        installed = list((settings / "ghidra").glob("*/Extensions/BinaryRat"))
+        if len(installed) != 1:
+            raise RuntimeError(f"Expected BinaryRat in the shared headless and GUI profile under {settings / 'ghidra'}")
+        probe = installed[0].parent / "LayoutNavigationTest"
         (probe / "lib").mkdir(parents=True)
         (probe / "Module.manifest").touch()
         (probe / "extension.properties").write_text("name=LayoutNavigationTest\nversion=12.2\n", encoding="utf-8")
