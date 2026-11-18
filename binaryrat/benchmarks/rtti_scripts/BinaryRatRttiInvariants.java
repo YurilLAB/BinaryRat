@@ -14,6 +14,14 @@ public class BinaryRatRttiInvariants extends GhidraScript {
 	@Override
 	protected void run() throws Exception {
 		end(true);
+		String[] arguments = getScriptArgs();
+		if (arguments.length != 0) {
+			var rodata = currentProgram.getMemory().getBlock(".rodata");
+			if (arguments.length != 1 || !arguments[0].equals("writable-rodata") ||
+					rodata == null || !rodata.isRead() || !rodata.isWrite()) {
+				throw new IllegalStateException("fixture .rodata must map to writable memory");
+			}
+		}
 		long revision = currentProgram.getModificationNumber();
 		String programId = "sha256:" + currentProgram.getExecutableSHA256();
 		var cancelled = new TaskMonitorAdapter(true);

@@ -14,6 +14,7 @@ import shutil
 import struct
 import tempfile
 
+from elftools.elf.constants import P_FLAGS
 from elftools.elf.elffile import ELFFile
 
 from verify_ghidra import PROJECT, measured_run
@@ -130,6 +131,25 @@ def malformed_copy(binary: Path, output: Path, report: dict, classes: dict) -> s
     return asset
 
 
+def writable_elf_names_copy(binary: Path, output: Path) -> None:
+    image = bytearray(binary.read_bytes())
+    elf = ELFFile(BytesIO(image))
+    rodata = elf.get_section_by_name(".rodata")
+    if elf.elfclass != 64 or not elf.little_endian or rodata is None:
+        raise ValueError("expected a little-endian ELF64 fixture with .rodata")
+    loads = [(index, segment) for index, segment in enumerate(elf.iter_segments())
+             if segment["p_type"] == "PT_LOAD" and segment.section_in_segment(rodata)]
+    if len(loads) != 1:
+        raise ValueError("fixture .rodata must belong to one PT_LOAD segment")
+    index, segment = loads[0]
+    flags = segment["p_flags"]
+    if flags & P_FLAGS.PF_W or not flags & P_FLAGS.PF_R:
+        raise ValueError("expected a read-only .rodata PT_LOAD segment")
+    position = elf["e_phoff"] + index * elf["e_phentsize"] + 4
+    struct.pack_into("<I", image, position, flags | P_FLAGS.PF_W)
+    output.write_bytes(image)
+
+
 def saved_project_hashes(project: Path) -> dict[str, str]:
     names = [project / "rtti.gpr", *(project / "rtti.rep").rglob("*")]
     # IndexedLocalFileSystem may rotate these backup copies on a read-only headless
@@ -155,7 +175,7 @@ def workflow_error(artifact: str, stage: str, error: Exception) -> str:
 
 
 def run_report(headless: Path, binary: Path, output: Path, timeout: int,
-               project_readback: bool) -> tuple[dict, dict]:
+               project_readback: bool, *, writable_names: bool = False) -> tuple[dict, dict]:
     log = output.with_suffix(".log")
     with tempfile.TemporaryDirectory(prefix="rtti project ", dir=output.parent) as directory:
         project = Path(directory)
@@ -183,10 +203,11 @@ def run_report(headless: Path, binary: Path, output: Path, timeout: int,
             entry = ["-process", binary.name]
         else:
             entry = ["-import", str(binary)]
+        proof_args = ["writable-rodata"] if writable_names else []
         measured = measured_run(command + entry + [
             "-noanalysis", "-readOnly", "-scriptPath", str(scripts),
             "-postScript", "BinaryRatRecoverRtti.java", str(output),
-            "-postScript", "BinaryRatRttiInvariants.java",
+            "-postScript", "BinaryRatRttiInvariants.java", *proof_args,
         ], log, timeout, environment)
         messages = log.read_text(encoding="utf-8", errors="replace")
         if (measured["returncode"] or not output.is_file() or
@@ -268,8 +289,19 @@ def main() -> int:
                            for row in altered["classes"] for table in row["vtables"]))
             if not ignored or "Diamond" not in altered_classes:
                 raise AssertionError("malformed RTTI was emitted or unrelated metadata was discarded")
-            runs.append({"artifact": artifact["id"], "abi": clean["abi"], "classes": len(classes),
-                         "malformed_excluded": True, "program_unchanged": True, "measurement": measured})
+            run = {"artifact": artifact_id, "abi": clean["abi"], "classes": len(classes),
+                   "malformed_excluded": True, "program_unchanged": True, "measurement": measured}
+            if artifact_id == "gcc-aarch64/O0/classes":
+                stage = "constructing the writable ELF class-name fixture"
+                writable = output / f"{stem}-writable-names"
+                writable_elf_names_copy(binary, writable)
+                stage = "checking rejection of writable ELF class names"
+                unsafe_names, _ = run_report(headless, writable, output / f"{stem}-writable-names.json",
+                                             args.timeout, False, writable_names=True)
+                if classes_by_name(unsafe_names):
+                    raise AssertionError("class names from writable ELF memory entered the report")
+                run["writable_names_excluded"] = True
+            runs.append(run)
             print(f"{artifact['id']} verified {len(classes)} classes and rejected malformed RTTI", flush=True)
         stage = "writing the verification summary"
         (output / "report.json").write_text(json.dumps({"passed": True, "runs": runs}, indent=2) + "\n",

@@ -224,7 +224,7 @@ public final class RttiEvidence {
 		require(span(site, POINTER * 2, POINTER, true));
 		Address vtable = pointer(site);
 		require(matchesRuntimeVtable(vtable, symbol));
-		String name = encodedName(pointer(site.addNoWrap(POINTER)), ITANIUM_NAME, true);
+		String name = encodedName(pointer(site.addNoWrap(POINTER)), true);
 		List<Base> bases = new ArrayList<>();
 		if (kind.equals("single")) {
 			require(span(site, POINTER * 3, POINTER, true));
@@ -487,13 +487,18 @@ public final class RttiEvidence {
 			throws InvalidRtti, AddressOverflowException, MemoryAccessException {
 		require(span(descriptor, 2 * POINTER + 1, POINTER, false) &&
 			span(pointer(descriptor), POINTER, POINTER, true));
-		return encodedName(descriptor.addNoWrap(2 * POINTER), MSVC_NAME, false);
+		return encodedName(descriptor.addNoWrap(2 * POINTER), false);
 	}
 
-	private String encodedName(Address address, Pattern grammar, boolean readOnly)
+	private String encodedName(Address address, boolean itanium)
 			throws InvalidRtti, MemoryAccessException {
-		require(span(address, 1, 1, readOnly));
-		long remaining = memory.getBlock(address).getEnd().subtract(address) + 1;
+		MemoryBlock block = mappedSpan(address, 1, 1, itanium);
+		// ElfProgramBuilder inherits PT_LOAD permissions for section blocks. GCC
+		// commonly co-locates read-only .rodata and code in an executable segment.
+		// Allow only the name read in these .rodata mappings.
+		require(block != null && (!block.isExecute() || (itanium && elfRodata(block.getName()))));
+		Pattern grammar = itanium ? ITANIUM_NAME : MSVC_NAME;
+		long remaining = block.getEnd().subtract(address) + 1;
 		byte[] bytes = new byte[(int) Math.min(MAX_NAME + 1, remaining)];
 		int size = memory.getBytes(address, bytes);
 		for (int i = 0; i < size; i++) {
@@ -507,16 +512,27 @@ public final class RttiEvidence {
 		throw new InvalidRtti();
 	}
 
+	private static boolean elfRodata(String blockName) {
+		return blockName.equals(".rodata") || blockName.startsWith(".rodata.");
+	}
+
 	private boolean span(Address address, int size, int alignment, boolean readOnly) {
+		MemoryBlock block = mappedSpan(address, size, alignment, readOnly);
+		return block != null && !block.isExecute();
+	}
+
+	private MemoryBlock mappedSpan(Address address, int size, int alignment, boolean readOnly) {
 		if (address == null || !address.getAddressSpace().equals(space) ||
 				Long.remainderUnsigned(address.getOffset(), alignment) != 0) {
-			return false;
+			return null;
 		}
 		MemoryBlock block = memory.getBlock(address);
-		return block != null && block.isLoaded() && block.isInitialized() && block.isRead() &&
-			!block.isExecute() && !block.isVolatile() && !block.isOverlay() &&
-			(!readOnly || !block.isWrite()) &&
-			Long.compareUnsigned(block.getEnd().subtract(address), size - 1L) >= 0;
+		if (block == null || !block.isLoaded() || !block.isInitialized() || !block.isRead() ||
+				block.isVolatile() || block.isOverlay() || (readOnly && block.isWrite()) ||
+				Long.compareUnsigned(block.getEnd().subtract(address), size - 1L) < 0) {
+			return null;
+		}
+		return block;
 	}
 
 	private boolean executable(Address address) {
