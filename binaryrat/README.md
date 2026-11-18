@@ -48,14 +48,16 @@ See [protocol](protocol/README.md) and [Python client](python/README.md).
   and replay against the Program after changes of unknown reach or a restart.
   Set `BINARYRAT_CACHE_DIR` to reuse results in ordinary scheduled exports.
   [Usage and cache report](bridge/README.md)
-- Pure C++ layout-evidence aggregation: preserve gaps and overlapping
-  alternatives, deduplicate support, expose stride conflicts, and abstain when
-  an object origin is unknown. Scores are uncalibrated evidence strength.
+- A read-only layout extractor over real Ghidra p-code and a C++ aggregator
+  that preserves gaps and overlapping alternatives. Each field links to its
+  instruction evidence. Scores express uncalibrated support.
 - A Java adapter using Ghidra's existing `DecompInterface` and
   `DecompilerCallback`, with a strict raw comparator and stock-verified export.
 - An installable extension with the native engine and a CodeBrowser export action.
   [Build and install](bridge/README.md#install-the-extension)
-- Typed Python value objects, streaming export parsing, and native-engine client.
+- Typed Python access to functions, references, datatypes, and decompilation in
+  saved Programs. Separate local clients can share one read-only Ghidra JVM.
+  [Python API](python/README.md)
 - C/C++ corpus builders with separate DWARF/PDB oracles, stripping checks,
   cross-target manifests, and CI for Linux/Windows.
 
@@ -92,6 +94,9 @@ script success messages because Ghidra can return zero after a postScript fails.
 Linux CI downloads and hash-checks a pinned 130 MB LLVM library, then compares the
 stock-verified export of 384 sampled functions to an independent stock serial run
 byte for byte. [LLVM harness and evidence](docs/evidence/llvm19-linux.md)
+CI also checks read-only p-code footprints against separate DWARF and PDB
+oracles and exercises write-back transaction semantics on a disposable Program.
+[Corpus accuracy checks](corpus/README.md)
 For repeated diagnostic timing, use `--repetitions 5`. The report explicitly
 labels sampled process-tree RSS and separates overall headless-run wall time
 from exporter-phase times; it does not claim large-binary speedup.
@@ -103,11 +108,16 @@ PATH_TO_ENGINE --seed 0 --steps 1000`.
 
 ## Remaining milestones
 
-Type work starts with extracting layout evidence from real programs and
-exposing read-only proposals, followed by protected write-back and native undo. The
-remaining [architecture milestones](docs/ARCHITECTURE.md) cover interprocedural
-and RTTI recovery, a persistent Ghidra daemon, debug-oracle accuracy scoring,
-and benchmarks on binaries of 100 MB or more.
+Read-only layout extraction has an exact offset and width regression for the
+packed fixture. General interprocedural inference, C++ RTTI recovery, calibrated
+confidence, a shared review service, and production write-back are future
+milestones. The transaction regression covers rollback and native undo on a
+disposable Program. [Architecture and milestones](docs/ARCHITECTURE.md)
+
+The whole-program profiler records analyzer timings, completion, wall time,
+and process-tree RSS. The full LLVM pilot reached its analysis deadline, with
+disassembly and entry-point processing accounting for most recorded time.
+[Whole-program analysis evidence](docs/evidence/full-analysis.md)
 
 ## Licensing and contributions
 

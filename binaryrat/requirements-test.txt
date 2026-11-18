@@ -1,2 +1,5 @@
 # Process-tree benchmark sampling; the engine itself has no Python dependency.
 psutil==6.1.1
+# Read independent DWARF and CodeView layout oracles in the accuracy verifier.
+pyelftools==0.32
+PyYAML==6.0.2

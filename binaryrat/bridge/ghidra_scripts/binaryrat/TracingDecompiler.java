@@ -31,7 +31,7 @@ import ghidra.util.task.TaskMonitor;
 public final class TracingDecompiler extends DecompInterface {
 	private RecordingCallback recorder;
 
-	/** The output of one decompilation and everything it read. */
+	/** The decompilation and its query trace, or a null trace if recording was disabled. */
 	public record Traced(DecompileResults results, Trace trace) {
 	}
 

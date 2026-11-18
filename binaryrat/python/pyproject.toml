@@ -5,11 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "binaryrat"
 version = "0.1.0"
-description = "Experimental typed client for the BinaryRat native engine"
+description = "Experimental typed APIs for the BinaryRat engine and Ghidra"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "yurillab"}]
+
+[project.optional-dependencies]
+live = ["pyghidra==3.2.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

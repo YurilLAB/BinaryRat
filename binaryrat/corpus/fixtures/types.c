@@ -6,8 +6,10 @@
 
 #if defined(_MSC_VER)
 #define BR_NOINLINE __declspec(noinline)
+#define BR_LAYOUT_ANCHOR __declspec(dllexport)
 #else
 #define BR_NOINLINE __attribute__((noinline))
+#define BR_LAYOUT_ANCHOR
 #endif
 
 typedef union Payload {
@@ -35,7 +37,7 @@ typedef struct PackedRecord {
 
 typedef int32_t (*RecordOperation)(Record *, int32_t);
 
-BR_NOINLINE int32_t update_record(Record *record, int32_t increment) {
+BR_NOINLINE BR_LAYOUT_ANCHOR int32_t update_record(Record *record, int32_t increment) {
     record->id += increment;
     record->samples[record->tag & 3] += increment;
     return record->id;
@@ -58,8 +60,13 @@ BR_NOINLINE double read_real(const Payload *payload) {
     return payload->real;
 }
 
-BR_NOINLINE uint32_t read_packed(const PackedRecord *record) {
+/* Give the stripped fixture an analyst-selectable entry name, with no type metadata. */
+BR_NOINLINE BR_LAYOUT_ANCHOR uint32_t read_packed(const PackedRecord *record) {
     return record->sequence + record->tag;
+}
+
+BR_NOINLINE BR_LAYOUT_ANCHOR uint32_t forward_packed(const PackedRecord *record) {
+    return read_packed(record) + UINT32_C(1);
 }
 
 int main(void) {

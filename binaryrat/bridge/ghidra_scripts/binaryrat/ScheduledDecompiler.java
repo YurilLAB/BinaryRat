@@ -109,6 +109,16 @@ public final class ScheduledDecompiler implements AutoCloseable {
 	 * the engine.
 	 */
 	public Run decompile(Function function, TaskMonitor outer) throws IOException {
+		return decompile(function, outer, true);
+	}
+
+	/** Runs without collecting query traces. Requires the engine to watch process memory. */
+	public Run decompileUntraced(Function function, TaskMonitor outer) throws IOException {
+		return decompile(function, outer, false);
+	}
+
+	private Run decompile(Function function, TaskMonitor outer, boolean recordQueries)
+			throws IOException {
 		// TaskMonitorAdapter does not notify a listener added after cancellation.
 		if (outer.isCancelled()) {
 			return new Run(null, "cancelled", "cancelled", 0, 0, 0, false, false);
@@ -169,8 +179,17 @@ public final class ScheduledDecompiler implements AutoCloseable {
 					attach.addProperty("pid", pid);
 					watched = engine.call("sched.attach", attach).get("attached").getAsBoolean();
 				}
-				traced = decompiler.decompile(function,
-					limits.timeoutSeconds() + BACKSTOP_SECONDS, monitor);
+				int timeout = limits.timeoutSeconds() + BACKSTOP_SECONDS;
+				if (recordQueries) {
+					traced = decompiler.decompile(function, timeout, monitor);
+				}
+				else {
+					if (!watched) {
+						throw new IOException("cannot watch decompiler process memory");
+					}
+					traced = new TracingDecompiler.Traced(
+						decompiler.decompileFunction(function, timeout, monitor), null);
+				}
 			}
 			finally {
 				// Once a process is reused, its old lease must no longer watch or kill

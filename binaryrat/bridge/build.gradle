@@ -38,11 +38,12 @@ tasks.named('buildExtension', Zip) {
     archiveBaseName = "BinaryRat-ghidra-${version}-${osDir}"
     preserveFileTimestamps = false
     reproducibleFileOrder = true
+    def shippedScripts = ['BinaryRatExport.java', 'BinaryRatRecoverLayouts.java']
     eachFile { entry ->
         // The bridge package is loaded by Ghidra's ordinary Java script compiler.
         if (entry.path.startsWith('BinaryRat/ghidra_scripts/') &&
             !entry.path.startsWith('BinaryRat/ghidra_scripts/binaryrat/') &&
-            entry.name != 'BinaryRatExport.java') {
+            !shippedScripts.contains(entry.name)) {
             entry.exclude()
         }
     }

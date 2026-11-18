@@ -12,6 +12,7 @@ import tempfile
 from zipfile import ZipFile
 
 from verify_ghidra import PROJECT, check_persistent_cache, measured_run
+from verify_type_accuracy import json_file, verified_fields
 
 
 def main() -> None:
@@ -34,7 +35,9 @@ def main() -> None:
         if (len(names) != len(package.namelist()) or engine_entry not in names or
                 "BinaryRat/Module.manifest" not in names or
                 {name for name in names if name.endswith(".java") and
-                 name.count("/") == 2} != {"BinaryRat/ghidra_scripts/BinaryRatExport.java"}):
+                 name.count("/") == 2} != {
+                     "BinaryRat/ghidra_scripts/BinaryRatExport.java",
+                     "BinaryRat/ghidra_scripts/BinaryRatRecoverLayouts.java"}):
             raise RuntimeError("unexpected extension contents")
         for name in ("LICENSE", "NOTICE"):
             if package.read(f"BinaryRat/{name}") != (PROJECT / name).read_bytes():
@@ -87,6 +90,21 @@ def main() -> None:
 
         proof = check_persistent_cache(headless, fixture, None, "installed", output, 2, 300,
                                        environment)
+        layout_proof = None
+        if artifact["id"].endswith("/types"):
+            layout = output / "installed-layout.json"
+            layout.unlink(missing_ok=True)
+            layout_log = output / "installed-layout.log"
+            extraction = measured_run(
+                [str(headless), str(root), "installed-layout", "-import", str(fixture), "-readOnly",
+                 "-postScript", "BinaryRatRecoverLayouts.java", str(layout), "name:read_packed",
+                 "0", "60", "-deleteProject"], layout_log, 300, environment)
+            if extraction["returncode"] or not layout.is_file():
+                raise RuntimeError(f"packaged layout extractor did not complete (see {layout_log})")
+            fields = verified_fields(json_file(layout), artifact)
+            if {(field["offset"], field["width"]) for field in fields} != {(0, 1), (1, 4)}:
+                raise RuntimeError(f"packaged extractor did not recover the packed fields (see {layout_log})")
+            layout_proof = {"passed": True, "fields": len(fields), "report": layout.name}
         # An explicit typo must be reported even if a bundled engine is available.
         rejected = root / "rejected.jsonl"
         reject_log = output / "invalid-override.log"
@@ -102,7 +120,7 @@ def main() -> None:
     report = {"passed": True, "platform": os_dir, "archive": archive.name,
               "engine_sha256": engine_sha256, "fixture": artifact["id"],
               "isolated_install": True, "explicit_invalid_override_rejected": True,
-              "stock_parity_and_persistence": proof}
+              "stock_parity_and_persistence": proof, "packaged_layout_evidence": layout_proof}
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Installed BinaryRat extension passed stock parity and persistence: {report_path}")
 

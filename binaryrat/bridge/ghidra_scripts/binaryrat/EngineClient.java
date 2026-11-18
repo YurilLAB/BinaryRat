@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -21,6 +22,10 @@ import java.util.function.Consumer;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+
+import ghidra.framework.Application;
+import ghidra.framework.OSFileNotFoundException;
+import ghidra.framework.Platform;
 
 /**
  * Talks to one {@code binaryrat-engine serve} process over its JSON-lines protocol.
@@ -43,6 +48,29 @@ public final class EngineClient implements AutoCloseable {
 		this.reader = new Thread(this::readResponses, "binaryrat-engine-reader");
 		this.reader.setDaemon(true);
 		this.reader.start();
+	}
+
+	/** Uses the configured engine, or the executable shipped with this extension. */
+	public static Path findExecutable() {
+		String value = System.getenv("BINARYRAT_ENGINE");
+		Path engine;
+		if (value == null || value.isBlank()) {
+			String name = "binaryrat-engine" + Platform.CURRENT_PLATFORM.getExecutableExtension();
+			try {
+				engine = Application.getOSFile("BinaryRat", name).toPath();
+			}
+			catch (OSFileNotFoundException missing) {
+				throw new IllegalArgumentException("Install the BinaryRat extension for this platform " +
+					"or set BINARYRAT_ENGINE to the binaryrat-engine executable", missing);
+			}
+		}
+		else {
+			engine = Path.of(value).toAbsolutePath().normalize();
+		}
+		if (!Files.isRegularFile(engine) || !Files.isExecutable(engine)) {
+			throw new IllegalArgumentException("BinaryRat engine is not an executable file: " + engine);
+		}
+		return engine;
 	}
 
 	/** Starts the engine with its own cache directory. */

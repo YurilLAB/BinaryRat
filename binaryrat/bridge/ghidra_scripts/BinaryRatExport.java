@@ -55,9 +55,6 @@ import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.decompiler.parallel.DecompilerCallback;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.script.GhidraScript;
-import ghidra.framework.Application;
-import ghidra.framework.OSFileNotFoundException;
-import ghidra.framework.Platform;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressRange;
 import ghidra.program.model.listing.Function;
@@ -255,28 +252,6 @@ public class BinaryRatExport extends GhidraScript {
             throw new IllegalArgumentException(name + " must not be negative");
         }
         return parsed;
-    }
-
-    private static Path engineBinary() {
-        String value = System.getenv("BINARYRAT_ENGINE");
-        Path engine;
-        if (value == null || value.isBlank()) {
-            String name = "binaryrat-engine" + Platform.CURRENT_PLATFORM.getExecutableExtension();
-            try {
-                engine = Application.getOSFile("BinaryRat", name).toPath();
-            }
-            catch (OSFileNotFoundException missing) {
-                throw new IllegalArgumentException("Install the BinaryRat extension for this platform " +
-                    "or set BINARYRAT_ENGINE to the binaryrat-engine executable", missing);
-            }
-        }
-        else {
-            engine = Path.of(value).toAbsolutePath().normalize();
-        }
-        if (!Files.isRegularFile(engine) || !Files.isExecutable(engine)) {
-            throw new IllegalArgumentException("BinaryRat engine is not an executable file: " + engine);
-        }
-        return engine;
     }
 
     private void checkEpoch() throws Exception {
@@ -553,7 +528,7 @@ public class BinaryRatExport extends GhidraScript {
                     engineCache = Files.createTempDirectory(output.getParent(), ".binaryrat-engine-");
                     temporaryEngineCache = true;
                 }
-                engine = EngineClient.start(engineBinary(), engineCache);
+                engine = EngineClient.start(EngineClient.findExecutable(), engineCache);
                 long leaseTimeout = environment("BINARYRAT_LEASE_TIMEOUT_MS", timeout * 1000L);
                 scheduler = new ScheduledDecompiler(engine, currentProgram, this::configure,
                     new ScheduledDecompiler.Limits(workers,
@@ -838,7 +813,7 @@ public class BinaryRatExport extends GhidraScript {
         // transaction that can be undone, and reopen it for the script runner to close.
         end(true);
         try {
-            CacheProof proof = new CacheProof(currentProgram, monitor, engineBinary(), cacheDirectory,
+            CacheProof proof = new CacheProof(currentProgram, monitor, EngineClient.findExecutable(), cacheDirectory,
                 this::configure, programId, functions, timeout, this::println);
             JsonObject report = proof.run();
             Files.writeString(output, new GsonBuilder().setPrettyPrinting().create().toJson(report) +

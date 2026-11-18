@@ -44,8 +44,11 @@ Consumers must use only `artifacts[].binary` as the inference input. Resolve
 artifact paths relative to the manifest's `root`, which points to the generated
 corpus directory. Keep `oracle_binary` and `debug_file` outside the inference
 process and disable debug/symbol-server discovery. Successful corpus generation
-means compilation, oracle separation and stripping checks passed. DWARF/PDB
-type extraction, precision/recall scoring, confidence calibration, whole-program
+means compilation, oracle separation and stripping checks passed. The
+read-only layout verifier runs inference on the stripped C artifact with
+`read_packed` parameter 0 selected. It reads `PackedRecord` from the separate
+DWARF or PDB after Ghidra exits and scores exact field byte offsets and widths.
+The PE oracle uses LLVM's `llvm-pdbutil`. Semantic type scoring, confidence calibration, whole-program
 fixtures and the required 100MB+ benchmark suite remain to be implemented.
 
 The fixture ABI and layout depend on compiler and target. Read the debug files

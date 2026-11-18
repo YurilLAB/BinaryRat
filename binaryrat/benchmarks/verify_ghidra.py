@@ -384,6 +384,22 @@ def check_stock_verified(headless: Path, binary: Path, scripts: Path, destinatio
             "interrupted_export_preserved": True, "report_collision_rejected": True}
 
 
+def check_writeback_transactions(headless: Path, destination: Path, timeout: float,
+                                 environment: dict[str, str]) -> dict:
+    log = destination / "writeback-transaction-proof.log"
+    with tempfile.TemporaryDirectory(prefix="writeback proof ", dir=destination) as directory:
+        measured = measured_run([
+            str(headless), directory, "transaction-proof", "-scriptPath",
+            str(PROJECT / "binaryrat/benchmarks/ghidra_scripts"),
+            "-preScript", "BinaryRatWriteBackTransactionProof.java", "-deleteProject",
+        ], log, timeout, environment)
+    content = log.read_text(encoding="utf-8", errors="replace")
+    if (measured["returncode"] or "REPORT SCRIPT ERROR" in content or
+            "BINARYRAT_WRITEBACK_TRANSACTION_PROOF_PASS" not in content):
+        raise RuntimeError(f"Ghidra write-back transaction regression failed (see {log})")
+    return {"passed": True, "wall_seconds": measured["wall_seconds"], "log": log.name}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ghidra", type=Path, required=True)
@@ -435,6 +451,9 @@ def main() -> int:
     environment.pop("BINARYRAT_CACHE_DIR", None)
     try:
         if engine:
+            report["writeback_transactions"] = check_writeback_transactions(
+                headless, destination, args.timeout, environment)
+            print("PASS Ghidra write-back abort, protection, and native undo/redo", flush=True)
             report["redirected_call_cache"] = check_redirected_call_cache(
                 headless, PROJECT / "binaryrat/bridge/ghidra_scripts",
                 destination, engine, args.timeout, environment)

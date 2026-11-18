@@ -186,6 +186,10 @@ def build_one(name: str, tools: tuple, optimization: str, fixture: tuple,
         command = [compiler, "-std=c11" if language == "c" else "-std=c++17",
                    "-g", "-gdwarf-4", "-fno-eliminate-unused-debug-types", f"-{optimization}",
                    str(fixtures / filename), "-o", str(original)]
+        if identifier == "types":
+            command.extend(["-Wl,--export-dynamic-symbol=read_packed",
+                            "-Wl,--export-dynamic-symbol=forward_packed",
+                            "-Wl,--export-dynamic-symbol=update_record"])
     run_command(command, fixtures, commands)
     before = inspect_binary(original)
     expected_arch = configured_arch or host_arch()
@@ -240,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     required = args.toolchain or (["msvc"] if os.name == "nt" else ["gcc", "clang"])
     manifest: dict = {"schema_version": 1, "root": str(output), "host": platform.platform(),
                       "status": "passed", "toolchains": [], "artifacts": [],
-                      "limitations": ["Debug-info extraction and type-accuracy scoring are not implemented.",
+                      "limitations": ["Inference must read the stripped files. Debug files are evaluation oracles.",
                                       "These small fixtures are not the required 100MB+ benchmark corpus."]}
     for name in dict.fromkeys(required + args.optional_toolchain):
         specification = TOOLCHAINS[name]

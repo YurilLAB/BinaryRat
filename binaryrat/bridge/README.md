@@ -4,8 +4,8 @@
 existing native Ghidra decompiler. BinaryRat's engine and tooling live in C++.
 It exports evidence, runs stock decompilations under the C++ engine's CPU/RAM
 admission (`scheduled`), and proves the engine's live decompiler cache against
-fresh decompilation (`cache-proof`). It does not perform type recovery or provide
-a persistent daemon. Its helper classes are in `ghidra_scripts/binaryrat/`; Ghidra
+fresh decompilation (`cache-proof`). The bridge also includes a read-only p-code
+layout extractor. Its helper classes are in `ghidra_scripts/binaryrat/`. Ghidra
 compiles them with the script.
 
 ## Install the extension
@@ -125,6 +125,30 @@ tab-separated line gives a hexadecimal offset relative to the Program image
 base, a positive hexadecimal symbol size, and a symbol name. Each offset must
 resolve to a distinct exportable function. Both phases visit selected functions
 in ascending address order. [LLVM harness and evidence](../docs/evidence/llvm19-linux.md)
+
+### Read-only layout evidence
+
+Run `BinaryRatRecoverLayouts.java OUTPUT_JSON ENTRY_HEX|name:FUNCTION PARAM_INDEX
+[TIMEOUT_SECONDS] [FOLLOW_DEPTH=0]` as a headless postScript after auto-analysis. The zero-based
+parameter selection declares the object base to analyze. The extractor
+decompiles under a CPU and memory lease and follows supported pointer
+expressions to high p-code loads and stores. Each proposed byte range carries
+instruction and p-code evidence. Unknown pointer bases are omitted. Overlaps
+remain visible as alternative interpretations and the reported extent is a
+lower bound. The Program is read-only to the extractor.
+
+The report uses an executable SHA-256 identity. Variable accesses appear as
+separate bounded ranges, while exact offsets drive field proposals. The
+completed file is published without replacing an existing report.
+
+Opt in with `FOLLOW_DEPTH=1` to collect evidence from eligible direct callees
+that receive the selected object base unchanged. This bounded pass checks the
+calling convention and register storage and keeps the call site and callee
+instruction in the report.
+
+For example, select `name:read_packed` and parameter `0` in the stripped C corpus.
+The verifier checks the output against separately read DWARF or PDB. [Corpus and
+accuracy checks](../corpus/README.md)
 
 ## Scheduled decompilation
 
