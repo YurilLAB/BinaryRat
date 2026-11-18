@@ -31,7 +31,21 @@ Ghidra discovers `BinaryRatExport.java` in the installed module. Omit
 the installed script and bundled executable. To use a custom engine build,
 set `BINARYRAT_ENGINE` to its executable path.
 
-## Run
+## Run in CodeBrowser
+
+Open a Program and let auto-analysis finish. In **Window → Script Manager**,
+select `BinaryRatExport.java` in the BinaryRat category and run it. Turn on
+**In Tool** for the script to add **Tools → BinaryRat → Export Decompilation**.
+
+Select an export mode and a destination JSONL file. **Stock-verified** runs
+scheduled decompilation and then checks it against the stock serial reference.
+It can take longer and writes a `.parity.json` report alongside the JSONL.
+**Scheduled** writes a `.schedule.json` report, and **Serial** runs a single
+stock decompiler process. CodeBrowser asks before replacing an export or its
+report. The current Program stays read-only to the exporter. A Program change
+detected during export stops publication.
+
+## Run headless
 
 Use the official `Ghidra_12.2_build` distribution and JDK 25. Run this as a
 headless **postScript after auto-analysis**, with no other program writer. For
@@ -50,15 +64,15 @@ On Windows, use `support\analyzeHeadless.bat` and absolute Windows paths. Argume
 to the script are:
 
 ```text
-OUTPUT serial|parallel|compare|compare-reverse|scheduled|compare-scheduled|cache-proof
-       [WORKERS=4] [TIMEOUT_SECONDS=60] [CHUNK_SIZE=128]
+OUTPUT serial|parallel|compare|compare-reverse|scheduled|compare-scheduled|stock-verified|cache-proof
+       [WORKERS=4] [TIMEOUT_SECONDS=60] [CHUNK_SIZE=128] [SAMPLE_TSV]
 ```
 
-`scheduled`, `compare-scheduled` and `cache-proof` start the bundled C++ engine
+`scheduled`, `compare-scheduled`, `stock-verified`, and `cache-proof` start the bundled C++ engine
 or the executable selected by `BINARYRAT_ENGINE`. Loose scripts require that
 variable when no extension is installed.
 Set `BINARYRAT_CACHE_DIR` to a dedicated directory to reuse cached results in
-`scheduled` and `compare-scheduled` exports. For example:
+`scheduled`, `compare-scheduled`, and the scheduled phase of `stock-verified`. For example:
 
 ```sh
 export BINARYRAT_ENGINE="$PWD/build/binaryrat/binaryrat-engine"
@@ -90,6 +104,27 @@ file. A failed comparison preserves both completed exports for diagnosis.
 
 `compare-scheduled` writes `OUTPUT.serial.jsonl` and `OUTPUT.scheduled.jsonl` and
 throws on any byte difference, like `compare`.
+
+### Stock-verified output
+
+Use `stock-verified` for exact bytes from Ghidra 12.2's ascending serial
+decompilation. BinaryRat runs the scheduled phase under its ordinary resource
+limits and closes the pool before starting a fresh stock serial process.
+That process visits every function in order. BinaryRat keeps a scheduled row
+when all bytes match and takes the stock row when they differ. The extra full
+serial pass determines the cost of verification. Interrupted decompilation or a
+detected Program change aborts publication.
+
+`OUTPUT.parity.json` contains the match and fallback counts, up to 32 fallback
+addresses, and the SHA-256 of the exact JSONL. Output and report use separate
+filesystem renames. The digest lets consumers check that the report belongs to
+the export they read.
+
+`SAMPLE_TSV` selects a benchmark subset in any headless export mode. Each
+tab-separated line gives a hexadecimal offset relative to the Program image
+base, a positive hexadecimal symbol size, and a symbol name. Each offset must
+resolve to a distinct exportable function. Both phases visit selected functions
+in ascending address order. [LLVM harness and evidence](../docs/evidence/llvm19-linux.md)
 
 ## Scheduled decompilation
 
@@ -127,7 +162,7 @@ already reused by another function.
 
 The JVM's maximum heap is the JVM reserve. The C/C++ fixture suite checks
 byte-for-byte equality with `serial`. A large libLLVM sample found differences
-in Ghidra's generated temporary names. The strict comparison reports those
+in Ghidra's generated temporary names. The raw comparison reports those
 differences. A 1 MiB reservation or a 1 ms deadline stops real decompilations,
 which is how the enforcement paths are checked.
 [libLLVM evidence](../docs/evidence/llvm19-linux.md)
@@ -155,7 +190,10 @@ becomes unverified and is replayed against the Program before use, then kept or
 removed. Ghidra raises the modification number once per change record, so the
 tracker can prove every change reached the engine before an entry is trusted
 without replay; a gap is treated as a change of unknown reach. Entries left by an
-earlier session are always replayed first.
+earlier session are always replayed first. Replay checks Program queries.
+Native process history, including register-join allocation order, can still
+affect the bytes. Use stock verification when the ascending serial bytes are
+required.
 
 `cache-proof` edits the Program (use a throwaway project) and, after each change,
 looks every function up with auditing on and decompiles it fresh:
@@ -186,11 +224,11 @@ freshly imported program has been analyzed.
   cache state at the end of `decompileFunction`; the bridge adds no duplicate flush.
 - Work and result buffers are bounded by the chunk size, plus native worker
   memory. This is **not** an adaptive memory budget; size workers accordingly.
-- GUI use and active auto-analysis are rejected. The modification number is
-  checked before reading, during waits, between chunks, and before publication.
-  This is optimistic validation: a detected change discards the export. It does
-  not provide a database snapshot. The caller must enforce the
-  documented headless, no-concurrent-writer precondition.
+- CodeBrowser exports release their empty script transaction before prompting.
+  Start after auto-analysis has finished. The exporter checks the modification
+  number before reading, during waits, between chunks, and before publication.
+  A detected change discards the staged export. Headless callers must keep the
+  Program free of concurrent writers.
 - JSONL is UTF-8 with LF newlines and deterministic ASCII JSON escaping. Raw
   decompiled C and prototype strings are preserved, including whitespace, after
   JSON decoding. Diagnostics and failures are retained rather than silently

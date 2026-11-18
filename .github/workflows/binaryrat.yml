@@ -93,7 +93,7 @@ jobs:
       - name: Corpus tooling tests
         run: python -m unittest discover -s binaryrat/tools -p "test_*.py"
       - name: Integration verifier tests
-        run: python -m unittest discover -s binaryrat/benchmarks -p 'test_verify_ghidra.py'
+        run: python -m unittest discover -s binaryrat/benchmarks -p 'test_*.py'
       - if: runner.os == 'Linux'
         name: GCC, Clang and AArch64 corpus with separate debug oracles
         run: python binaryrat/tools/build_corpus.py --output build/corpus --toolchain gcc --toolchain clang --toolchain gcc-aarch64
@@ -123,6 +123,20 @@ jobs:
           name: binaryrat-extension-${{ matrix.os }}-${{ matrix.revision }}
           path: binaryrat/bridge/dist/BinaryRat-ghidra-*.zip
           if-no-files-found: error
+      - if: runner.os == 'Linux'
+        name: Verify exact stock output on the pinned LLVM 19 large-binary sample
+        shell: bash
+        run: |
+          mkdir -p build/llvm19-fixture
+          archive=build/llvm19-fixture/libllvm19.deb
+          library=build/llvm19-fixture/libLLVM.so.19.1
+          curl --fail --silent --show-error --location --retry 3 --output "$archive" \
+            'https://deb.debian.org/debian/pool/main/l/llvm-toolchain-19/libllvm19_19.1.7-3+b1_amd64.deb'
+          echo "db0d614d61345ca710fb73e75105f1ec6e38898fa7b3aa99fa7eb7d8b0a11d57  $archive" | sha256sum --check -
+          dpkg-deb --fsys-tarfile "$archive" | tar -xOf - ./usr/lib/x86_64-linux-gnu/libLLVM.so.19.1 >"$library"
+          python binaryrat/benchmarks/verify_large_llvm.py \
+            --library "$library" --ghidra build/ghidra/ghidra_12.2_PUBLIC \
+            --engine build/binaryrat/binaryrat-engine --output build/ghidra-report/llvm19
       - name: Stock versus BinaryRat Ghidra integration and benchmark evidence
         run: python binaryrat/benchmarks/verify_ghidra.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report --workers 1 2 4 --repetitions 1 --engine ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
       - name: Reopen a cached Ghidra project after an offline edit

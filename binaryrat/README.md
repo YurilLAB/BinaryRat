@@ -51,16 +51,17 @@ See [protocol](protocol/README.md) and [Python client](python/README.md).
 - Pure C++ layout-evidence aggregation: preserve gaps and overlapping
   alternatives, deduplicate support, expose stride conflicts, and abstain when
   an object origin is unknown. Scores are uncalibrated evidence strength.
-- A minimal headless Java adapter using Ghidra's existing `DecompInterface` and
-  `DecompilerCallback`, with serial/parallel/scheduled exact-output comparison.
-- An installable Ghidra extension with the native engine and headless bridge.
+- A Java adapter using Ghidra's existing `DecompInterface` and
+  `DecompilerCallback`, with a strict raw comparator and stock-verified export.
+- An installable extension with the native engine and a CodeBrowser export action.
   [Build and install](bridge/README.md#install-the-extension)
 - Typed Python value objects, streaming export parsing, and native-engine client.
 - C/C++ corpus builders with separate DWARF/PDB oracles, stripping checks,
   cross-target manifests, and CI for Linux/Windows.
 
-Only the bridge's live cache path (schema 2 keys, tracked dependencies and
-replay) makes reuse safe across changes and restarts. Schema 1 keys still require
+The bridge's live cache uses schema 2 keys, tracked dependencies, and replay
+to verify Program reads across changes and restarts. Stock verification also
+checks that output matches the ascending stock process history. Schema 1 keys require
 callers to supply complete semantic identities; function bytes and the in-memory
 modification number alone cannot establish correctness across reopen/import, and
 plain exports are evidence artifacts, not reusable decompilations.
@@ -69,8 +70,8 @@ plain exports are evidence artifacts, not reusable decompilations.
 
 Use an official Ghidra 12.2 installation and JDK 25. The bridge is compiled by
 Ghidra's script machinery. Except for `cache-proof`, which edits a throwaway
-program, it is read-only and requires headless execution after analysis with no
-concurrent writer. [Bridge contract](bridge/README.md).
+program, the bridge performs read-only exports from CodeBrowser or headless
+Ghidra after analysis. [Bridge contract](bridge/README.md)
 
 ```sh
 python -m pip install -r binaryrat/requirements-test.txt
@@ -88,6 +89,9 @@ isolated settings and repeats the cold and warm checks through its bundled
 engine. CI also reopens a cached project after a function rename made while the
 engine is offline. The verifier checks output records and
 script success messages because Ghidra can return zero after a postScript fails.
+Linux CI downloads and hash-checks a pinned 130 MB LLVM library, then compares the
+stock-verified export of 384 sampled functions to an independent stock serial run
+byte for byte. [LLVM harness and evidence](docs/evidence/llvm19-linux.md)
 For repeated diagnostic timing, use `--repetitions 5`. The report explicitly
 labels sampled process-tree RSS and separates overall headless-run wall time
 from exporter-phase times; it does not claim large-binary speedup.
@@ -99,10 +103,8 @@ PATH_TO_ENGINE --seed 0 --steps 1000`.
 
 ## Remaining milestones
 
-Scheduled headless exports can reuse results across JVM restarts. The next
-integration is GUI access. Type work starts with extracting layout
-evidence from real programs and exposing
-read-only proposals, followed by protected write-back and native undo. The
+Type work starts with extracting layout evidence from real programs and
+exposing read-only proposals, followed by protected write-back and native undo. The
 remaining [architecture milestones](docs/ARCHITECTURE.md) cover interprocedural
 and RTTI recovery, a persistent Ghidra daemon, debug-oracle accuracy scoring,
 and benchmarks on binaries of 100 MB or more.

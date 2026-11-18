@@ -1,25 +1,33 @@
 // Export deterministic stock-decompiler records; optionally run decompilation under the
 // C++ engine's admission control, or prove the engine's live cache against fresh output.
 // @category BinaryRat
-// @menupath
+// @menupath Tools.BinaryRat.Export Decompilation
 /*
  * Copyright 2026 YurilLAB
  * Licensed under the Apache License, Version 2.0.
  * See the repository LICENSE file for the full license text.
  */
 
+import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.File;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -28,8 +36,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Stream;
 
+import javax.swing.JFileChooser;
+
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 import binaryrat.CacheProof;
 import binaryrat.ChangeTracker;
@@ -51,36 +63,49 @@ import ghidra.program.model.address.AddressRange;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.util.Swing;
+import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
 
 /**
  * Minimal Ghidra 12.2 bridge. All decompilation remains in Ghidra's native engine.
- * Run as a headless postScript after analysis; there must be no concurrent writer.
+ * Run after analysis from CodeBrowser or as a headless postScript.
  * Every mode except cache-proof leaves the Program unmodified; cache-proof edits it
  * and is meant for throwaway headless projects.
  */
 public class BinaryRatExport extends GhidraScript {
     private static final int DEFAULT_CHUNK_SIZE = 128;
     private static final List<String> MODES = List.of("serial", "parallel", "compare",
-        "compare-reverse", "scheduled", "compare-scheduled", "cache-proof");
+        "compare-reverse", "scheduled", "compare-scheduled", "stock-verified", "cache-proof");
     private long revision;
     private String programId;
     private ScheduleSummary summary;
+    private Set<Address> sample;
 
     private enum Mode { SERIAL, PARALLEL, SCHEDULED }
 
     @Override
     protected void run() throws Exception {
-        String[] args = getScriptArgs();
-        if (args.length < 2 || args.length > 5) {
+        if (currentProgram == null) {
+            throw new IllegalStateException("Open an analyzed Program before exporting");
+        }
+        boolean headed = !isRunningHeadless();
+        if (headed) {
+            // GhidraScript starts a transaction even for read-only tasks. Release the
+            // empty transaction before prompting or waiting on the decompiler.
+            end(true);
+        }
+        AutoAnalysisManager analysis = AutoAnalysisManager.getAnalysisManager(currentProgram);
+        if (analysis.isAnalyzing()) {
+            throw new IllegalStateException("Auto-analysis must finish before exporting");
+        }
+        String[] args = headed ? desktopArguments() : getScriptArgs();
+        if (args.length < 2 || args.length > 6) {
             throw new IllegalArgumentException("Usage: BinaryRatExport.java OUTPUT " +
                 String.join("|", MODES) +
-                " [WORKERS=4] [TIMEOUT_SECONDS=60] [CHUNK_SIZE=128]");
+                " [WORKERS=4] [TIMEOUT_SECONDS=60] [CHUNK_SIZE=128] [SAMPLE_TSV]");
         }
-        if (!isRunningHeadless() || currentProgram == null) {
-            throw new IllegalStateException("A headless postScript with an analyzed Program is required");
-        }
-        if (AutoAnalysisManager.getAnalysisManager(currentProgram).isAnalyzing()) {
+        if (headed && analysis.isAnalyzing()) {
             throw new IllegalStateException("Auto-analysis must finish before exporting");
         }
         String mode = args[1];
@@ -91,6 +116,10 @@ public class BinaryRatExport extends GhidraScript {
         int timeout = positiveInt(args, 3, 60, 86400, "timeout");
         int chunkSize = positiveInt(args, 4, DEFAULT_CHUNK_SIZE, 65536, "chunk size");
         revision = currentProgram.getModificationNumber();
+        if (args.length == 6 && mode.equals("cache-proof")) {
+            throw new IllegalArgumentException("SAMPLE_TSV requires an export mode");
+        }
+        sample = args.length == 6 ? readSample(Path.of(args[5])) : null;
         String sha256 = currentProgram.getExecutableSHA256();
         programId = sha256 == null || sha256.isBlank() ?
             "name:" + currentProgram.getName() : "sha256:" + sha256;
@@ -121,6 +150,9 @@ public class BinaryRatExport extends GhidraScript {
             }
             println("BinaryRat exact serial/" + other + " comparison passed: " + serial);
         }
+        else if (mode.equals("stock-verified")) {
+            exportStockVerified(output, workers, timeout, chunkSize);
+        }
         else {
             Mode single = mode.equals("serial") ? Mode.SERIAL :
                 mode.equals("parallel") ? Mode.PARALLEL : Mode.SCHEDULED;
@@ -128,6 +160,80 @@ public class BinaryRatExport extends GhidraScript {
         }
         println("BinaryRat export elapsed_seconds=" +
             ((System.nanoTime() - started) / 1_000_000_000.0));
+    }
+
+    private Set<Address> readSample(Path path) throws Exception {
+        Set<Address> addresses = new HashSet<>();
+        try (BufferedReader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                checkEpoch();
+                String[] fields = line.split("\\t", -1);
+                if (fields.length != 3 || !fields[0].matches("[0-9a-fA-F]{1,16}") ||
+                        !fields[1].matches("[0-9a-fA-F]{1,16}") || fields[2].isBlank() ||
+                        new BigInteger(fields[1], 16).signum() == 0) {
+                    throw new IOException("Expected sample offset, size and name: " + line);
+                }
+                Address address = currentProgram.getImageBase().addNoWrap(new BigInteger(fields[0], 16));
+                Function function = currentProgram.getFunctionManager().getFunctionAt(address);
+                if (function == null || !exported(function) || !addresses.add(address)) {
+                    throw new IOException("Sample address must name a unique exported function: " + address);
+                }
+            }
+        }
+        if (addresses.isEmpty()) {
+            throw new IOException("Export sample is empty: " + path);
+        }
+        return Set.copyOf(addresses);
+    }
+
+    private String[] desktopArguments() throws Exception {
+        List<String> choices = List.of("Stock-verified (scheduled and stock)", "Scheduled", "Serial");
+        String choice = askChoice("BinaryRat Decompilation", "Export mode", choices, choices.getFirst());
+        String mode = switch (choice) {
+            case "Stock-verified (scheduled and stock)" -> "stock-verified";
+            case "Scheduled" -> "scheduled";
+            case "Serial" -> "serial";
+            default -> throw new IllegalArgumentException("Unknown BinaryRat export mode: " + choice);
+        };
+        // Ghidra 12.2's script file chooser can dispose its model while an
+        // autocomplete event is pending. Use Swing's ordinary save dialog.
+        File selected = Swing.runNow(() -> {
+            JFileChooser chooser = new JFileChooser();
+            chooser.setDialogTitle("Export BinaryRat Decompilation JSONL");
+            var tool = state.getTool();
+            return chooser.showDialog(tool == null ? null : tool.getToolFrame(), "Export") ==
+                JFileChooser.APPROVE_OPTION ? chooser.getSelectedFile() : null;
+        });
+        if (selected == null) {
+            throw new CancelledException();
+        }
+        Path output = selected.toPath().toAbsolutePath().normalize();
+        String reportSuffix = switch (mode) {
+            case "stock-verified" -> ".parity.json";
+            case "scheduled" -> ".schedule.json";
+            default -> null;
+        };
+        if (existingOutputs(output, reportSuffix) && !askYesNo("Replace BinaryRat Export",
+                "Replace the existing export or its report for " + output + "?")) {
+            throw new CancelledException();
+        }
+        return new String[] { output.toString(), mode };
+    }
+
+    private static boolean existingOutputs(Path output, String reportSuffix) throws IOException {
+        List<Path> destinations = reportSuffix == null ? List.of(output) :
+            List.of(output, Path.of(output + reportSuffix));
+        boolean replacing = false;
+        for (Path destination : destinations) {
+            if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) {
+                if (!Files.isRegularFile(destination, LinkOption.NOFOLLOW_LINKS)) {
+                    throw new IOException("Choose a regular output file: " + destination);
+                }
+                replacing = true;
+            }
+        }
+        return replacing;
     }
 
     private static int positiveInt(String[] args, int index, int fallback, int maximum,
@@ -312,7 +418,85 @@ public class BinaryRatExport extends GhidraScript {
         }
     }
 
+    private static final class StockParityAudit {
+        private final BufferedReader candidate;
+        private final JsonArray fallbackSample = new JsonArray();
+        private long matches;
+        private long fallbacks;
+
+        StockParityAudit(BufferedReader candidate) {
+            this.candidate = candidate;
+        }
+
+        String select(Address entry, String stock) throws IOException {
+            String row = candidate.readLine();
+            if (row == null) {
+                throw new IOException("Scheduled export ended before stock function " + entry);
+            }
+            if (row.equals(stock)) {
+                matches++;
+                return row;
+            }
+            JsonObject actual = JsonParser.parseString(row).getAsJsonObject();
+            if (!entry.getAddressSpace().getName().equals(actual.get("address_space").getAsString()) ||
+                    !Long.toUnsignedString(entry.getOffset(), 16).equals(
+                        actual.get("address").getAsString())) {
+                throw new IOException("Scheduled export function order disagrees at " + entry);
+            }
+            if (actual.get("timed_out").getAsBoolean() || actual.get("cancelled").getAsBoolean() ||
+                    actual.get("failed_to_start").getAsBoolean()) {
+                throw new IOException("Scheduled decompiler was interrupted at " + entry);
+            }
+            fallbacks++;
+            if (fallbackSample.size() < 32) {
+                fallbackSample.add(entry.toString(true));
+            }
+            return stock;
+        }
+
+        JsonObject finish(byte[] digest) throws IOException {
+            if (candidate.readLine() != null) {
+                throw new IOException("Scheduled export contains extra functions");
+            }
+            JsonObject result = new JsonObject();
+            result.addProperty("reference", "stock-reused-serial");
+            result.addProperty("function_count", matches + fallbacks);
+            result.addProperty("scheduled_matches", matches);
+            result.addProperty("stock_fallbacks", fallbacks);
+            result.add("fallback_sample", fallbackSample);
+            result.addProperty("output_sha256", HexFormat.of().formatHex(digest));
+            return result;
+        }
+    }
+
+    private void exportStockVerified(Path output, int workers, int timeout, int chunkSize)
+            throws Exception {
+        existingOutputs(output, ".parity.json");
+        Path workspace = Files.createTempDirectory(output.getParent(), ".binaryrat-parity-");
+        try {
+            Path candidate = workspace.resolve("scheduled.jsonl");
+            export(candidate, Mode.SCHEDULED, workers, timeout, chunkSize);
+            if (summary.leases.keySet().stream().anyMatch(status -> !status.equals("completed"))) {
+                throw new IOException("Cannot verify interrupted leases: " + summary.leases);
+            }
+            // Close the pool before starting the stock process. It must see all
+            // functions in the original order, even when a scheduled row is cached.
+            try (BufferedReader reader = Files.newBufferedReader(candidate, StandardCharsets.UTF_8)) {
+                export(output, Mode.SERIAL, workers, timeout, chunkSize, new StockParityAudit(reader));
+            }
+        }
+        finally {
+            deleteTree(workspace);
+        }
+    }
+
     private void export(Path output, Mode mode, int workers, int timeout, int chunkSize)
+            throws Exception {
+        export(output, mode, workers, timeout, chunkSize, null);
+    }
+
+    private void export(Path output, Mode mode, int workers, int timeout, int chunkSize,
+            StockParityAudit audit)
             throws Exception {
         long exportStarted = System.nanoTime();
         checkEpoch();
@@ -406,17 +590,25 @@ public class BinaryRatExport extends GhidraScript {
             FunctionIterator iterator = currentProgram.getFunctionManager().getFunctions(true);
             long count = 0;
             long excludedExternal = 0;
-            try (BufferedWriter writer = Files.newBufferedWriter(temporary, StandardCharsets.UTF_8)) {
+            MessageDigest digest = audit == null ? null : MessageDigest.getInstance("SHA-256");
+            try (BufferedWriter writer = digest == null ?
+                    Files.newBufferedWriter(temporary, StandardCharsets.UTF_8) :
+                    new BufferedWriter(new OutputStreamWriter(
+                        new DigestOutputStream(Files.newOutputStream(temporary), digest),
+                        StandardCharsets.UTF_8))) {
                 while (iterator.hasNext()) {
                     checkEpoch();
                     List<Function> functions = new ArrayList<>(chunkSize);
                     while (iterator.hasNext() && functions.size() < chunkSize) {
-                        Function function = iterator.next();
-                        if (exported(function)) {
-                            functions.add(function);
+                        if (sample != null) {
+                            checkEpoch();
                         }
-                        else {
+                        Function function = iterator.next();
+                        if (!exported(function)) {
                             excludedExternal++;
+                        }
+                        else if (sample == null || sample.contains(function.getEntryPoint())) {
+                            functions.add(function);
                         }
                     }
                     // FunctionIterator is forward ordered; consume futures in that same
@@ -444,8 +636,15 @@ public class BinaryRatExport extends GhidraScript {
                     else {
                         for (Function function : functions) {
                             checkEpoch();
-                            writer.write(record(function,
-                                serialDecompiler.decompileFunction(function, timeout, monitor)));
+                            DecompileResults result =
+                                serialDecompiler.decompileFunction(function, timeout, monitor);
+                            if (audit != null && (result == null || result.isTimedOut() ||
+                                    result.isCancelled() || result.failedToStart())) {
+                                throw new IOException("Stock decompiler was interrupted at " +
+                                    function.getEntryPoint());
+                            }
+                            String row = record(function, result);
+                            writer.write(audit == null ? row : audit.select(function.getEntryPoint(), row));
                             writer.write('\n');
                             count++;
                         }
@@ -454,20 +653,30 @@ public class BinaryRatExport extends GhidraScript {
                 }
             }
             checkEpoch();
+            if (sample != null && count != sample.size()) {
+                throw new IOException("Export did not cover every sampled function");
+            }
+            JsonObject parityReport = audit == null ? null : audit.finish(digest.digest());
             if (scheduler != null) {
                 scheduleReport = makeSummary(scheduler, liveCache, workers);
+            }
+            JsonObject outputReport = audit == null ? scheduleReport : parityReport;
+            if (outputReport != null) {
                 temporarySummary = Files.createTempFile(output.getParent(), ".binaryrat-schedule-", ".json.tmp");
                 Files.writeString(temporarySummary,
-                    new GsonBuilder().setPrettyPrinting().create().toJson(scheduleReport) + "\n",
+                    new GsonBuilder().setPrettyPrinting().create().toJson(outputReport) + "\n",
                     StandardCharsets.UTF_8);
             }
             checkEpoch();
+            if (audit != null) {
+                existingOutputs(output, ".parity.json");
+            }
             publish(temporary, output);
             if (temporarySummary != null) {
                 // A summary never announces an export whose publication failed.
                 // The two individual renames are atomic where supported; a pair of
                 // filesystem paths cannot be committed as one atomic operation.
-                publish(temporarySummary, Path.of(output.toString() + ".schedule.json"));
+                publish(temporarySummary, Path.of(output + (audit == null ? ".schedule.json" : ".parity.json")));
             }
             published = true;
             if (scheduleReport != null) {
@@ -475,6 +684,9 @@ public class BinaryRatExport extends GhidraScript {
                     scheduleReport.getAsJsonObject("engine_stats").get("peak_running") +
                     " max_peak_resident_bytes=" + summary.maxPeakResident +
                     " memory_watched=" + summary.memoryWatched + " cache=" + scheduleReport.get("cache"));
+            }
+            if (parityReport != null) {
+                println("BinaryRat stock verification passed: " + parityReport);
             }
             println("BinaryRat exported functions=" + count + " mode=" + name +
                 " workers=" + activeWorkers + " excluded_external=" + excludedExternal +

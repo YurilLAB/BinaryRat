@@ -278,6 +278,15 @@ ISA, ABI and optimization. Split calibration/evaluation by project family.
 Existing structure/class recovery is also an accuracy baseline. Ground truth
 never enters the inference Program.
 
+The raw comparator keeps the official ascending, reused-process stock
+reference. Ghidra's join-space allocations can survive its native flush and
+affect both analysis and printed temporary names. Program dependency replay
+does not capture this process history. The `stock-verified` export runs the
+scheduled phase first, then checks each record with an independent ascending
+serial pass. It writes a match count, fallback count, and digest of the exported
+bytes. The large-file CI test compares that export to a separate stock JVM.
+[LLVM parity evidence](evidence/llvm19-linux.md)
+
 Use identical binaries, CPU/RAM budgets, JVM heap, options and timeouts for
 paired repeated trials. Measure cold and warm caches separately. Separate import,
 auto-analysis, decompilation, inference and write-back/follow-on analysis: faster

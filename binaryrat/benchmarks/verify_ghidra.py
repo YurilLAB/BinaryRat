@@ -328,6 +328,62 @@ def check_redirected_call_cache(headless: Path, script_directory: Path, destinat
     return {**proof, "wall_seconds": measured["wall_seconds"]}
 
 
+def check_stock_verified(headless: Path, binary: Path, scripts: Path, destination: Path,
+                         timeout: float, environment: dict[str, str]) -> dict:
+    """Compare verified output with a separate stock pass and probe fail-closed behavior."""
+    with tempfile.TemporaryDirectory(prefix="stock verified-", dir=destination) as directory:
+        workspace = Path(directory)
+        project = [str(headless), str(workspace), "fixture", "-scriptPath", str(scripts)]
+
+        def script(output: Path, mode: str) -> list[str]:
+            return ["-postScript", "BinaryRatExport.java", str(output), mode, "2", "60", "16"]
+
+        verified, reference = workspace / "verified.jsonl", workspace / "reference.jsonl"
+        log = destination / "stock-verified.log"
+        measured = measured_run(project + ["-import", str(binary)] +
+                                script(verified, "stock-verified") + script(reference, "serial"),
+                                log, timeout, environment)
+        if (measured["returncode"] or "BinaryRat stock verification passed:" not in
+                log.read_text(encoding="utf-8", errors="replace") or
+                verified.read_bytes() != reference.read_bytes()):
+            raise RuntimeError(f"stock-verified export did not match the independent stock pass; see {log}")
+        rows = list(load_export(verified))
+        proof = json.loads(Path(str(verified) + ".parity.json").read_text(encoding="utf-8"))
+        counts = [proof[key] for key in ("scheduled_matches", "stock_fallbacks")]
+        if (not rows or not all(row.successful for row in rows) or
+                any(type(count) is not int or count < 0 for count in counts) or
+                proof["reference"] != "stock-reused-serial" or
+                proof["output_sha256"] != hashlib.sha256(verified.read_bytes()).hexdigest() or
+                proof["function_count"] != sum(counts) or sum(counts) != len(rows)):
+            raise RuntimeError(f"invalid stock verification evidence; see {log}")
+
+        stopped = workspace / "stopped.jsonl"
+        sidecar = Path(str(stopped) + ".parity.json")
+        stopped.write_bytes(b"existing export\n")
+        sidecar.write_bytes(b"existing report\n")
+        stop_log = destination / "stock-verified-stopped.log"
+        process = project + ["-process", binary.name, "-noanalysis", "-readOnly"]
+        measured_run(process + script(stopped, "stock-verified"), stop_log, timeout,
+                     environment | {"BINARYRAT_LEASE_TIMEOUT_MS": "1"})
+        if ("Cannot verify interrupted leases:" not in stop_log.read_text(
+                encoding="utf-8", errors="replace") or
+                stopped.read_bytes() != b"existing export\n" or
+                sidecar.read_bytes() != b"existing report\n"):
+            raise RuntimeError(f"interrupted verification replaced an existing export; see {stop_log}")
+
+        blocked = workspace / "blocked.jsonl"
+        blocked.write_bytes(b"existing export\n")
+        Path(str(blocked) + ".parity.json").mkdir()
+        blocked_log = destination / "stock-verified-report-collision.log"
+        measured_run(process + script(blocked, "stock-verified"), blocked_log, timeout, environment)
+        content = blocked_log.read_text(encoding="utf-8", errors="replace")
+        if ("Choose a regular output file:" not in content or "BinaryRat export starting" in content or
+                blocked.read_bytes() != b"existing export\n"):
+            raise RuntimeError(f"invalid parity report destination was not rejected; see {blocked_log}")
+    return {**proof, "exact_independent_stock_bytes": True,
+            "interrupted_export_preserved": True, "report_collision_rejected": True}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ghidra", type=Path, required=True)
@@ -450,6 +506,11 @@ def main() -> int:
                         destination, workers, args.timeout, environment)
                     report["persistent_cache_checks"].append({"artifact_id": artifact["id"], **checked})
                     print(f"PASS {artifact['id']} persistent cache cold/warm fresh JVMs", flush=True)
+                if "stock_verified" not in report:
+                    report["stock_verified"] = check_stock_verified(
+                        headless, binary, PROJECT / "binaryrat/bridge/ghidra_scripts",
+                        destination, args.timeout, environment)
+                    print(f"PASS {artifact['id']} stock-verified export and failure cases", flush=True)
                 if not report["limit_checks"]:
                     for expected, overrides in (
                         ("timed_out", {"BINARYRAT_LEASE_TIMEOUT_MS": "1"}),
