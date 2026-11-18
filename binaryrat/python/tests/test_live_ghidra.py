@@ -19,7 +19,8 @@ import tracemalloc
 import unittest
 from unittest.mock import patch
 
-from binaryrat import Address, LiveProgramError, Page, StaleProgramError, open_program
+from binaryrat import Address, LiveProgramError, Page, StaleProgramError, decompile_program, open_program
+from binaryrat.decompile_cli import _parse_entry
 from binaryrat.live import ProgramView, _monitor
 from binaryrat.live_service import (
     LIVE_PROTOCOL_VERSION,
@@ -34,15 +35,28 @@ from binaryrat.live_service import (
 
 
 _INSTALL_DIR = os.environ.get("BINARYRAT_GHIDRA_INSTALL_DIR")
+_REQUIRE_SHARED_SERVICE = os.environ.get("BINARYRAT_REQUIRE_SHARED_SERVICE") == "1"
 
 
 class LiveProgramInputTests(unittest.TestCase):
+    def test_cli_entry_parser_checks_unsigned_hex_and_preserves_space(self):
+        from argparse import ArgumentTypeError
+
+        self.assertEqual(_parse_entry("ram:0xffffffffffffffff"), ("ram", (1 << 64) - 1))
+        self.assertEqual(_parse_entry("0A"), (None, 10))
+        for bad in ("-1", "0x", "ram:", "ram:1:2", "ram:0x10000000000000000", "ram: 1"):
+            with self.subTest(entry=bad), self.assertRaises(ArgumentTypeError):
+                _parse_entry(bad)
+
     def test_missing_project_and_invalid_domain_path(self):
         with TemporaryDirectory() as tmp:
             marker = Path(tmp) / "unknown.gpr"
             with self.assertRaises(FileNotFoundError), open_program(marker, "/program"):
                 pass
             marker.touch()
+            with self.assertRaisesRegex(ValueError, "backend"):
+                with open_program(marker, "/program", backend="unknown"):
+                    self.fail("unknown backend was accepted")
             for name in ("program", "/", "//program", "/nested/../program", "/dir\\program"):
                 with self.subTest(name=name), self.assertRaises(ValueError):
                     with open_program(marker, name):
@@ -114,21 +128,27 @@ class LiveProgramInputTests(unittest.TestCase):
             connect.assert_not_called()
 
 
-@unittest.skipUnless(_INSTALL_DIR, "set BINARYRAT_GHIDRA_INSTALL_DIR to run PyGhidra tests")
+@unittest.skipUnless(_INSTALL_DIR or _REQUIRE_SHARED_SERVICE,
+                     "set BINARYRAT_GHIDRA_INSTALL_DIR to run PyGhidra tests")
 class LiveGhidraTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import pyghidra
 
+        if _INSTALL_DIR is None:
+            raise AssertionError("BINARYRAT_REQUIRE_SHARED_SERVICE needs BINARYRAT_GHIDRA_INSTALL_DIR")
         cls.install = Path(_INSTALL_DIR).resolve()
         pyghidra.start(install_dir=cls.install)
         from ghidra.app.util.opinion import BinaryLoader
+        from ghidra.framework import Application
         from ghidra.program.flatapi import FlatProgramAPI
         from ghidra.program.model.data import (
             CategoryPath, DataTypeConflictHandler, IntegerDataType, StructureDataType,
         )
         from java.lang import Object
 
+        if _REQUIRE_SHARED_SERVICE and Application.getModuleRootDir("BinaryRat") is None:
+            raise AssertionError("the bundled Ghidra installation must supply the BinaryRat extension")
         temporary = TemporaryDirectory(prefix="binaryrat-live-")
         cls.addClassCleanup(temporary.cleanup)
         cls.marker = Path(temporary.name) / "fixture.gpr"
@@ -302,7 +322,7 @@ class LiveGhidraTests(unittest.TestCase):
             with ProcessHandle.current().children() as children:
                 return {int(child.pid()) for child in children.toArray() if child.isAlive()}
 
-        with open_program(self.marker, self.program_path) as view:
+        with open_program(self.marker, self.program_path, backend="stock") as view:
             # A must-fail ceiling on the same stock decompiler proves the
             # option reached the process before its first response.
             with patch("binaryrat.live._DECOMPILER_PAYLOAD_MB", 0):
@@ -320,10 +340,107 @@ class LiveGhidraTests(unittest.TestCase):
             sleep(0.01)
         self.assertFalse(child_ids() & started, "view close leaked a native decompiler")
 
-    def test_live_service_reuses_jvm_across_independent_clients(self):
+    def test_scheduled_backend_is_shared_with_the_cli(self):
+        from ghidra.framework import Application
+
+        if Application.getModuleRootDir("BinaryRat") is None:
+            with self.assertRaisesRegex(LiveProgramError, "requires the BinaryRat extension"):
+                with open_program(self.marker, self.program_path, backend="scheduled"):
+                    self.fail("opened a scheduled view without its extension")
+            self.skipTest("live scheduled checks require the BinaryRat extension")
         before = self.snapshot()
+        with open_program(self.marker, self.program_path, backend="stock") as view:
+            stock = view.decompile(self.target)
+        with open_program(self.marker, self.program_path) as view:
+            self.assertEqual(view.decompilation_backend, "scheduled")
+            self.assertEqual(view.decompile(self.target), stock)
+            session = view._scheduled_session
+            self.assertIsNotNone(session)
+            self.assertEqual(view.decompile(self.target), stock)
+            self.assertIs(view._scheduled_session, session)
+            self.assertEqual(view.decompile(self.target, timeout_seconds=45), stock)
+            self.assertIsNot(view._scheduled_session, session)
+        self.assertIsNone(view._scheduled_session)
+        with TemporaryDirectory(prefix="binaryrat scheduled cache ") as directory:
+            environment = {
+                key: value for key, value in os.environ.items()
+                if key not in ("BINARYRAT_ENGINE", "BINARYRAT_CACHE_DIR")
+            }
+            environment["BINARYRAT_CACHE_DIR"] = directory
+            executable = shutil.which("binaryrat-decompile")
+            if _REQUIRE_SHARED_SERVICE:
+                self.assertIsNotNone(executable, "install the BinaryRat wheel to test its CLI")
+            command = [
+                *([executable] if executable is not None else [sys.executable, "-m", "binaryrat.decompile_cli"]),
+                str(self.marker),
+                self.program_path, str(self.target), "--install-dir", str(self.install), "--json",
+            ]
+            for cache_status in ("miss", "replayed"):
+                reply = subprocess.run(command, env=environment, encoding="utf-8", capture_output=True,
+                                       timeout=90)
+                self.assertEqual(reply.returncode, 0, reply.stderr)
+                result = json.loads(reply.stdout)
+                self.assertEqual(result["backend"], "scheduled")
+                self.assertEqual(result["cache_status"], cache_status)
+                self.assertEqual(result["c"], stock.c)
+                self.assertEqual(result["prototype"], stock.prototype)
+            self.assertTrue(any(path.is_file() for path in Path(directory).rglob("*")),
+                            "the scheduled CLI did not use the configured cache directory")
+            environment["BINARYRAT_ENGINE"] = str(Path(directory) / "missing-engine")
+            failed = subprocess.run(command, env=environment, encoding="utf-8", capture_output=True, timeout=90)
+            self.assertEqual(failed.returncode, 2)
+            self.assertIn("BinaryRat scheduled decompilation failed", failed.stderr)
+            self.assertFalse(failed.stdout.strip(), "scheduled failure produced an apparent stock result")
+        self.assertEqual(before, self.snapshot())
+
+    def test_foreground_adapter_reads_a_live_program_with_unsaved_metadata(self):
+        import pyghidra
+        from ghidra.framework import Application
+        from ghidra.program.model.symbol import SourceType
+        from javax.swing import SwingUtilities
+        from jpype import JProxy
+
+        if Application.getModuleRootDir("BinaryRat") is None:
+            self.skipTest("live foreground checks require the BinaryRat extension")
+        before = self.snapshot()
+        with open_program(self.marker, self.program_path, backend="stock") as view:
+            program = view._program
+            entry = view._native_address(program, self.target)
+            with pyghidra.transaction(program, "Rename a function in memory"):
+                function = program.getFunctionManager().getFunctionAt(entry)
+                function.setName("live_answer", SourceType.USER_DEFINED)
+            run = decompile_program(program, self.target)
+            self.assertEqual(run.backend, "scheduled")
+            self.assertTrue(run.result.successful, run.result.error)
+            self.assertEqual(run.result.function.name, "live_answer")
+            self.assertFalse(program.isClosed(), "exiting the adapter closed its caller's Program")
+            blocked = []
+
+            def read_on_edt():
+                try:
+                    decompile_program(program, self.target)
+                except LiveProgramError as error:
+                    blocked.append(str(error))
+
+            SwingUtilities.invokeAndWait(JProxy("java.lang.Runnable", dict(run=read_on_edt)))
+            self.assertEqual(blocked, ["decompile_program must run off the Ghidra UI thread"])
+        self.assertTrue(program.isClosed(), "the adapter left a consumer on the Program")
+        with self.assertRaisesRegex(LiveProgramError, "closed"):
+            decompile_program(program, self.target)
+        self.assertEqual(before, self.snapshot())
+        with open_program(self.marker, self.program_path, backend="stock") as view:
+            self.assertEqual(view.function_at(self.target).name, "answer")
+
+    def test_live_service_reuses_jvm_across_independent_clients(self):
+        from ghidra.framework import Application
+
+        before = self.snapshot()
+        executable = shutil.which("binaryrat-live")
+        if _REQUIRE_SHARED_SERVICE:
+            self.assertIsNotNone(executable, "install the BinaryRat wheel to test its live command")
+        runner = [executable] if executable is not None else [sys.executable, "-m", "binaryrat.live_service"]
         process = subprocess.Popen(
-            [sys.executable, "-m", "binaryrat.live_service", str(self.marker),
+            [*runner, str(self.marker),
              self.program_path, "--install-dir", str(self.install), "--idle-timeout", "8",
              "--max-heap-mb", "512"],
             stdout=subprocess.PIPE, text=True, encoding="utf-8",
@@ -342,6 +459,8 @@ class LiveGhidraTests(unittest.TestCase):
         try:
             ready_line = ready.get(timeout=90)
             endpoint = LiveEndpoint.from_ready_line(ready_line)
+            expected = "stock" if Application.getModuleRootDir("BinaryRat") is None else "scheduled"
+            self.assertEqual(endpoint.backend, expected)
             client = LiveClient(endpoint)
             self.assertEqual(client.info().path, self.program_path)
             first = client.functions(limit=1)

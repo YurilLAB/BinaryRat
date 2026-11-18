@@ -11,7 +11,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from .models import Address
 
@@ -23,6 +23,9 @@ _MAX_TYPE_COUNT = 100_000
 _DECOMPILER_PAYLOAD_MB = 4
 _OFFSET_MASK = (1 << 64) - 1
 _STARTUP_LOCK = Lock()
+_SCHEDULED_TIMEOUT_SECONDS = 86_400
+
+DecompilationBackend = Literal["auto", "scheduled", "stock"]
 
 
 class LiveProgramError(RuntimeError):
@@ -88,6 +91,15 @@ class ProgramDecompilation:
         return self.completed and not (
             self.timed_out or self.cancelled or self.failed_to_start
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ProgramDecompilationRun:
+    """A result and the backend and cache outcome that produced it."""
+
+    result: ProgramDecompilation
+    backend: Literal["scheduled", "stock"]
+    cache_status: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,9 +192,14 @@ class ProgramView:
     usable after the context exits.
     """
 
-    def __init__(self, program: Any, path: str, cancel: Event | None):
+    def __init__(self, program: Any, path: str, cancel: Event | None, scheduled_service: Any = None,
+                 *, foreground: bool = False):
         self._program: Any | None = program
         self._decompiler: Any | None = None
+        self._scheduled_service = scheduled_service
+        self._scheduled_session: Any | None = None
+        self._scheduled_timeout: int | None = None
+        self._foreground = foreground
         self._cancel = cancel
         self._lock = Lock()
         revision = int(program.getModificationNumber())
@@ -203,12 +220,29 @@ class ProgramView:
     def info(self) -> ProgramInfo:
         return self._info
 
+    @property
+    def decompilation_backend(self) -> Literal["scheduled", "stock"]:
+        """Which backend this view uses for decompilation."""
+        return "stock" if self._scheduled_service is None else "scheduled"
+
     def _invalidate(self) -> None:
         with self._lock:
             self._program = None
             decompiler, self._decompiler = self._decompiler, None
             if decompiler is not None:
                 self._close_decompiler(decompiler)
+            self._close_scheduled()
+
+    def _close_scheduled(self) -> None:
+        session, self._scheduled_session = self._scheduled_session, None
+        self._scheduled_timeout = None
+        if session is not None:
+            from jpype import JException
+
+            try:
+                session.close()
+            except JException as cause:
+                raise LiveProgramError(f"Could not close the BinaryRat decompilation session: {cause}") from cause
 
     def _check(self, program: Any) -> None:
         if program.isClosed():
@@ -364,10 +398,48 @@ class ProgramView:
         self._decompiler = decompiler
         return decompiler
 
+    def _decompile_scheduled(
+        self, program: Any, function: Any, summary: ProgramFunction, timeout: int, monitor: Any,
+    ) -> ProgramDecompilationRun:
+        from ghidra.util.exception import CancelledException
+        from jpype import JException
+
+        try:
+            if self._scheduled_timeout != timeout:
+                self._close_scheduled()
+                workers = int(self._scheduled_service.DEFAULT_WORKERS) if self._foreground else 1
+                self._scheduled_session = self._scheduled_service.open(program, workers, timeout)
+                self._scheduled_timeout = timeout
+            submit = (self._scheduled_session.decompileForegroundWithMetrics if self._foreground
+                      else self._scheduled_session.decompileWithMetrics)
+            run = submit(function, monitor)
+            result = run.output()
+            lookup = run.lookup()
+            output = ProgramDecompilation(
+                summary, self._info.revision, str(result.c()), str(result.prototype()),
+                bool(result.completed()), bool(result.timedOut()), bool(result.cancelled()),
+                bool(result.failedToStart()), str(result.error() or ""),
+            )
+            return ProgramDecompilationRun(
+                output, "scheduled", "disabled" if lookup is None else str(lookup.kind().name()).lower(),
+            )
+        except CancelledException as cause:
+            raise CancelledError("BinaryRat decompilation cancelled") from cause
+        except JException as cause:
+            raise LiveProgramError(f"BinaryRat scheduled decompilation failed: {cause}") from cause
+
     def decompile(self, entry: Address, *, timeout_seconds: int = 30) -> ProgramDecompilation:
-        """Decompile one function with the view's stock decompiler."""
+        """Decompile one function with the backend selected when the view opened."""
+        return self.decompile_with_metrics(entry, timeout_seconds=timeout_seconds).result
+
+    def decompile_with_metrics(
+        self, entry: Address, *, timeout_seconds: int = 30,
+    ) -> ProgramDecompilationRun:
+        """Decompile one function and report the backend and cache outcome."""
         if type(timeout_seconds) is not int or not 1 <= timeout_seconds < (1 << 31):
             raise ValueError("timeout_seconds must be a positive 32-bit integer")
+        if self._scheduled_service is not None and timeout_seconds > _SCHEDULED_TIMEOUT_SECONDS:
+            raise ValueError(f"scheduled timeout_seconds must be between 1 and {_SCHEDULED_TIMEOUT_SECONDS}")
         with self._read() as program:
             function = program.getFunctionManager().getFunctionAt(
                 self._native_address(program, entry)
@@ -375,11 +447,12 @@ class ProgramView:
             if function is None:
                 raise LookupError(f"no function at {entry}")
             summary = _function(function)
-            decompiler = self._get_decompiler(program)
             with _monitor(self._cancel) as monitor:
-                result = decompiler.decompileFunction(function, timeout_seconds, monitor)
+                if self._scheduled_service is not None:
+                    return self._decompile_scheduled(program, function, summary, timeout_seconds, monitor)
+                result = self._get_decompiler(program).decompileFunction(function, timeout_seconds, monitor)
             code = result.getDecompiledFunction()
-            return ProgramDecompilation(
+            output = ProgramDecompilation(
                 summary,
                 self._info.revision,
                 str(code.getC()) if code is not None else "",
@@ -390,6 +463,7 @@ class ProgramView:
                 bool(result.failedToStart()),
                 str(result.getErrorMessage() or ""),
             )
+            return ProgramDecompilationRun(output, "stock", None)
 
 
 def _start(install_dir: Path | None, max_heap_mb: int | None) -> None:
@@ -426,6 +500,65 @@ def _start(install_dir: Path | None, max_heap_mb: int | None) -> None:
                 raise LiveProgramError("running JVM heap exceeds the requested ceiling")
 
 
+def _scheduled_service(backend: DecompilationBackend) -> Any:
+    if backend == "stock":
+        return None
+    from ghidra.framework import Application
+    from jpype import JClass, JException
+
+    if Application.getModuleRootDir("BinaryRat") is None:
+        if backend == "auto":
+            return None
+        raise LiveProgramError("Scheduled decompilation requires the BinaryRat extension")
+    try:
+        # The Java package name matches this Python package. Resolve the Java
+        # class explicitly rather than asking Python's normal import machinery.
+        return JClass("binaryrat.DecompilationSession")
+    except (TypeError, JException) as cause:
+        raise LiveProgramError("Installed BinaryRat extension lacks the shared decompilation service") from cause
+
+
+def decompile_program(
+    program: Any, entry: Address, *, timeout_seconds: int | None = None, cancel: Event | None = None,
+) -> ProgramDecompilationRun:
+    """Decompile a caller-owned live Program in the current PyGhidra JVM.
+
+    Call from a worker, with a stable Program revision and no running
+    auto-analysis. The call reads the supplied Program, including its current
+    edits, through BinaryRat's foreground decompilation service.
+    """
+    try:
+        from jpype import isJVMStarted
+    except ModuleNotFoundError as cause:
+        if cause.name != "jpype":
+            raise
+        raise LiveProgramError("decompile_program requires a Program in an initialized PyGhidra JVM") from cause
+
+    if not isJVMStarted():
+        raise LiveProgramError("decompile_program requires a Program in an initialized PyGhidra JVM")
+    from ghidra.program.model.listing import Program
+    from java.lang import Object
+    from javax.swing import SwingUtilities
+
+    if not isinstance(program, Program):
+        raise TypeError("expected a live Ghidra Program")
+    if SwingUtilities.isEventDispatchThread():
+        raise LiveProgramError("decompile_program must run off the Ghidra UI thread")
+    _check_cancel(cancel)
+    service = _scheduled_service("scheduled")
+    timeout = int(service.DEFAULT_TIMEOUT_SECONDS) if timeout_seconds is None else timeout_seconds
+    consumer = Object()
+    if not program.addConsumer(consumer):
+        raise LiveProgramError("Ghidra Program is closed")
+    with ExitStack() as cleanup:
+        cleanup.callback(program.release, consumer)
+        domain_file = program.getDomainFile()
+        path = str(domain_file.getPathname()) if domain_file is not None else str(program.getName())
+        view = ProgramView(program, path, cancel, service, foreground=True)
+        cleanup.callback(view._invalidate)
+        return view.decompile_with_metrics(entry, timeout_seconds=timeout)
+
+
 @contextmanager
 def open_program(
     project_file: str | Path,
@@ -434,13 +567,18 @@ def open_program(
     install_dir: str | Path | None = None,
     cancel: Event | None = None,
     max_heap_mb: int | None = None,
+    backend: DecompilationBackend = "auto",
 ) -> Iterator[ProgramView]:
     """Open a saved Program in a local .gpr project using read-only storage.
 
     Pass the Program's absolute path inside its project. The context releases
     the Program and project storage. Later calls in the same Python process
-    reuse the PyGhidra JVM.
+    reuse the PyGhidra JVM. The automatic backend uses scheduling when the
+    BinaryRat extension is installed and stock Ghidra on a plain installation.
+    A scheduled operation reports startup, engine or cache errors to its caller.
     """
+    if backend not in ("auto", "scheduled", "stock"):
+        raise ValueError("backend must be 'auto', 'scheduled' or 'stock'")
     marker = Path(project_file).resolve()
     if marker.suffix != ".gpr":
         raise ValueError("project_file must be a Ghidra .gpr project marker")
@@ -454,6 +592,7 @@ def open_program(
         raise ValueError("max_heap_mb must be an integer of at least 256")
     _check_cancel(cancel)
     _start(Path(install_dir).resolve() if install_dir is not None else None, max_heap_mb)
+    scheduled_service = _scheduled_service(backend)
     from ghidra.framework.data import DefaultProjectData
     from ghidra.framework.model import DomainFile, DomainFileFilter, ProjectLocator
     from ghidra.program.model.listing import Program
@@ -490,6 +629,6 @@ def open_program(
                 cleanup.callback(program.release, consumer)
         except CancelledException as cause:
             raise CancelledError("Ghidra Program open cancelled") from cause
-        view = ProgramView(program, program_path, cancel)
+        view = ProgramView(program, program_path, cancel, scheduled_service)
         cleanup.callback(view._invalidate)
         yield view

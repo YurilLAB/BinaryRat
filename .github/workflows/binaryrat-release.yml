@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 YurilLAB
+name: Publish BinaryRat
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful BinaryRat CI run for this master revision
+        type: string
+        required: true
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: binaryrat-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Verify the CI run and publish both complete application archives
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          import hashlib, json, os, re, subprocess
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          run_id = os.environ["RUN_ID"]
+          revision = os.environ["GITHUB_SHA"]
+          if not re.fullmatch(r"[1-9][0-9]+", run_id):
+              raise SystemExit("Provide the numeric ID of a completed BinaryRat CI run")
+
+          run = json.loads(subprocess.check_output(
+              ["gh", "api", f"repos/{repository}/actions/runs/{run_id}"], text=True))
+          if (run.get("path") != ".github/workflows/binaryrat.yml" or
+                  run.get("head_repository", {}).get("full_name") != repository or
+                  run.get("head_branch") != "master" or run.get("head_sha") != revision or
+                  run.get("status") != "completed" or run.get("conclusion") != "success"):
+              raise SystemExit("The release requires all BinaryRat checks to pass for this revision of master")
+
+          with TemporaryDirectory(prefix="binaryrat-release-") as directory:
+              root = Path(directory)
+              assets = []
+              for runner, platform in (("ubuntu-latest", "linux"), ("windows-latest", "windows")):
+                  target = root / platform
+                  subprocess.run(["gh", "run", "download", run_id, "--repo", repository,
+                                  "--name", f"binaryrat-complete-{runner}-{revision}",
+                                  "--dir", str(target)], check=True)
+                  archive, = target.glob(f"BinaryRat-*-{revision[:12]}-{platform}_x86_64.zip")
+                  checksum = archive.with_suffix(".zip.sha256")
+                  with archive.open("rb") as source:
+                      digest = hashlib.file_digest(source, "sha256").hexdigest()
+                  if checksum.read_text(encoding="ascii").split() != [digest, "*" + archive.name]:
+                      raise SystemExit(f"Invalid checksum for {archive.name}")
+                  assets.extend((str(archive), str(checksum)))
+
+              notes = root / "notes.md"
+              notes.write_text(
+                  "Download the ZIP for Windows x64 or Linux x64 and extract it. "
+                  "Launch BinaryRat from the extracted folder and create a local project to import a binary. "
+                  "Temurin JDK 25, the patched Ghidra distribution, the native engine, "
+                  "local help and a sample binary are included.\n\n"
+                  f"[Verification and separate Ghidra extensions](https://github.com/{repository}/actions/runs/{run_id})\n",
+                  encoding="utf-8")
+              tag = "binaryrat-" + revision[:12]
+              subprocess.run(["gh", "release", "create", tag, *assets, "--repo", repository, "--target", revision,
+                              "--draft", "--prerelease", "--title", f"BinaryRat preview {revision[:12]}",
+                              "--notes-file", str(notes)], check=True)
+              subprocess.run(["gh", "release", "edit", tag, "--repo", repository, "--draft=false"], check=True)

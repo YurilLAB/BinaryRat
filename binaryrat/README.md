@@ -4,6 +4,16 @@ BinaryRat's new engine is C++20. Ghidra's existing Java framework, SLEIGH, nativ
 decompiler, and database are retained. This repository starts at the official
 `Ghidra_12.2_build` tag; version and archive hashes are in `UPSTREAM.json`.
 
+## Complete application releases
+
+The fork-build jobs assemble one ZIP per x64 platform from the same commit's
+patched Ghidra distribution, native engine, compiled extension, and tested
+Temurin 25 JDK. They run the extracted bundle with the bundled runtime, import
+and decompile the example, and exercise the default desktop workspace and the
+included Python wheel. The `Publish BinaryRat` workflow takes a successful CI
+run ID for the current revision of `master` and publishes both verified ZIPs
+and their checksums. [Downloads](https://github.com/YurilLAB/BinaryRat/releases)
+
 ## Build the C++ engine
 
 Requires CMake 3.24+, a C++20 compiler, and Python 3 for tests. No dependency

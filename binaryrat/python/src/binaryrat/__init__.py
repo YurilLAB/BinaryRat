@@ -5,13 +5,16 @@ from .exports import ExportError, load_export, parse_export
 from .live import (
     CrossReference,
     DataTypeInfo,
+    DecompilationBackend,
     LiveProgramError,
     Page,
     ProgramDecompilation,
+    ProgramDecompilationRun,
     ProgramFunction,
     ProgramInfo,
     ProgramView,
     StaleProgramError,
+    decompile_program,
     open_program,
 )
 from .models import Address, Decompilation, Function, TypeProposal
@@ -23,7 +26,8 @@ PROTOCOL_VERSION = 1
 __all__ = [
     "Address", "Function", "Decompilation", "TypeProposal", "EngineClient",
     "EngineError", "ProtocolError", "ExportError", "load_export", "parse_export",
-    "CrossReference", "DataTypeInfo", "LiveProgramError", "Page", "ProgramDecompilation",
-    "ProgramFunction", "ProgramInfo", "ProgramView", "StaleProgramError", "open_program",
+    "CrossReference", "DataTypeInfo", "DecompilationBackend", "LiveProgramError", "Page",
+    "ProgramDecompilation", "ProgramDecompilationRun",
+    "ProgramFunction", "ProgramInfo", "ProgramView", "StaleProgramError", "decompile_program", "open_program",
     "API_VERSION", "PROTOCOL_VERSION",
 ]

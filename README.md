@@ -5,6 +5,8 @@
 
 BinaryRat is an open-source reverse-engineering project for Linux and Windows, built on Ghidra 12.2. Its C++20 engine manages decompilation scheduling and caching, and a Java extension connects it to Ghidra's native decompiler. [Ghidra 12.2 upstream](https://github.com/NationalSecurityAgency/ghidra/tree/Ghidra_12.2_build)
 
+**Download BinaryRat for Windows x64 or Linux x64.** Each complete ZIP includes the patched Ghidra build, BinaryRat's native engine and compiled extension, the default desktop workspace, JDK 25, and local help with an example binary. Extract the ZIP, launch `binaryrat.bat` on Windows or `./binaryrat` on Linux, then create a local project and import a binary. [Downloads](https://github.com/YurilLAB/BinaryRat/releases)
+
 ## What BinaryRat does
 
 - **Parallel decompilation** schedules native decompiler processes within CPU and memory budgets and enforces per-function deadlines.
@@ -13,7 +15,7 @@ BinaryRat is an open-source reverse-engineering project for Linux and Windows, b
 - **Layout recovery in CodeBrowser** examines a function parameter at the cursor and lets you jump from a proposed field to the load or store that supports it.
 - **C++ recovery** reports Itanium and MSVC class relationships and vtables.
 - **Reviewed type creation** lets an analyst approve a new structure with provenance and native Ghidra undo.
-- **Desktop and scripting access** provides exports from CodeBrowser and headless Ghidra, plus typed Python access to saved Programs through PyGhidra.
+- **Desktop and scripting access** provides BinaryRat actions in CodeBrowser, headless exports, and typed Python access through PyGhidra.
 - **BinaryRat analyst tools** compare two decompiler exports with `binaryrat-diff` and show which instructions support a proposed field with `binaryrat-explain`. Both work offline on saved reports.
 
 ## Project status

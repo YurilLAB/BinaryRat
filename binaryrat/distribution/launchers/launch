@@ -1,0 +1,25 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+set -eu
+root=$(CDPATH="" cd -- "$(dirname -- "$0")/.." && pwd)
+mode=$1
+shift
+if [ "${1:-}" = --version ] && [ "$#" -eq 1 ]; then
+    exec cat "$root/VERSION.txt"
+fi
+export JAVA_HOME="$root/jdk"
+if [ ! -x "$JAVA_HOME/bin/java" ]; then
+    echo "The bundled JDK is missing or cannot execute. Extract the complete BinaryRat archive." >&2
+    exit 1
+fi
+export PATH="$JAVA_HOME/bin:$PATH"
+export BINARYRAT_BUNDLE_DIR="$root"
+unset BINARYRAT_ENGINE
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/BinaryRat"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/BinaryRat"
+mkdir -p -- "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
+case "$mode" in
+    desktop) exec "$root/ghidra/ghidraRun" "$@" ;;
+    headless) exec "$root/ghidra/support/analyzeHeadless" "$@" ;;
+    *) exit 2 ;;
+esac

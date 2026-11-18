@@ -295,7 +295,7 @@ jobs:
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
-          java-version: '25'
+          java-version: '25.0.5+8'
       - if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
@@ -356,6 +356,82 @@ jobs:
         run: |
           python binaryrat/benchmarks/verify_no_return.py --stock-ghidra build/ghidra-stock/ghidra_12.2_PUBLIC --candidate-ghidra "$BINARYRAT_CANDIDATE" --output build/reports/no-return-parity
           python binaryrat/benchmarks/benchmark_no_return.py --stock-ghidra build/ghidra-stock/ghidra_12.2_PUBLIC --candidate-ghidra "$BINARYRAT_CANDIDATE" --output build/reports/no-return-timing --timeout 150
+      - name: Compile and test the bundled engine and extension
+        shell: python
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          options = ["-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>"] if os.name == "nt" else []
+          subprocess.run(["cmake", "-S", "binaryrat", "-B", "build/bundle-engine", *options], check=True)
+          subprocess.run(["cmake", "--build", "build/bundle-engine", "--config", "Release", "--parallel", "2"], check=True)
+          subprocess.run(["ctest", "--test-dir", "build/bundle-engine", "-C", "Release", "--output-on-failure"], check=True)
+          engine = Path("build/bundle-engine") / ("Release/binaryrat-engine.exe" if os.name == "nt" else "binaryrat-engine")
+          wrapper = str(Path("gradlew.bat" if os.name == "nt" else "gradlew").resolve())
+          subprocess.run([wrapper, "-p", "binaryrat/bridge", "--no-daemon", "buildExtension",
+                          "-PbinaryratEngine=" + str(engine.resolve())],
+                         env=os.environ | {"GHIDRA_INSTALL_DIR": os.environ["BINARYRAT_CANDIDATE"]}, check=True)
+          subprocess.run([sys.executable, "-m", "pip", "wheel", "--no-deps", "--wheel-dir", "build/bundle-wheels",
+                          "./binaryrat/python"], check=True)
+      - name: Assemble and test the complete BinaryRat application
+        shell: python
+        env:
+          EXPECTED_REVISION: ${{ matrix.revision }}
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          ghidra, = Path("build/dist").glob("ghidra_*.zip")
+          extension, = Path("binaryrat/bridge/dist").glob("BinaryRat-ghidra-*.zip")
+          wheel, = Path("build/bundle-wheels").glob("binaryrat-*-py3-none-any.whl")
+          walkthrough = Path("binaryrat/distribution/examples/walkthrough.c").resolve()
+          example_dir = Path("build/bundle-example")
+          example_dir.mkdir()
+          example = (example_dir / ("example.exe" if os.name == "nt" else "example")).resolve()
+          compile_example = (["cl", "/nologo", "/Od", "/MT", "/Fe:" + str(example), str(walkthrough)]
+                             if os.name == "nt" else
+                             ["cc", "-std=c11", "-O0", "-s", "-rdynamic", "-o", str(example), str(walkthrough)])
+          subprocess.run(compile_example, cwd=example_dir, check=True)
+          source = Path("build") / "OpenJDK25U-jdk-sources_25.0.5_8.tar.gz"
+          url = "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/" + source.name
+          curl = "curl.exe" if os.name == "nt" else "curl"
+          subprocess.run([curl, "--fail", "--silent", "--show-error", "--location", "--retry", "3",
+                          "--output", str(source), url], check=True)
+          subprocess.run([sys.executable, "binaryrat/distribution/build_bundle.py", "--ghidra", str(ghidra),
+                          "--extension", str(extension), "--jdk", os.environ["JAVA_HOME"], "--jdk-source", str(source),
+                          "--revision", os.environ["EXPECTED_REVISION"], "--wheel", str(wheel), "--example", str(example),
+                          "--output", "build/binaryrat-dist"], check=True)
+          bundle, = Path("build/binaryrat-dist").glob("BinaryRat-*.zip")
+          subprocess.run([sys.executable, "binaryrat/distribution/verify_bundle.py", "--archive", str(bundle),
+                          "--output", "build/reports/standalone", "--extract-dir", "build/br"], check=True)
+          display = [] if os.name == "nt" else ["xvfb-run", "-a"]
+          subprocess.run([*display, sys.executable, "binaryrat/distribution/verify_workspace.py",
+                          "--bundle", "build/br/BinaryRat", "--output", "build/reports/workspace"], check=True)
+      - name: Check bundle tooling and shared decompilation from the bundled Python wheel
+        shell: python
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          for suite in ("binaryrat/distribution", "binaryrat/distribution/tests"):
+              subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", suite], check=True)
+          bundle = Path("build/br/BinaryRat").resolve()
+          ghidra = bundle / "ghidra"
+          wheels = ghidra / "Ghidra/Features/PyGhidra/pypkg/dist"
+          subprocess.run([sys.executable, "-m", "pip", "install", "--no-index",
+                          "--find-links", str(wheels), "--find-links", str(bundle / "python"),
+                          "binaryrat[live]"], check=True)
+          env = os.environ | {"JAVA_HOME": str(bundle / "jdk"), "JAVA_HOME_OVERRIDE": str(bundle / "jdk"),
+                              "BINARYRAT_GHIDRA_INSTALL_DIR": str(ghidra),
+                              "BINARYRAT_REQUIRE_SHARED_SERVICE": "1"}
+          subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "binaryrat/python/tests",
+                          "-p", "test_live_ghidra.py"], env=env, check=True)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: binaryrat-complete-${{ matrix.os }}-${{ matrix.revision }}
+          path: |
+            build/binaryrat-dist/BinaryRat-*.zip
+            build/binaryrat-dist/BinaryRat-*.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

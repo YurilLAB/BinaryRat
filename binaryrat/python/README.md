@@ -77,6 +77,9 @@ Install the optional dependency with `python -m pip install './binaryrat/python[
 or install `pyghidra==3.2.0` from the official distribution's
 `Ghidra/Features/PyGhidra/pypkg/dist` wheel directory. Set `JAVA_HOME` to JDK 25
 and `GHIDRA_INSTALL_DIR` to Ghidra 12.2, or supply the installation explicitly.
+For the complete BinaryRat archive, use its `ghidra/` directory as the
+installation. Set `JAVA_HOME_OVERRIDE` to the sibling `jdk/` directory
+to select the bundled JDK in PyGhidra.
 
 ```python
 from binaryrat import open_program
@@ -106,9 +109,53 @@ All methods perform read-only inspection of saved, non-linked Programs.
 The view checks the Program modification number before and after reads.
 Open a new context after saving a different Program revision. An optional
 `threading.Event` can interrupt a decompilation and cancel a listing between
-records. Each Program context reuses one stock decompiler, with a per-call
-deadline and Ghidra's 4 MiB reply ceiling. Closing the context stops the
-decompiler and releases its Program.
+records. The default `backend="auto"` uses the shared BinaryRat scheduler
+when the extension is installed and uses Ghidra's stock backend on a plain
+Ghidra installation. Set `backend="scheduled"` to require the extension,
+or `backend="stock"` to run the stock backend with a 4 MiB native reply
+ceiling. Startup, engine, cache and running-analysis errors from the scheduled
+backend reach the caller. A context closes its decompilation session before
+releasing its Program.
+
+`view.decompilation_backend` reports the selected backend.
+`view.decompile_with_metrics(entry)` includes the result and its cache
+status. Set `BINARYRAT_CACHE_DIR` before launching Python to persist scheduled
+results. Use a directory dedicated to one running engine. Reopening a saved
+Program can reuse persisted results after replay checks.
+
+## Decompile from the CLI
+
+`binaryrat-decompile` is available after installing the wheel. With PyGhidra
+installed and your Ghidra 12.2 installation selected, run
+
+```console
+binaryrat-decompile workspace.gpr /program ram:0x401000 --json
+```
+
+The CLI requires the shared scheduler by default. Pass `--install-dir` to
+select a Ghidra installation explicitly. The address is an unsigned
+hexadecimal offset. Omit the address space to use the Program's image-base
+space. By default the command writes C on success. The JSON form includes
+the backend, cache status and decompiler flags. Exit status is 0 on success,
+1 for an incomplete decompilation, 2 for invalid input or an unavailable
+Program or backend, and 130 on interruption.
+
+## Read a Program already open in PyGhidra
+
+In a PyGhidra script with a Program handle in the same JVM, pass it directly
+to the foreground service. Run this on a worker after auto-analysis has
+finished.
+
+```python
+from binaryrat import Address, decompile_program
+
+result = decompile_program(currentProgram, Address("ram", 0x401000))
+print(result.result.c)
+```
+
+The call reads the Program's current in-memory revision and releases its own
+consumer while preserving the caller's ownership. Use the saved-project
+commands for a project in a separate desktop process.
 
 ## Keep a local JVM open between Python processes
 
@@ -116,7 +163,7 @@ Launch the read service for a specific saved Program. Capture its standard
 output privately and pass the `binaryrat-live` ready line to authorized clients.
 
 ```text
-python -m binaryrat.live_service workspace.gpr /program --idle-timeout 300
+binaryrat-live workspace.gpr /program --idle-timeout 300
 ```
 
 ```python
@@ -130,7 +177,8 @@ print(client.functions(limit=10).items)
 
 The ready line carries a random token and the loopback port. Each connection
 serves one bounded read over protocol version 1. Clients share one JVM and one
-Program context. The service processes requests serially, limits request
+Program context. The ready line identifies the backend. Set `--backend scheduled`
+to require the BinaryRat extension. The service processes requests serially, limits request
 packets to 16 KiB and responses to 1 MiB, caps listing offsets at 100,000,
 and passes a maximum 60-second function timeout to Ghidra. Exact-address and type lookups are
 available independently of the listing offset.
@@ -144,8 +192,10 @@ Run tests from the repository root:
 PYTHONPATH=binaryrat/python/src python -m unittest discover -s binaryrat/python/tests -v
 ```
 
-Set `BINARYRAT_GHIDRA_INSTALL_DIR` to the official Ghidra 12.2 installation to
-run the live integration tests, including a service used by separate clients.
+Set `BINARYRAT_GHIDRA_INSTALL_DIR` to a Ghidra 12.2 installation to run the
+live integration tests, including a service used by separate clients. Use the
+packaged application or install the compiled extension for the scheduled and
+foreground integration checks.
 
 On PowerShell set `$env:PYTHONPATH="binaryrat/python/src"` before running the
 `python -m unittest ...` command. All new files are licensed under Apache-2.0;

@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Callable;
@@ -23,6 +24,7 @@ import java.util.stream.Stream;
 import javax.swing.*;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import docking.ComponentProvider;
 import ghidra.GhidraApplicationLayout;
 import ghidra.GhidraLaunchable;
 import ghidra.app.services.CodeViewerService;
@@ -41,6 +43,7 @@ import ghidra.program.util.ProgramLocation;
 import ghidra.util.table.field.AddressBasedLocation;
 import ghidra.util.task.Task;
 import ghidra.util.task.TaskListener;
+import ghidra.util.task.TaskMonitor;
 import ghidra.util.extensions.ExtensionUtils;
 
 /** Run the shipped scripts through the actual Script Manager in a visible CodeBrowser. */
@@ -56,6 +59,15 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
             Preferences.setProperty("SHOW_TIPS", "false");
             GhidraProject project = GhidraProject.openProject(args[0], "layout", true);
             PluginTool tool = swing(() -> {
+                // The stock test tool explicitly adds the foreground plugin below.
+                // A new extension can prompt to configure it before this launch returns.
+                new Timer(100, event -> {
+                    JDialog notice = dialog("New Plugins Found!");
+                    if (notice != null) {
+                        widget(notice, JButton.class, button -> "No".equals(button.getText()))
+                            .doClick(0);
+                    }
+                }).start();
                 FrontEndTool front = new FrontEndTool(project.getProjectManager());
                 front.setActiveProject(project.getProject());
                 front.setVisible(true);
@@ -234,6 +246,10 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         if (program.isChanged()) {
             throw new AssertionError("Recovering or browsing evidence dirtied the opened Program");
         }
+        inspectForeground(tool, program, listing, entry, interior);
+        if (!swing(evidenceTable::isShowing)) {
+            throw new AssertionError("Evidence table closed before the fixture edit");
+        }
         try (var transaction = program.openTransaction("Diagnostic edit on disposable fixture")) {
             program.getBookmarkManager().setBookmark(entry, "Note", "GUI probe", "Test stale evidence closure");
         }
@@ -249,5 +265,120 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         }
         System.out.printf(Locale.ROOT, "BINARYRAT_GUI_NAVIGATION_OK %s %s %s %.3f %.3f%n",
             entry, interior, evidence, recoverSeconds, browseSeconds);
+    }
+
+    private static void inspectForeground(PluginTool tool, Program program, CodeViewerService listing,
+            Address entry, Address interior) throws Exception {
+        ProgramManager manager = tool.getService(ProgramManager.class);
+        var baselineOwners = new IdentityHashMap<Object, Boolean>();
+        program.getConsumerList().forEach(owner -> baselineOwners.put(owner, Boolean.TRUE));
+        var otherAddress = program.getSymbolTable().getGlobalSymbols("forward_packed")
+            .getFirst().getAddress();
+        var file = program.getDomainFile();
+        var copy = file.copyTo(file.getParent().createFolder("foreground-other"), TaskMonitor.DUMMY);
+        ComponentProvider view = swing(() -> {
+            ComponentProvider existing = tool.getWindowManager().getComponentProvider("BinaryRat Function");
+            if (existing == null) {
+                tool.addPlugin("binaryrat.desktop.BinaryRatForegroundPlugin");
+                existing = tool.getWindowManager().getComponentProvider("BinaryRat Function");
+            }
+            listing.goTo(new ProgramLocation(program, entry), true);
+            existing.setVisible(true);
+            return existing;
+        });
+        long firstMillis = awaitForeground(view, "read_packed");
+        var sessionOwners = program.getConsumerList().stream()
+            .filter(owner -> owner.getClass() == Object.class && !baselineOwners.containsKey(owner))
+            .toList();
+        if (sessionOwners.size() != 1) {
+            throw new AssertionError("Expected a Program owner for the first foreground session");
+        }
+        swing(() -> {
+            listing.goTo(new ProgramLocation(program, interior), true);
+            if (!foregroundStatus(view).getText().startsWith("Ready: read_packed")) {
+                throw new AssertionError("Moving inside the function restarted decompilation");
+            }
+            return null;
+        });
+
+        // Hold a Program transaction without edits. The request must wait with progress
+        // instead of racing the writer. Navigate away while it waits to supersede it.
+        int transaction = program.startTransaction("Hold fixture for foreground cancellation");
+        try {
+            swing(() -> listing.goTo(new ProgramLocation(program, otherAddress), true));
+            await("foreground waiting for stable Program", () ->
+                foregroundStatus(view).getText().startsWith("Waiting for Ghidra") ? Boolean.TRUE : null);
+            swing(() -> {
+                listing.goTo(new ProgramLocation(program, entry), true);
+                descendants(view.getComponent()).filter(JButton.class::isInstance)
+                    .map(JButton.class::cast).filter(button -> "Cancel".equals(button.getText()))
+                    .findFirst().orElseThrow().doClick(0);
+                if (!foregroundStatus(view).getText().contains("cancelled") ||
+                    !foregroundOutput(view).getText().isEmpty()) {
+                    throw new AssertionError("Cancelled request left a stale foreground result");
+                }
+                foregroundLimit(view).setValue(1);
+                listing.goTo(new ProgramLocation(program, otherAddress), true);
+                return null;
+            });
+            await("foreground request budget expiring", () ->
+                foregroundStatus(view).getText().contains("limit reached") &&
+                    foregroundOutput(view).getText().isEmpty() ? Boolean.TRUE : null);
+        }
+        finally {
+            program.endTransaction(transaction, true);
+        }
+        swing(() -> {
+            foregroundLimit(view).setValue(30);
+            descendants(view.getComponent()).filter(JButton.class::isInstance)
+                .map(JButton.class::cast).filter(button -> "Refresh".equals(button.getText()))
+                .findFirst().orElseThrow().doClick(0);
+            return null;
+        });
+        long secondMillis = awaitForeground(view, "forward_packed");
+        if (program.isChanged()) {
+            throw new AssertionError("Foreground inspection dirtied the active Program");
+        }
+
+        Program second = swing(() -> manager.openProgram(copy));
+        if (second == null || second == program) {
+            throw new AssertionError("Could not open the independent foreground test tab");
+        }
+        await("inactive tab releasing BinaryRat session", () ->
+            manager.getCurrentProgram() == second && sessionOwners.stream().noneMatch(program::isUsedBy) ?
+                Boolean.TRUE : null);
+        swing(() -> {
+            view.setVisible(false);
+            if (!manager.closeProgram(second, true)) {
+                throw new AssertionError("Could not close the disposable foreground test tab");
+            }
+            manager.setCurrentProgram(program);
+            listing.goTo(new ProgramLocation(program, entry), true);
+            return null;
+        });
+        System.out.printf(Locale.ROOT, "BINARYRAT_GUI_FOREGROUND_OK %d %d 2%n", firstMillis, secondMillis);
+    }
+
+    private static long awaitForeground(ComponentProvider view, String function) throws Exception {
+        long started = System.nanoTime();
+        await("foreground output for " + function, () ->
+            foregroundStatus(view).getText().startsWith("Ready: " + function + " at ") &&
+                foregroundOutput(view).getText().contains(function + "(") ? Boolean.TRUE : null);
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+    }
+
+    private static JLabel foregroundStatus(ComponentProvider view) {
+        return descendants(view.getComponent()).filter(JLabel.class::isInstance).map(JLabel.class::cast)
+            .filter(label -> "BinaryRat foreground status".equals(label.getName())).findFirst().orElseThrow();
+    }
+
+    private static JTextArea foregroundOutput(ComponentProvider view) {
+        return descendants(view.getComponent()).filter(JTextArea.class::isInstance).map(JTextArea.class::cast)
+            .filter(area -> "BinaryRat foreground C".equals(area.getName())).findFirst().orElseThrow();
+    }
+
+    private static JSpinner foregroundLimit(ComponentProvider view) {
+        return descendants(view.getComponent()).filter(JSpinner.class::isInstance).map(JSpinner.class::cast)
+            .findFirst().orElseThrow();
     }
 }

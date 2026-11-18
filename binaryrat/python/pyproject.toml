@@ -12,8 +12,10 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "yurillab"}]
 
 [project.scripts]
+binaryrat-decompile = "binaryrat.decompile_cli:main"
 binaryrat-diff = "binaryrat.export_diff:main"
 binaryrat-explain = "binaryrat.layout_explain:main"
+binaryrat-live = "binaryrat.live_service:main"
 
 [project.optional-dependencies]
 live = ["pyghidra==3.2.0"]

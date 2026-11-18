@@ -44,8 +44,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import binaryrat.CacheProof;
-import binaryrat.ChangeTracker;
 import binaryrat.DecompOutput;
+import binaryrat.DecompilationSession;
 import binaryrat.EngineClient;
 import binaryrat.LiveDecompileCache;
 import binaryrat.ScheduledDecompiler;
@@ -122,8 +122,8 @@ public class BinaryRatExport extends GhidraScript {
         if (!MODES.contains(mode)) {
             throw new IllegalArgumentException("Mode must be one of " + MODES);
         }
-        int workers = positiveInt(args, 2, 4, 256, "workers");
-        int timeout = positiveInt(args, 3, 60, 86400, "timeout");
+        int workers = positiveInt(args, 2, DecompilationSession.DEFAULT_WORKERS, 256, "workers");
+        int timeout = positiveInt(args, 3, DecompilationSession.DEFAULT_TIMEOUT_SECONDS, 86400, "timeout");
         int chunkSize = positiveInt(args, 4, DEFAULT_CHUNK_SIZE, 65536, "chunk size");
         revision = currentProgram.getModificationNumber();
         if (args.length == 6 && mode.equals("cache-proof")) {
@@ -302,18 +302,6 @@ public class BinaryRatExport extends GhidraScript {
         return value;
     }
 
-    private static long environment(String name, long fallback) {
-        String value = System.getenv(name);
-        if (value == null || value.isBlank()) {
-            return fallback;
-        }
-        long parsed = Long.parseLong(value.trim());
-        if (parsed < 0) {
-            throw new IllegalArgumentException(name + " must not be negative");
-        }
-        return parsed;
-    }
-
     private void checkEpoch() throws Exception {
         monitor.checkCancelled();
         if (currentProgram.getModificationNumber() != revision) {
@@ -373,11 +361,9 @@ public class BinaryRatExport extends GhidraScript {
             counts.addProperty(key, (counts.has(key) ? counts.get(key).getAsLong() : 0) + 1);
         }
 
-        synchronized boolean lookup(LiveDecompileCache.Lookup lookup) {
+        synchronized void lookup(LiveDecompileCache.Lookup lookup) {
             String rejected = lookup.rejected();
-            boolean usable = lookup.kind() != LiveDecompileCache.Kind.MISS &&
-                lookup.output() != null && lookup.output().cacheable() && rejected == null;
-            if (usable) {
+            if (lookup.usable()) {
                 if (lookup.kind() == LiveDecompileCache.Kind.HIT) {
                     hits++;
                 }
@@ -395,7 +381,6 @@ public class BinaryRatExport extends GhidraScript {
                     increment(lookupDiagnostics, rejected);
                 }
             }
-            return usable;
         }
 
         synchronized void store(boolean accepted, String reason) {
@@ -408,7 +393,7 @@ public class BinaryRatExport extends GhidraScript {
             }
         }
 
-        synchronized JsonObject report(LiveDecompileCache cache) throws IOException {
+        synchronized JsonObject report(JsonObject engineStats) {
             JsonObject result = new JsonObject();
             result.addProperty("enabled", enabled);
             result.addProperty("hits", hits);
@@ -419,8 +404,8 @@ public class BinaryRatExport extends GhidraScript {
             result.addProperty("store_rejected", storeRejected);
             result.add("store_diagnostics", storeDiagnostics.deepCopy());
             result.add("lookup_diagnostics", lookupDiagnostics.deepCopy());
-            if (cache != null) {
-                result.add("engine_stats", cache.stats());
+            if (engineStats != null) {
+                result.add("engine_stats", engineStats);
             }
             return result;
         }
@@ -544,13 +529,7 @@ public class BinaryRatExport extends GhidraScript {
         DecompInterface serialDecompiler = null;
         DecompilerCallback<String> callback = null;
         ExecutorService executor = null;
-        EngineClient engine = null;
-        ScheduledDecompiler scheduler = null;
-        ChangeTracker tracker = null;
-        LiveDecompileCache liveCache = null;
-        boolean persistentCache = false;
-        Path engineCache = null;
-        boolean temporaryEngineCache = false;
+        DecompilationSession session = null;
         Path temporarySummary = null;
         JsonObject scheduleReport = null;
         boolean published = false;
@@ -575,46 +554,11 @@ public class BinaryRatExport extends GhidraScript {
                 activeWorkers = workers;
             }
             else if (mode == Mode.SCHEDULED || mode == Mode.VERIFIED_CANDIDATE) {
-                String cachePath = System.getenv("BINARYRAT_CACHE_DIR");
-                if (cachePath != null && !cachePath.isBlank()) {
-                    if (!programId.matches("sha256:[0-9a-fA-F]{64}")) {
-                        throw new IOException("Persistent caching requires an executable SHA-256; " +
-                            "a Program name is not a safe cross-session identity");
-                    }
-                    // The engine owns and locks this directory for its complete
-                    // session. The bridge must neither create nor delete its files.
-                    engineCache = Path.of(cachePath).toAbsolutePath().normalize();
-                    persistentCache = true;
-                }
-                else {
-                    engineCache = Files.createTempDirectory(output.getParent(), ".binaryrat-engine-");
-                    temporaryEngineCache = true;
-                }
-                engine = EngineClient.start(EngineClient.findExecutable(), engineCache);
-                long leaseTimeout = environment("BINARYRAT_LEASE_TIMEOUT_MS", timeout * 1000L);
-                scheduler = new ScheduledDecompiler(engine, currentProgram, d -> configure(d, mode),
-                    new ScheduledDecompiler.Limits(workers,
-                        environment("BINARYRAT_WORKER_BYTES", 768L << 20),
-                        Runtime.getRuntime().maxMemory(),
-                        environment("BINARYRAT_OTHER_RESERVE_BYTES", 512L << 20),
-                        timeout, environment("BINARYRAT_KILL_GRACE_MS", 5000), leaseTimeout));
-                summary = new ScheduleSummary(persistentCache);
-                if (persistentCache) {
-                    tracker = new ChangeTracker(currentProgram, engine);
-                    // Freeze options and registration identity before any jobs can
-                    // borrow this sample decompiler or populate its temporary IDs.
-                    var sample = scheduler.sample();
-                    String registration = sample.registrationDigest();
-                    liveCache = new LiveDecompileCache(engine, currentProgram, tracker,
-                        sample.getOptions(), programId, registration);
-                    checkEpoch();
-                    println("BinaryRat persistent cache enabled directory=" + engineCache);
-                }
-                activeWorkers = scheduler.workers();
+                session = DecompilationSession.open(currentProgram, workers, timeout, mode.syntaxTree());
+                summary = new ScheduleSummary(session.cacheEnabled());
+                activeWorkers = session.workers();
                 println("BinaryRat engine admitted workers=" + activeWorkers + " requested=" +
-                    workers + " configuration=" + scheduler.configuration());
-                // More threads than admitted workers only queue in the engine; the
-                // engine, not this pool, decides how many decompilations run at once.
+                    workers + " configuration=" + session.configuration());
                 executor = Executors.newFixedThreadPool(workers);
             }
             else {
@@ -628,6 +572,9 @@ public class BinaryRatExport extends GhidraScript {
             FunctionIterator iterator = currentProgram.getFunctionManager().getFunctions(true);
             long count = 0;
             long excludedExternal = 0;
+            monitor.initialize(sample == null ? currentProgram.getFunctionManager().getFunctionCount() :
+                sample.size());
+            monitor.setMessage("Exporting BinaryRat decompilation (" + name + ")");
             MessageDigest digest = audit == null ? null : MessageDigest.getInstance("SHA-256");
             try (BufferedWriter writer = digest == null ?
                     Files.newBufferedWriter(temporary, StandardCharsets.UTF_8) :
@@ -653,13 +600,12 @@ public class BinaryRatExport extends GhidraScript {
                     // order, independent of the order in which workers finish.
                     if (executor != null) {
                         DecompilerCallback<String> activeCallback = callback;
-                        ScheduledDecompiler activeScheduler = scheduler;
-                        LiveDecompileCache activeCache = liveCache;
+                        DecompilationSession activeSession = session;
                         List<Future<String>> futures = new ArrayList<>(functions.size());
                         for (Function function : functions) {
-                            futures.add(executor.submit(() -> activeScheduler == null ?
+                            futures.add(executor.submit(() -> activeSession == null ?
                                 activeCallback.process(function, monitor) :
-                                scheduledRecord(activeScheduler, activeCache, function)));
+                                scheduledRecord(activeSession, function)));
                         }
                         for (Future<String> future : futures) {
                             String result = await(future);
@@ -687,6 +633,7 @@ public class BinaryRatExport extends GhidraScript {
                             count++;
                         }
                     }
+                    monitor.setProgress(sample == null ? count + excludedExternal : count);
                     checkEpoch();
                 }
             }
@@ -695,8 +642,8 @@ public class BinaryRatExport extends GhidraScript {
                 throw new IOException("Export did not cover every sampled function");
             }
             JsonObject parityReport = audit == null ? null : audit.finish(digest.digest());
-            if (scheduler != null) {
-                scheduleReport = makeSummary(scheduler, liveCache, workers);
+            if (session != null) {
+                scheduleReport = makeSummary(session, workers);
             }
             JsonObject outputReport = audit == null ? scheduleReport : parityReport;
             if (outputReport != null) {
@@ -763,23 +710,14 @@ public class BinaryRatExport extends GhidraScript {
                 if (serialDecompiler != null) {
                     serialDecompiler.dispose();
                 }
-                if (tracker != null) {
-                    tracker.close();
-                }
-                if (scheduler != null) {
-                    scheduler.close();
-                }
             }
             finally {
                 try {
-                    if (engine != null) {
-                        engine.close();
+                    if (session != null) {
+                        session.close();
                     }
                 }
                 finally {
-                    if (temporaryEngineCache && engineCache != null) {
-                        deleteTree(engineCache);
-                    }
                     Files.deleteIfExists(temporary);
                     if (temporarySummary != null) {
                         Files.deleteIfExists(temporarySummary);
@@ -789,49 +727,22 @@ public class BinaryRatExport extends GhidraScript {
         }
     }
 
-    private String scheduledRecord(ScheduledDecompiler scheduler, LiveDecompileCache cache,
-            Function function)
+    private String scheduledRecord(DecompilationSession session, Function function)
             throws Exception {
         checkEpoch();
-        long modification = currentProgram.getModificationNumber();
-        LiveDecompileCache.Lookup lookup = null;
-        if (cache != null) {
-            lookup = cache.lookup(function, false);
-            checkEpoch();
-            if (summary.cache.lookup(lookup)) {
-                String result = record(function, lookup.output());
-                checkEpoch();
-                return result;
+        var result = session.decompileWithMetrics(function, monitor);
+        if (result.lookup() != null) {
+            summary.cache.lookup(result.lookup());
+        }
+        if (result.lease() != null) {
+            summary.add(result.lease());
+            if (result.lookup() != null) {
+                summary.cache.store(result.stored(), result.storeRejection());
             }
         }
-        ScheduledDecompiler.Run run = cache == null ? scheduler.decompileUntraced(function, monitor) :
-            scheduler.decompile(function, monitor);
-        summary.add(run);
+        String row = record(function, result.output());
         checkEpoch();
-        if (run.traced() == null) {
-            if (cache != null) {
-                summary.cache.store(false, "no traced decompilation (lease " + run.status() + ")");
-            }
-            return record(function, new DecompOutput(false, false, true, false,
-                "BinaryRat: the engine did not grant a lease (" + run.status() + ")", "", ""));
-        }
-        DecompOutput output = DecompOutput.stopped(run.traced().results(), run.status(), run.stopReason());
-        if (cache != null) {
-            if (!output.cacheable()) {
-                summary.cache.store(false, "native output is not cacheable (lease " + run.status() + ")");
-            }
-            else if (!run.traced().trace().replayable()) {
-                summary.cache.store(false, "trace is not replayable");
-            }
-            else {
-                boolean stored = cache.store(function, output, run.traced().trace(), lookup.seq(), modification);
-                summary.cache.store(stored, "cache entry exceeded storage limits or failed optimistic validation");
-            }
-            checkEpoch();
-        }
-        String result = record(function, output);
-        checkEpoch();
-        return result;
+        return row;
     }
 
     private static void publish(Path temporary, Path output) throws IOException {
@@ -844,13 +755,12 @@ public class BinaryRatExport extends GhidraScript {
         }
     }
 
-    private JsonObject makeSummary(ScheduledDecompiler scheduler, LiveDecompileCache cache,
-            int requested)
+    private JsonObject makeSummary(DecompilationSession session, int requested)
             throws IOException {
         JsonObject report = new JsonObject();
         report.addProperty("requested_workers", requested);
-        report.add("engine_configuration", scheduler.configuration());
-        report.add("engine_stats", scheduler.stats());
+        report.add("engine_configuration", session.configuration());
+        report.add("engine_stats", session.stats());
         report.add("lease_status_counts", summary.leases);
         report.addProperty("leases", summary.count);
         report.addProperty("lease_run_millis_total", summary.runMillis);
@@ -859,7 +769,7 @@ public class BinaryRatExport extends GhidraScript {
         report.addProperty("memory_watched_leases", summary.memoryWatched);
         report.addProperty("traced_leases", summary.traced);
         report.addProperty("killed_processes", summary.killed);
-        report.add("cache", summary.cache.report(cache));
+        report.add("cache", summary.cache.report(session.cacheStats()));
         return report;
     }
 

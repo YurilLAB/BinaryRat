@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ArrayBlockingQueue;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -37,13 +38,19 @@ public final class LiveDecompileCache {
 	}
 
 	public record Lookup(Kind kind, DecompOutput output, long seq, String rejected) {
+		public boolean usable() {
+			return kind != Kind.MISS && output != null && output.cacheable() && rejected == null;
+		}
 	}
 
 	private final EngineClient engine;
 	private final Program program;
 	private final ChangeTracker tracker;
 	private final String programId;
-	private final ThreadLocal<TraceVerifier> verifiers;
+	// Desktop and Python workers can outlive several Programs. Keep each replay
+	// verifier with its cache owner rather than in the borrowing thread's state.
+	private final ArrayBlockingQueue<TraceVerifier> verifiers = new ArrayBlockingQueue<>(64);
+	private final DecompileOptions options;
 	private volatile String registration;
 
 	public LiveDecompileCache(EngineClient engine, Program program, ChangeTracker tracker,
@@ -53,7 +60,7 @@ public final class LiveDecompileCache {
 		this.tracker = tracker;
 		this.programId = programId;
 		this.registration = registration;
-		this.verifiers = ThreadLocal.withInitial(() -> new TraceVerifier(program, options));
+		this.options = options;
 	}
 
 	/** Re-keys the cache after something the decompiler registered with changed. */
@@ -115,7 +122,17 @@ public final class LiveDecompileCache {
 		for (JsonElement read : value.getAsJsonArray("reads")) {
 			reads.add(read.getAsString());
 		}
-		String why = verifiers.get().verify(function, reads, value.get("reads_sha256").getAsString());
+		TraceVerifier verifier = verifiers.poll();
+		if (verifier == null) {
+			verifier = new TraceVerifier(program, options);
+		}
+		String why;
+		try {
+			why = verifier.verify(function, reads, value.get("reads_sha256").getAsString());
+		}
+		finally {
+			verifiers.offer(verifier);
+		}
 		if (!unchanged(modification, registered)) {
 			return new Lookup(Kind.MISS, null, seq, "program or registration changed during replay");
 		}

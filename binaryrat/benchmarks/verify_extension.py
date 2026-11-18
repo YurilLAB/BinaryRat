@@ -10,11 +10,14 @@ import os
 from pathlib import Path
 import platform
 import re
+import subprocess
 import tempfile
 from zipfile import ZipFile
 
+from verify_analysis_profiles import verify_profiles
 from verify_ghidra import PROJECT, check_persistent_cache, measured_run, saved_project_hashes, sha256
 from verify_layout_parser import verify_parser
+from verify_plugin_compatibility import jdk
 from verify_type_accuracy import json_file, verified_fields
 
 
@@ -27,6 +30,24 @@ def verify_archive_checksum(archive: Path) -> str:
     if record not in (expected + b"\n", expected + b"\r\n"):
         raise ValueError(f"Incorrect SHA-256 checksum or archive name for {archive.name}")
     return digest
+
+
+def verify_admission_queue(ghidra: Path, jar: Path, output: Path) -> dict:
+    source = Path(__file__).with_name("service_fixture") / "AdmissionQueueProof.java"
+    log = output / "admission-queue.log"
+    with tempfile.TemporaryDirectory(prefix="admission proof ", dir=output) as directory:
+        libraries = sorted((ghidra / "Ghidra/Framework").glob("*/lib"))
+        classpath = os.pathsep.join(map(str, [directory, jar, *(lib / "*" for lib in libraries)]))
+        with log.open("wb") as diagnostics:
+            subprocess.run([jdk("javac"), "-proc:none", "-classpath", classpath, "-d", directory,
+                            str(source)], stdout=diagnostics, stderr=subprocess.STDOUT,
+                           check=True, timeout=120)
+            run = subprocess.run([jdk("java"), "-Xmx128m", "-classpath", classpath,
+                                  "binaryrat.AdmissionQueueProof"], stdout=diagnostics,
+                                 stderr=subprocess.STDOUT, timeout=60)
+    if run.returncode or "BINARYRAT_ADMISSION_QUEUE_OK" not in log.read_text(encoding="utf-8"):
+        raise RuntimeError(f"packaged admission order or cancellation proof failed (see {log})")
+    return {"passed": True, "log": log.name}
 
 
 def verify_review_cli(project: list[str], report: Path, output: Path, environment: dict[str, str]) -> dict:
@@ -82,21 +103,25 @@ def main() -> None:
         names = set(package.namelist())
         if (len(names) != len(package.namelist()) or engine_entry not in names or
                 "BinaryRat/Module.manifest" not in names or
-                "BinaryRat/ghidra_scripts/binaryrat/RttiEvidence.java" not in names or
-                any(name.startswith("BinaryRat/installed_scripts/") and name.endswith(".java")
+                any(name.startswith(("BinaryRat/installed_scripts/", "BinaryRat/ghidra_scripts/binaryrat/"))
+                    and name.endswith(".java")
                     for name in names) or
                 {name for name in names if name.endswith(".java") and
                  name.count("/") == 2} != {
                      "BinaryRat/ghidra_scripts/BinaryRatBrowseLayout.java",
                      "BinaryRat/ghidra_scripts/BinaryRatExport.java",
+                     "BinaryRat/ghidra_scripts/BinaryRatProfile.java",
                      "BinaryRat/ghidra_scripts/BinaryRatRecoverLayouts.java",
                      "BinaryRat/ghidra_scripts/BinaryRatRecoverRtti.java",
                      "BinaryRat/ghidra_scripts/BinaryRatReviewLayout.java"}):
             raise RuntimeError("unexpected extension contents")
         with ZipFile(io.BytesIO(package.read("BinaryRat/lib/BinaryRat.jar"))) as library:
             if not {"binaryrat/writeback/ProtectedLayoutWriteBack.class",
-                    "binaryrat/writeback/LayoutEvidenceBrowser.class"} <= set(library.namelist()):
-                raise RuntimeError("extension is missing a layout review service")
+                    "binaryrat/writeback/LayoutEvidenceBrowser.class",
+                    "binaryrat/analysis/AnalysisProfiles.class",
+                    "binaryrat/DecompilationSession.class",
+                    "binaryrat/RttiEvidence.class"} <= set(library.namelist()):
+                raise RuntimeError("extension is missing a shared Java service")
         for name in ("LICENSE", "NOTICE"):
             if package.read(f"BinaryRat/{name}") != (PROJECT / name).read_bytes():
                 raise RuntimeError(f"missing or altered extension {name}")
@@ -143,13 +168,18 @@ def main() -> None:
         if (len(installed) != 1 or not os.access(installed[0], os.X_OK) or
                 hashlib.sha256(installed[0].read_bytes()).hexdigest() != engine_sha256):
             raise RuntimeError("installed native engine is missing or differs from the archive")
+        admission_proof = verify_admission_queue(args.ghidra.resolve(),
+                                                 installed[0].parents[2] / "lib/BinaryRat.jar", output)
 
         proof = check_persistent_cache(headless, fixture, None, "installed", output, 2, 300,
                                        environment)
         layout_proof = None
         browse_proof = None
+        service_proof = None
+        profiles_proof = None
         writeback_proof = None
         if artifact["id"].endswith("/types"):
+            profiles_proof = verify_profiles(headless, fixture, output / "analysis-profiles", environment)
             layout = output / "installed-layout.json"
             layout.unlink(missing_ok=True)
             layout_log = output / "installed-layout.log"
@@ -185,6 +215,17 @@ def main() -> None:
             writeback_log = output / "protected-layout.log"
             project = [str(headless), str(root), "installed-layout", "-process", fixture.name, "-noanalysis"]
             before = saved_project_hashes(root, "installed-layout")
+            service_log = output / "shared-decompilation-service.log"
+            service = measured_run([
+                *project, "-readOnly", "-scriptPath", str(writeback_scripts),
+                "-postScript", "BinaryRatSharedServiceProof.java",
+            ], service_log, 300, environment | {"BINARYRAT_CACHE_DIR": str(root / "shared evidence cache")})
+            service_text = service_log.read_text(encoding="utf-8", errors="replace")
+            if (service["returncode"] or service_text.count("BINARYRAT_SHARED_SERVICE_OK") != 1 or
+                    "REPORT SCRIPT ERROR" in service_text):
+                raise RuntimeError(f"packaged shared decompilation proof failed (see {service_log})")
+            service_proof = {"passed": True, "log": service_log.name,
+                             "wall_seconds": service["wall_seconds"]}
             browse_log = output / "browse-layout.log"
             browse = measured_run([
                 *project, "-readOnly", "-scriptPath", str(writeback_scripts),
@@ -203,7 +244,7 @@ def main() -> None:
             if before != after:
                 changed = sorted(name for name in before.keys() | after.keys()
                                  if before.get(name) != after.get(name))
-                raise RuntimeError(f"browsing layout evidence changed saved project files: {changed}")
+                raise RuntimeError(f"read-only evidence or decompilation changed saved project files: {changed}")
             browse_proof = {"passed": True, "reports": len(proof_args), "rows": int(match[0][1]),
                             "unchanged_project_files": len(before), "wall_seconds": browse["wall_seconds"],
                             "log": browse_log.name}
@@ -236,7 +277,8 @@ def main() -> None:
               "isolated_install": True, "explicit_invalid_override_rejected": True,
               "stock_parity_and_persistence": proof, "packaged_layout_evidence": layout_proof,
               "packaged_layout_browser": browse_proof, "layout_parser": parser_proof,
-              "protected_layout_writeback": writeback_proof}
+              "protected_layout_writeback": writeback_proof, "shared_decompilation": service_proof,
+              "interactive_admission": admission_proof, "analysis_profiles": profiles_proof}
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Installed BinaryRat extension passed stock parity and persistence: {report_path}")
 

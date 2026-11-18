@@ -91,11 +91,13 @@ def main():
                    binary.name, str(report)], output / "gui.log", env, 300)
         result = re.findall(r"^BINARYRAT_GUI_NAVIGATION_OK (\w+) (\w+) (\w+) ([0-9.]+) ([0-9.]+)$",
                             log, re.MULTILINE)
+        foreground = re.findall(r"^BINARYRAT_GUI_FOREGROUND_OK (\d+) (\d+) (\d+)$", log, re.MULTILINE)
         if 'Exception in thread "AWT-EventQueue' in log:
             raise RuntimeError(f"CodeBrowser raised an uncaught Swing exception. See {output / 'gui.log'}")
-        if len(result) != 1:
-            raise RuntimeError("Missing GUI navigation confirmation")
+        if len(result) != 1 or len(foreground) != 1:
+            raise RuntimeError("Missing GUI navigation or foreground decompilation confirmation")
     entry, cursor, navigated, recovery_time, browse_time = result[0]
+    first_ms, next_ms, cancellations = (int(value) for value in foreground[0])
     details = {"passed": True, "fixture": artifact["id"], "binary_sha256": artifact["binary_sha256"],
                "report_sha256": hashlib.sha256(report.read_bytes()).hexdigest(), "function_entry": entry,
                "recovery_cursor": cursor, "navigated_instruction": navigated,
@@ -103,7 +105,11 @@ def main():
                "closed_after_program_edit": True,
                "program_clean_after_navigation": True, "instruction_bytes_verified": True,
                "gui_wall_seconds_including_script_compilation_and_dialogs": {
-                   "recover": float(recovery_time), "browse_and_navigate": float(browse_time)}}
+                   "recover": float(recovery_time), "browse_and_navigate": float(browse_time)},
+               "foreground_decompilation": {"first_ms": first_ms, "next_ms": next_ms,
+                                             "cancelled_requests": cancellations,
+                                             "inactive_tab_released_session": True,
+                                             "program_clean": True}}
     (output / "report.json").write_text(json.dumps(details, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(details))
 

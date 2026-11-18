@@ -23,6 +23,12 @@ if (properties.getProperty('application.version') != version) {
 
 apply from: ghidraBuild
 
+// Compile the shared implementation once for the desktop, installed scripts,
+// and PyGhidra. The checkout still supports stock Ghidra's source-script runner.
+tasks.named('compileJava', JavaCompile) {
+    source(fileTree('ghidra_scripts/binaryrat') { include '**/*.java' })
+}
+
 def os = System.getProperty('os.name').toLowerCase(Locale.ROOT)
 def arch = [amd64: 'x86_64', x86_64: 'x86_64', aarch64: 'arm_64', arm64: 'arm_64'][
     System.getProperty('os.arch')]
@@ -40,16 +46,16 @@ tasks.named('buildExtension', Zip) {
     reproducibleFileOrder = true
     def checksum = destinationDirectory.file(archiveFileName.map { it + '.sha256' })
     outputs.file(checksum)
-    def installedScripts = ['BinaryRatReviewLayout.java', 'BinaryRatBrowseLayout.java']
+    def installedScripts = ['BinaryRatReviewLayout.java', 'BinaryRatBrowseLayout.java',
+        'BinaryRatProfile.java']
     def shippedScripts = ['BinaryRatExport.java', 'BinaryRatRecoverLayouts.java',
         'BinaryRatRecoverRtti.java'] + installedScripts
     eachFile { entry ->
         if (entry.path.startsWith('BinaryRat/installed_scripts/')) {
             entry.exclude()
         }
-        // The bridge package is loaded by Ghidra's ordinary Java script compiler.
+        // Only script entrypoints belong here. Shared classes come from BinaryRat.jar.
         if (entry.path.startsWith('BinaryRat/ghidra_scripts/') &&
-            !entry.path.startsWith('BinaryRat/ghidra_scripts/binaryrat/') &&
             !shippedScripts.contains(entry.name)) {
             entry.exclude()
         }

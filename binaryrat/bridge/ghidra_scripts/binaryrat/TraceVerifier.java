@@ -17,7 +17,8 @@ import ghidra.program.model.pcode.PcodeDataTypeManager;
 /**
  * Asks the current program every question a recorded decompilation asked and checks
  * that every answer is unchanged. When they all are, the decompiler would compute the
- * same output, so the cached output is still correct. Not thread safe; one per thread.
+ * same output, so the cached output is still correct. Only one replay may use an
+ * individual verifier at a time.
  */
 public final class TraceVerifier {
 	private final Program program;

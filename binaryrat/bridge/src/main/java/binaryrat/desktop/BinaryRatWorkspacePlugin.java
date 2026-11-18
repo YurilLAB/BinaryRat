@@ -1,0 +1,77 @@
+// Copyright 2026 YurilLAB
+// SPDX-License-Identifier: Apache-2.0
+package binaryrat.desktop;
+
+import docking.action.DockingAction;
+import docking.action.builder.ActionBuilder;
+import ghidra.app.plugin.ProgramPlugin;
+import ghidra.app.services.GhidraScriptService;
+import ghidra.framework.plugintool.PluginInfo;
+import ghidra.framework.plugintool.PluginTool;
+import ghidra.framework.plugintool.util.PluginStatus;
+import ghidra.program.model.listing.Program;
+import ghidra.program.util.ProgramLocation;
+import ghidra.util.Msg;
+
+/** Put the supported desktop workflows in a new CodeBrowser workspace. */
+@PluginInfo(
+    status = PluginStatus.RELEASED,
+    packageName = BinaryRatPluginPackage.NAME,
+    category = "Analysis",
+    shortDescription = "BinaryRat workspace actions",
+    description = "Export, recover and inspect BinaryRat evidence from CodeBrowser.",
+    servicesRequired = { GhidraScriptService.class }
+)
+public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
+
+    private final DockingAction export;
+    private final DockingAction recover;
+    private final DockingAction browse;
+    private final DockingAction profile;
+
+    public BinaryRatWorkspacePlugin(PluginTool tool) {
+        super(tool);
+        new ActionBuilder("Getting Started", getName())
+            .menuPath("Tools", "BinaryRat", "Getting Started")
+            .menuGroup("0_help")
+            .onAction(context -> showGettingStarted())
+            .buildAndInstall(tool);
+        export = scriptAction("Export Decompilation", "BinaryRatExport.java", "2_evidence");
+        recover = scriptAction("Recover Layout at Cursor", "BinaryRatRecoverLayouts.java", "2_evidence");
+        browse = scriptAction("Browse Layout Evidence", "BinaryRatBrowseLayout.java", "2_evidence");
+        profile = scriptAction("Analyze with Profile", "BinaryRatProfile.java", "1_analysis");
+    }
+
+    @Override
+    protected void programActivated(Program program) {
+        locationChanged(currentLocation);
+    }
+
+    @Override
+    protected void locationChanged(ProgramLocation location) {
+        boolean open = currentProgram != null;
+        export.setEnabled(open);
+        recover.setEnabled(open && location != null);
+        browse.setEnabled(open);
+        profile.setEnabled(open);
+    }
+
+    private DockingAction scriptAction(String title, String script, String group) {
+        return new ActionBuilder(title, getName())
+            .menuPath("Tools", "BinaryRat", title)
+            .menuGroup(group)
+            .enabled(false)
+            .onAction(context -> tool.getService(GhidraScriptService.class).runScript(script, null))
+            .buildAndInstall(tool);
+    }
+
+    private void showGettingStarted() {
+        Msg.showInfo(this, tool.getToolFrame(), "Getting Started with BinaryRat",
+            "<html><b>Open a binary</b><br>" +
+            "In the project window, create or open a local project and choose File &rarr; Import File.<br>" +
+            "Double-click the imported program to open it in CodeBrowser.<br><br>" +
+            "<b>Inspect analysis and evidence</b><br>" +
+            "Choose an action from Tools &rarr; BinaryRat, or use the Listing and Decompiler normally.<br>" +
+            "The application archive includes an offline guide in help/GettingStarted.html.</html>");
+    }
+}

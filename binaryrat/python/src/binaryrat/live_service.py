@@ -140,12 +140,15 @@ class LiveEndpoint:
 
     port: int
     token: str = field(repr=False)
+    backend: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.port) is not int or not 1 <= self.port <= 65535:
             raise ValueError("invalid local service port")
         if not isinstance(self.token, str) or _TOKEN.fullmatch(self.token) is None:
             raise ValueError("invalid local service token")
+        if self.backend not in (None, "scheduled", "stock"):
+            raise ValueError("invalid local service decompilation backend")
 
     @classmethod
     def from_ready_line(cls, line: str) -> LiveEndpoint:
@@ -155,7 +158,7 @@ class LiveEndpoint:
         if type(item.get("version")) is not int or item["version"] != LIVE_PROTOCOL_VERSION:
             raise LiveProtocolError("unsupported live protocol version")
         try:
-            return cls(item["port"], item["token"])
+            return cls(item["port"], item["token"], item.get("backend"))
         except (KeyError, ValueError) as cause:
             raise LiveProtocolError("invalid local service endpoint") from cause
 
@@ -358,6 +361,8 @@ def main() -> None:
     parser.add_argument("project_file")
     parser.add_argument("program_path")
     parser.add_argument("--install-dir")
+    parser.add_argument("--backend", choices=("auto", "scheduled", "stock"), default="auto",
+                        help="auto uses BinaryRat scheduling when the extension is installed")
     parser.add_argument("--idle-timeout", type=int, default=300, metavar="SECONDS")
     parser.add_argument("--max-heap-mb", type=int, default=1024)
     args = parser.parse_args()
@@ -368,7 +373,7 @@ def main() -> None:
     try:
         with open_program(
             args.project_file, args.program_path, install_dir=args.install_dir,
-            max_heap_mb=args.max_heap_mb,
+            max_heap_mb=args.max_heap_mb, backend=args.backend,
         ) as view:
             token = secrets.token_urlsafe(32)
             with _Service(view, token) as service:
@@ -376,6 +381,7 @@ def main() -> None:
                     "version": LIVE_PROTOCOL_VERSION,
                     "port": service.server_address[1],
                     "token": token,
+                    "backend": view.decompilation_backend,
                 }
                 print(READY_PREFIX + json.dumps(ready), flush=True)
                 service.serve_until_idle(args.idle_timeout)
