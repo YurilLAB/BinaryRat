@@ -183,7 +183,9 @@ void LeaseScheduler::run(const std::shared_ptr<State>& state, std::stop_token to
     LeaseGrant grant;
     {
         std::lock_guard lock(state->mutex);
-        if (state->dropped) return;
+        // A worker freed during shutdown may admit a lease shutdown has not reached
+        // yet; leave it ungranted so shutdown reports it cancelled.
+        if (state->dropped || shutting_down_) return;
         state->granted = true;
         state->granted_at = Clock::now();
         grant.lease = state->name;

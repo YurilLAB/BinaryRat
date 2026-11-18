@@ -392,6 +392,31 @@ void shutdown_cancels_queued_and_unblocks_running() {
     scheduler.shutdown();
 }
 
+// Shutdown visits leases in hash-map order, which differs between standard
+// libraries. A running lease visited first frees its worker while queued leases
+// are still unvisited; none of them may be granted after shutdown has begun.
+void shutdown_never_grants_queued_leases() {
+    constexpr int queued = 40;
+    for (int round = 0; round < 20; ++round) {
+        Recorder recorder;
+        auto opts = options(std::make_shared<FakeProbe>());
+        opts.budget.cpu_workers = 1;
+        opts.max_pending = queued;
+        LeaseScheduler scheduler(opts, recorder.events());
+        scheduler.acquire("running", lease(100), recorder.callbacks());
+        require(eventually([&] { return recorder.was_granted("running"); }), "running");
+        for (int i = 0; i < queued; ++i)
+            scheduler.acquire("queued-" + std::to_string(i), lease(100), recorder.callbacks());
+        scheduler.shutdown();
+        require(recorder.granted().size() == 1, "shutdown grants no queued lease");
+        const auto refused = recorder.refused();
+        require(refused.size() == queued &&
+                    std::all_of(refused.begin(), refused.end(),
+                                [](const auto& end) { return end.second == LeaseStatus::Cancelled; }),
+                "every queued lease is reported cancelled");
+    }
+}
+
 void host_probe_reads_this_process_and_refuses_stale_identities() {
     const auto machine = host::machine();
     require(machine.logical_cpus >= 1, "at least one CPU");
@@ -432,6 +457,7 @@ int main() {
     misuse_is_reported();
     full_queue_is_refused_without_blocking();
     shutdown_cancels_queued_and_unblocks_running();
+    shutdown_never_grants_queued_leases();
     host_probe_reads_this_process_and_refuses_stale_identities();
     std::cout << "scheduler tests passed" << std::endl;
     return 0;
