@@ -6,6 +6,7 @@ include(CTest)
 find_package(Threads REQUIRED)
 
 add_library(binaryrat_core
+  native/src/admission.cpp
   native/src/cache.cpp
   native/src/executor.cpp
   native/src/ownership.cpp
@@ -34,7 +35,7 @@ install(FILES native/third_party/picosha2/LICENSE
   DESTINATION share/licenses/BinaryRat/picosha2)
 
 if(BUILD_TESTING)
-  foreach(test_name cache executor types ownership)
+  foreach(test_name admission cache executor types ownership)
     add_executable(${test_name}_test native/tests/${test_name}_test.cpp)
     target_link_libraries(${test_name}_test PRIVATE binaryrat_core)
     add_test(NAME native.${test_name} COMMAND ${test_name}_test)

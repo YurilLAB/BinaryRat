@@ -32,6 +32,10 @@ See [protocol](protocol/README.md) and [Python client](python/README.md).
 ## What is implemented
 
 - Bounded C++ executor with exception propagation and orderly shutdown.
+- Admission-controlled C++ executor: worker count from a CPU/RAM budget, per-task
+  memory reservations with strict FIFO admission, execution deadlines and
+  cancellation, and explicit completed/failed/timed-out/cancelled/rejected
+  statuses. Not yet attached to the Java decompiler pool or to `serve`.
 - Persistent SHA-256-addressed artifact storage, checksummed records, atomic
   replacement, explicit dependency invalidation, and exclusive process ownership.
 - Pure C++ layout-evidence aggregation: preserve gaps and overlapping

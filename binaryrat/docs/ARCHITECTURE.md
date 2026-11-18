@@ -55,9 +55,10 @@ short read locks; immutable exported DTOs are results of an optimistic attempt,
 not database snapshots. No correctness claim depends on a stable read epoch.
 
 **Current implementation versus target:** the native artifact server, bounded
-executor, preliminary layout-evidence aggregation, typed client and headless
-stock-decompiler adapter exist. Shared Java proposal services, automatic live
-invalidation, RAM admission, coordinated type application and a persistent
+executor, memory-admission executor, preliminary layout-evidence aggregation,
+typed client and headless stock-decompiler adapter exist. Shared Java proposal
+services, automatic live invalidation, attaching RAM admission to the Java
+decompiler pool, coordinated type application and a persistent
 Ghidra/PyGhidra JVM daemon remain implementation gates. A persistent native
 process is not a persistent Ghidra JVM.
 
