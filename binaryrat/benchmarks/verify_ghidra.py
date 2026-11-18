@@ -207,7 +207,7 @@ def compare_fresh_jvm_exports(cold: Path, warm: Path) -> dict:
                                for (before, after), count in sorted(revisions.items())]}
 
 
-def check_persistent_cache(headless: Path, binary: Path, script_directory: Path,
+def check_persistent_cache(headless: Path, binary: Path, script_directory: Path | None,
                            identity: str, destination: Path, workers: int, timeout: float,
                            environment: dict[str, str]) -> dict:
     """Reopen one saved analyzed Program in a fresh JVM using its persistent cache.
@@ -233,8 +233,10 @@ def check_persistent_cache(headless: Path, binary: Path, script_directory: Path,
                 argv += ["-import", str(binary)]
             else:
                 argv += ["-process", binary.name, "-noanalysis", "-readOnly"]
-            argv += ["-scriptPath", str(script_directory), "-postScript", "BinaryRatExport.java",
-                     str(prefix), "compare-scheduled", str(workers), "60", "128"]
+            if script_directory is not None:
+                argv += ["-scriptPath", str(script_directory)]
+            argv += ["-postScript", "BinaryRatExport.java", str(prefix), "compare-scheduled",
+                     str(workers), "60", "128"]
             measured = measured_run(argv, log, timeout, cache_env)
             if measured["returncode"]:
                 raise RuntimeError(f"Ghidra persistent {state} process failed; see {log}")
@@ -300,6 +302,32 @@ def verify_cache_proof(report_path: Path, log: Path) -> dict:
             "timing": report.get("timing")}
 
 
+def check_redirected_call_cache(headless: Path, script_directory: Path, destination: Path,
+                                engine: Path, timeout: float, environment: dict[str, str]) -> dict:
+    """Prove that in-session fixup edits invalidate an already redirected caller."""
+    report_path = destination / "redirected-call-cache.json"
+    log = destination / "redirected-call-cache.log"
+    report_path.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory(prefix="redirected call-", dir=destination) as directory:
+        session = Path(directory)
+        measured = measured_run([
+            str(headless), str(session), "fixture", "-deleteProject", "-scriptPath",
+            str(script_directory), "-preScript", "BinaryRatRedirectedCallCheck.java",
+            str(engine), str(session / "cache"), str(report_path)],
+            log, timeout, environment)
+    if (measured["returncode"] or not report_path.is_file() or
+            "BinaryRat redirected call cache checks passed" not in
+            log.read_text(encoding="utf-8", errors="replace")):
+        raise RuntimeError(f"redirected call cache proof did not complete; see {log}")
+    proof = json.loads(report_path.read_text(encoding="utf-8"))
+    expected = {"stock_output_changed": True, "add_fixup": "MISS", "clear_fixup": "MISS",
+                "unrelated_entry_unchanged": True, "precise_invalidation": True}
+    if proof.get("passed") is not True or any(proof.get(case) != expected for case in (
+            "primary_call", "explicit_call_override", "inherited_thunk_fixup")):
+        raise RuntimeError(f"redirected call cache proof failed; see {report_path} and {log}")
+    return {**proof, "wall_seconds": measured["wall_seconds"]}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ghidra", type=Path, required=True)
@@ -350,6 +378,11 @@ def main() -> int:
     environment = os.environ.copy()
     environment.pop("BINARYRAT_CACHE_DIR", None)
     try:
+        if engine:
+            report["redirected_call_cache"] = check_redirected_call_cache(
+                headless, PROJECT / "binaryrat/bridge/ghidra_scripts",
+                destination, engine, args.timeout, environment)
+            print("PASS live cache invalidation after editing an original call fixup", flush=True)
         for artifact in manifest["artifacts"]:
             binary = (corpus_root / artifact["binary"]).resolve()
             if corpus_root.resolve() not in binary.parents:

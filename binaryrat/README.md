@@ -53,6 +53,8 @@ See [protocol](protocol/README.md) and [Python client](python/README.md).
   an object origin is unknown. Scores are uncalibrated evidence strength.
 - A minimal headless Java adapter using Ghidra's existing `DecompInterface` and
   `DecompilerCallback`, with serial/parallel/scheduled exact-output comparison.
+- An installable Ghidra extension with the native engine and headless bridge.
+  [Build and install](bridge/README.md#install-the-extension)
 - Typed Python value objects, streaming export parsing, and native-engine client.
 - C/C++ corpus builders with separate DWARF/PDB oracles, stripping checks,
   cross-target manifests, and CI for Linux/Windows.
@@ -81,8 +83,10 @@ python binaryrat/benchmarks/verify_ghidra.py \
 
 With `--engine`, the verifier checks scheduled output against stock, tests cold
 and warm exports in separate JVMs, and exercises deadlines, resident memory limits,
-and interrupted leases through Ghidra. CI also reopens a cached project after a
-function rename made while the engine is offline. The verifier checks output records and
+and interrupted leases through Ghidra. CI installs the host extension ZIP into
+isolated settings and repeats the cold and warm checks through its bundled
+engine. CI also reopens a cached project after a function rename made while the
+engine is offline. The verifier checks output records and
 script success messages because Ghidra can return zero after a postScript fails.
 For repeated diagnostic timing, use `--repetitions 5`. The report explicitly
 labels sampled process-tree RSS and separates overall headless-run wall time
@@ -96,7 +100,7 @@ PATH_TO_ENGINE --seed 0 --steps 1000`.
 ## Remaining milestones
 
 Scheduled headless exports can reuse results across JVM restarts. The next
-integration is packaging and GUI access. Type work starts with extracting layout
+integration is GUI access. Type work starts with extracting layout
 evidence from real programs and exposing
 read-only proposals, followed by protected write-back and native undo. The
 remaining [architecture milestones](docs/ARCHITECTURE.md) cover interprocedural

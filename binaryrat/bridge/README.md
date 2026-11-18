@@ -8,6 +8,29 @@ fresh decompilation (`cache-proof`). It does not perform type recovery or provid
 a persistent daemon. Its helper classes are in `ghidra_scripts/binaryrat/`; Ghidra
 compiles them with the script.
 
+## Install the extension
+
+Build the C++ engine, then use JDK 25 and the repository's Gradle wrapper to
+package the engine and bridge for the current 64-bit Linux or Windows host.
+Use the official Ghidra 12.2 installation directory and the absolute path to
+an engine compiled for the same platform and architecture.
+
+```sh
+export GHIDRA_INSTALL_DIR=/path/to/ghidra_12.2_PUBLIC
+./gradlew -p binaryrat/bridge buildExtension \
+  -PbinaryratEngine=/absolute/path/to/binaryrat-engine
+```
+
+On Windows use `gradlew.bat` and the path to `binaryrat-engine.exe`.
+In the Ghidra project window, open **File → Install Extensions**, add the ZIP
+from `binaryrat/bridge/dist`, and restart Ghidra. The ZIP includes the matching
+native engine, the bridge sources, and their license notices.
+
+Ghidra discovers `BinaryRatExport.java` in the installed module. Omit
+`-scriptPath` and `BINARYRAT_ENGINE` in the headless command below to use
+the installed script and bundled executable. To use a custom engine build,
+set `BINARYRAT_ENGINE` to its executable path.
+
 ## Run
 
 Use the official `Ghidra_12.2_build` distribution and JDK 25. Run this as a
@@ -31,8 +54,9 @@ OUTPUT serial|parallel|compare|compare-reverse|scheduled|compare-scheduled|cache
        [WORKERS=4] [TIMEOUT_SECONDS=60] [CHUNK_SIZE=128]
 ```
 
-`scheduled`, `compare-scheduled` and `cache-proof` start the C++ engine named by
-the environment variable `BINARYRAT_ENGINE` (a built `binaryrat-engine`).
+`scheduled`, `compare-scheduled` and `cache-proof` start the bundled C++ engine
+or the executable selected by `BINARYRAT_ENGINE`. Loose scripts require that
+variable when no extension is installed.
 Set `BINARYRAT_CACHE_DIR` to a dedicated directory to reuse cached results in
 `scheduled` and `compare-scheduled` exports. For example:
 
@@ -69,9 +93,11 @@ throws on any byte difference, like `compare`.
 
 ## Scheduled decompilation
 
-Every scheduled cache miss takes a lease from the engine's scheduler first. The engine
-measures CPUs and physical memory (affinity and Linux cgroup limits applied) and
-admits at most `min(CPUs, WORKERS, (RAM - JVM max heap - other reserve) /
+Every scheduled cache miss takes a lease from the engine's scheduler first. The
+engine sizes its budget from CPUs and physical memory. On Linux it applies
+CPU affinity and the tightest applicable CPU and RAM limits exposed by the
+process's cgroup mounts and their visible ancestors. It admits at most
+`min(CPUs, WORKERS, (RAM - JVM max heap - other reserve) /
 worker reservation)` decompilations at once, first in, first out. Each Java worker
 thread waits for its lease; each admitted lease borrows one of that many
 stock `DecompInterface` instances and attaches its native decompiler process, whose
@@ -99,9 +125,12 @@ already reused by another function.
 | `BINARYRAT_LEASE_TIMEOUT_MS` | `TIMEOUT_SECONDS` | engine deadline per decompilation; the decompiler's own timeout stays as a backstop 30 s later |
 | `BINARYRAT_KILL_GRACE_MS` | 5000 | time to release after a stop before the process is killed |
 
-The JVM's maximum heap is the JVM reserve. Output equals `serial` byte for byte
-when nothing is stopped; a 1 MiB reservation or a 1 ms deadline stops real
-decompilations, which is how the enforcement paths are checked.
+The JVM's maximum heap is the JVM reserve. The C/C++ fixture suite checks
+byte-for-byte equality with `serial`. A large libLLVM sample found differences
+in Ghidra's generated temporary names. The strict comparison reports those
+differences. A 1 MiB reservation or a 1 ms deadline stops real decompilations,
+which is how the enforcement paths are checked.
+[libLLVM evidence](../docs/evidence/llvm19-linux.md)
 
 ## Live cache and `cache-proof`
 
@@ -113,6 +142,10 @@ the native build, renderer, translator, compiled SLEIGH, core types, processor
 and compiler specifications, and options) holds the output, read trace, and
 dependencies. Dependencies include 256-byte memory ranges and symbol names.
 Unknown injection payload classes require replay before reuse.
+For redirected calls, the cache also records the original targets whose call
+fixups are consulted during SLEIGH translation, including inherited thunk
+fixups. The integration test changes those fixups within one live Program and
+checks the refreshed result against stock decompilation.
 
 `binaryrat/ChangeTracker` turns every Program change record into the dependencies
 it touched and reports them to the engine, which removes the entries that read them.

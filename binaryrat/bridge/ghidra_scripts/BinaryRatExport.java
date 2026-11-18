@@ -43,6 +43,9 @@ import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.decompiler.parallel.DecompilerCallback;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.script.GhidraScript;
+import ghidra.framework.Application;
+import ghidra.framework.OSFileNotFoundException;
+import ghidra.framework.Platform;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressRange;
 import ghidra.program.model.listing.Function;
@@ -150,13 +153,22 @@ public class BinaryRatExport extends GhidraScript {
 
     private static Path engineBinary() {
         String value = System.getenv("BINARYRAT_ENGINE");
+        Path engine;
         if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException(
-                "BINARYRAT_ENGINE must name the binaryrat-engine executable for this mode");
+            String name = "binaryrat-engine" + Platform.CURRENT_PLATFORM.getExecutableExtension();
+            try {
+                engine = Application.getOSFile("BinaryRat", name).toPath();
+            }
+            catch (OSFileNotFoundException missing) {
+                throw new IllegalArgumentException("Install the BinaryRat extension for this platform " +
+                    "or set BINARYRAT_ENGINE to the binaryrat-engine executable", missing);
+            }
         }
-        Path engine = Path.of(value).toAbsolutePath().normalize();
-        if (!Files.isRegularFile(engine)) {
-            throw new IllegalArgumentException("BINARYRAT_ENGINE does not exist: " + engine);
+        else {
+            engine = Path.of(value).toAbsolutePath().normalize();
+        }
+        if (!Files.isRegularFile(engine) || !Files.isExecutable(engine)) {
+            throw new IllegalArgumentException("BinaryRat engine is not an executable file: " + engine);
         }
         return engine;
     }

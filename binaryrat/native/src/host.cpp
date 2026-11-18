@@ -14,6 +14,8 @@
 #include <windows.h>
 #include <psapi.h>
 #elif defined(__linux__)
+#include "host_cgroups.hpp"
+
 #include <cerrno>
 #include <charconv>
 #include <csignal>
@@ -105,40 +107,6 @@ std::optional<std::uint64_t> running_since(std::uint64_t pid) {
     return parse_unsigned(field);
 }
 
-std::string own_cgroup() {
-    const auto groups = read_text("/proc/self/cgroup");
-    if (!groups) return {};
-    std::istringstream lines(*groups);
-    std::string line;
-    while (std::getline(lines, line)) {
-        if (line.rfind("0::", 0) == 0) return line.substr(3);
-    }
-    return {};
-}
-
-std::optional<std::uint64_t> cgroup_memory_limit() {
-    const auto group = own_cgroup();
-    for (const auto& path : {"/sys/fs/cgroup" + group + "/memory.max",
-                             std::string("/sys/fs/cgroup/memory.max"),
-                             std::string("/sys/fs/cgroup/memory/memory.limit_in_bytes")}) {
-        if (const auto text = read_text(path)) {
-            if (const auto value = parse_unsigned(*text)) return value;
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<std::size_t> cgroup_cpu_limit() {
-    const auto text = read_text("/sys/fs/cgroup" + own_cgroup() + "/cpu.max");
-    if (!text) return std::nullopt;
-    std::istringstream fields(*text);
-    std::string quota, period;
-    if (!(fields >> quota >> period) || quota == "max") return std::nullopt;
-    const auto q = parse_unsigned(quota), p = parse_unsigned(period);
-    if (!q || !p || *p == 0) return std::nullopt;
-    return static_cast<std::size_t>(std::max<std::uint64_t>(1, (*q + *p - 1) / *p));
-}
-
 #endif
 
 } // namespace
@@ -159,16 +127,18 @@ Machine machine() {
     CPU_ZERO(&set);
     if (sched_getaffinity(0, sizeof(set), &set) == 0 && CPU_COUNT(&set) > 0)
         result.logical_cpus = static_cast<std::size_t>(CPU_COUNT(&set));
-    if (const auto quota = cgroup_cpu_limit())
-        result.logical_cpus = std::min(result.logical_cpus, *quota);
+    const auto limits = detail::cgroup_limits(read_text);
+    if (limits.cpu_workers && *limits.cpu_workers < result.logical_cpus)
+        result.logical_cpus = static_cast<std::size_t>(*limits.cpu_workers);
     const long pages = sysconf(_SC_PHYS_PAGES);
     const long page_size = sysconf(_SC_PAGE_SIZE);
     if (pages > 0 && page_size > 0)
         result.physical_memory_bytes =
             static_cast<std::uint64_t>(pages) * static_cast<std::uint64_t>(page_size);
-    if (const auto limit = cgroup_memory_limit(); limit && *limit > 0 &&
+    if (const auto limit = limits.memory_bytes; limit &&
         (result.physical_memory_bytes == 0 || *limit < result.physical_memory_bytes))
-        result.physical_memory_bytes = *limit;
+        // Machine uses zero for unknown. A known zero limit must deny admission.
+        result.physical_memory_bytes = std::max<std::uint64_t>(1, *limit);
 #endif
     return result;
 }

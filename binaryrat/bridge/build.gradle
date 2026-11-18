@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: Apache-2.0
+import groovy.json.JsonSlurper
+
+def install = providers.gradleProperty('ghidraInstallDir')
+    .orElse(providers.environmentVariable('GHIDRA_INSTALL_DIR'))
+if (!install.isPresent()) {
+    throw new GradleException('Set GHIDRA_INSTALL_DIR to the unpacked Ghidra distribution')
+}
+def ghidraDir = file(install.get()).canonicalFile
+def ghidraBuild = new File(ghidraDir, 'support/buildExtension.gradle')
+if (!ghidraBuild.isFile()) {
+    throw new GradleException("Ghidra extension build script not found: ${ghidraBuild}")
+}
+
+def upstream = new JsonSlurper().parse(file('../UPSTREAM.json'))
+def version = upstream.tag.replaceFirst(/^Ghidra_/, '').replaceFirst(/_build$/, '')
+def properties = new Properties()
+new File(ghidraDir, 'Ghidra/application.properties').withReader { properties.load(it) }
+if (properties.getProperty('application.version') != version) {
+    throw new GradleException("BinaryRat requires Ghidra ${version}, found " +
+        properties.getProperty('application.version'))
+}
+
+apply from: ghidraBuild
+
+def os = System.getProperty('os.name').toLowerCase(Locale.ROOT)
+def arch = [amd64: 'x86_64', x86_64: 'x86_64', aarch64: 'arm_64', arm64: 'arm_64'][
+    System.getProperty('os.arch')]
+def platform = os.startsWith('windows') ? 'win' : (os == 'linux' ? 'linux' : null)
+if (!platform || !arch) {
+    throw new GradleException('BinaryRat packages require 64-bit Linux or Windows')
+}
+def osDir = "${platform}_${arch}"
+def executableName = platform == 'win' ? 'binaryrat-engine.exe' : 'binaryrat-engine'
+def engine = providers.gradleProperty('binaryratEngine').map { file(it).canonicalFile }
+
+tasks.named('buildExtension', Zip) {
+    archiveBaseName = "BinaryRat-ghidra-${version}-${osDir}"
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+    eachFile { entry ->
+        // The bridge package is loaded by Ghidra's ordinary Java script compiler.
+        if (entry.path.startsWith('BinaryRat/ghidra_scripts/') &&
+            !entry.path.startsWith('BinaryRat/ghidra_scripts/binaryrat/') &&
+            entry.name != 'BinaryRatExport.java') {
+            entry.exclude()
+        }
+    }
+    from(engine) {
+        into "BinaryRat/os/${osDir}"
+        rename { executableName }
+        filePermissions { unix('755') }
+    }
+    from(files('../../LICENSE', '../../NOTICE')) {
+        into 'BinaryRat'
+    }
+    from(fileTree('../native/third_party') { include '**/LICENSE*' }) {
+        into 'BinaryRat/licenses'
+    }
+    doFirst {
+        if (!engine.isPresent() || !engine.get().isFile() || !engine.get().canExecute()) {
+            throw new GradleException('Use -PbinaryratEngine=ABSOLUTE_PATH to a built host engine')
+        }
+    }
+}

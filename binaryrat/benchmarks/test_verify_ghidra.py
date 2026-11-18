@@ -130,6 +130,35 @@ class ScheduledEvidenceTests(unittest.TestCase):
             self.assertTrue(report["cache_directory_test_owned_and_removed"])
             self.assertTrue(report["saved_program_database_test_owned_reused_and_removed"])
 
+    def test_redirected_call_proof_rejects_stale_hit_or_missing_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)
+            evidence = {"stock_output_changed": True, "add_fixup": "MISS", "clear_fixup": "MISS",
+                        "unrelated_entry_unchanged": True, "precise_invalidation": True}
+            proof = {"passed": True, "primary_call": evidence.copy(),
+                     "explicit_call_override": evidence.copy(), "inherited_thunk_fixup": evidence.copy()}
+
+            def run(argv, log, timeout, env):
+                self.assertIn("-preScript", argv)
+                self.assertIn(" ", argv[-2])
+                Path(argv[-1]).write_text(json.dumps(proof), encoding="utf-8")
+                log.write_text("BinaryRat redirected call cache checks passed", encoding="utf-8")
+                return {"returncode": 0, "wall_seconds": 0}
+
+            def check():
+                return verify_ghidra.check_redirected_call_cache(
+                    Path("headless"), Path("scripts"), destination, Path("engine"), 30, {})
+
+            with patch.object(verify_ghidra, "measured_run", run):
+                self.assertTrue(check()["passed"])
+                proof["primary_call"]["add_fixup"] = "HIT"
+                with self.assertRaisesRegex(RuntimeError, "proof failed"):
+                    check()
+                proof["primary_call"]["add_fixup"] = "MISS"
+                del proof["explicit_call_override"]
+                with self.assertRaisesRegex(RuntimeError, "proof failed"):
+                    check()
+
 
 if __name__ == "__main__":
     unittest.main()

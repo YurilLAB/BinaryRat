@@ -94,6 +94,11 @@ public final class TraceVerifier {
 		}
 
 		@Override
+		public boolean recordsDependencies() {
+			return false;
+		}
+
+		@Override
 		public void answer(String request, byte[] digest) {
 			if (answered) {
 				// Nested queries do not happen; a second answer means a diverged replay.

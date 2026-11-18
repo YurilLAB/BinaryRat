@@ -102,6 +102,27 @@ jobs:
         run: python binaryrat/tools/build_corpus.py --output build/corpus --toolchain msvc
       - name: Download and verify official Ghidra 12.2 baseline
         run: python binaryrat/tools/fetch_ghidra.py --output build/ghidra
+      - name: Build and verify the installable BinaryRat extension
+        env:
+          GHIDRA_INSTALL_DIR: ${{ github.workspace }}/build/ghidra/ghidra_12.2_PUBLIC
+          BINARYRAT_ENGINE: ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
+        shell: python
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          wrapper = str(Path("gradlew.bat" if os.name == "nt" else "gradlew").resolve())
+          subprocess.run([wrapper, "-p", "binaryrat/bridge", "--no-daemon", "buildExtension",
+                          "-PbinaryratEngine=" + os.environ["BINARYRAT_ENGINE"]], check=True)
+          archive, = Path("binaryrat/bridge/dist").glob("BinaryRat-ghidra-*.zip")
+          subprocess.run([sys.executable, "binaryrat/benchmarks/verify_extension.py",
+                          "--ghidra", os.environ["GHIDRA_INSTALL_DIR"], "--archive", str(archive),
+                          "--corpus", "build/corpus/manifest.json",
+                          "--output", "build/ghidra-report/extension"], check=True)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: binaryrat-extension-${{ matrix.os }}-${{ matrix.revision }}
+          path: binaryrat/bridge/dist/BinaryRat-ghidra-*.zip
+          if-no-files-found: error
       - name: Stock versus BinaryRat Ghidra integration and benchmark evidence
         run: python binaryrat/benchmarks/verify_ghidra.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report --workers 1 2 4 --repetitions 1 --engine ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
       - name: Reopen a cached Ghidra project after an offline edit

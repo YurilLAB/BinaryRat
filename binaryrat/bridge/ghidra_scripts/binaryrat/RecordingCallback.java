@@ -10,7 +10,9 @@ import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import ghidra.app.decompiler.DecompileCallback;
 import ghidra.program.model.address.*;
@@ -33,6 +35,10 @@ public class RecordingCallback extends DecompileCallback {
 
 		/** Program facts the answer depended on; ignored while verifying. */
 		default void depends(Address start, long length) {
+		}
+
+		default boolean recordsDependencies() {
+			return true;
 		}
 
 		default void dependsOnName(String name) {
@@ -254,12 +260,74 @@ public class RecordingCallback extends DecompileCallback {
 		if (sink != null) {
 			Instruction instruction = program.getListing().getInstructionAt(addr);
 			sink.depends(addr, instruction == null ? 32 : Math.max(instruction.getLength(), 1));
+			if (sink.recordsDependencies()) {
+				dependsOnCallFixups(addr, instruction);
+			}
 			try {
 				encodedAnswer("P|" + address(addr), resultEncoder);
 			}
 			catch (IOException exception) {
 				throw new java.io.UncheckedIOException(exception);
 			}
+		}
+	}
+
+	private void dependsOnCallFixups(Address address, Instruction instruction) {
+		try {
+			for (Reference reference : program.getReferenceManager().getReferencesFrom(address)) {
+				RefType type = reference.getReferenceType();
+				// These are the two kinds of primary reference that can redirect a direct
+				// CALL in SLEIGH. Without one, hasCallFixup cannot change the p-code.
+				if (reference.isPrimary() && reference.getToAddress().isMemoryAddress() &&
+					(type == RefType.CALL_OVERRIDE_UNCONDITIONAL ||
+						type.isCall() && !type.isOverride())) {
+					if (instruction == null) {
+						sink.unpredictable("call fixup in pseudo-disassembled p-code");
+						return;
+					}
+					PatchPackedEncode probe = new PatchPackedEncode();
+					probe.clear();
+					// Observe the same packed translation without replacing the stock
+					// callback's answer. Flow overrides and delay slots can introduce
+					// calls that the listing's default flow targets do not describe.
+					instruction.getPrototype().getPcodePacked(probe,
+						instruction.getInstructionContext(), new CallFixupDependencies(instruction));
+					return;
+				}
+			}
+		}
+		catch (IOException | RuntimeException exception) {
+			sink.unpredictable("could not track call fixups at " + address);
+		}
+	}
+
+	private final class CallFixupDependencies extends InstructionPcodeOverride {
+		CallFixupDependencies(Instruction instruction) {
+			super(instruction);
+		}
+
+		@Override
+		public boolean hasCallFixup(Address destination) {
+			sink.depends(destination, 1);
+			Function target = program.getFunctionManager().getFunctionAt(destination);
+			if (target != null && target.isThunk()) {
+				Set<Address> visited = new HashSet<>();
+				visited.add(destination);
+				// A thunk inherits the fixup through its chain. A change at any hop
+				// can affect this answer and may only raise an event at that hop.
+				while (target != null && target.isThunk()) {
+					target = target.getThunkedFunction(false);
+					if (target != null) {
+						Address entry = target.getEntryPoint();
+						if (!visited.add(entry)) {
+							sink.unpredictable("thunk chain changed during p-code translation");
+							return false;
+						}
+						sink.depends(entry, 1);
+					}
+				}
+			}
+			return super.hasCallFixup(destination);
 		}
 	}
 
