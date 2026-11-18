@@ -146,7 +146,12 @@ public class RecordingCallback extends DecompileCallback {
 		return bytes.toByteArray();
 	}
 
-	private static byte[] failed(Throwable thrown) {
+	private byte[] failed(Throwable thrown) {
+		if (sink != null) {
+			// A failure can precede dependency collection, and may reflect state
+			// outside the event footprint. Its recorded answer must replay each time.
+			sink.unpredictable("failed callback: " + thrown.getClass().getName());
+		}
 		return digest("thrown", (thrown.getClass().getName() + ":" + thrown.getMessage())
 				.getBytes(StandardCharsets.UTF_8));
 	}
@@ -285,8 +290,10 @@ public class RecordingCallback extends DecompileCallback {
 	private void dependsOnInjection(String nm, int type, Tape tape) {
 		PcodeInjectLibrary library = compilerSpec.getPcodeInjectLibrary();
 		InjectPayload payload = library.getPayload(type, nm);
-		if (payload == null || !(payload instanceof InjectPayloadSleigh)) {
-			// Other payload kinds (Java/Dalvik constant pools) read the program freely.
+		if (!staticInjectionTemplate(payload)) {
+			// Dynamic Java/Dalvik and extension payloads can themselves subclass the
+			// SLEIGH payload classes while reading arbitrary Program state. Such reads
+			// need replay, not an instanceof-based promise of precise invalidation.
 			sink.unpredictable("injection payload " + nm);
 			return;
 		}
@@ -303,6 +310,17 @@ public class RecordingCallback extends DecompileCallback {
 		catch (Exception exception) {
 			sink.unpredictable("injection context " + nm);
 		}
+	}
+
+	/** Only audited exact stock classes use the context/template-only implementation. */
+	static boolean staticInjectionTemplate(InjectPayload payload) {
+		if (payload == null) {
+			return false;
+		}
+		Class<?> type = payload.getClass();
+		return type == InjectPayloadSleigh.class || type == InjectPayloadCallfixup.class ||
+			type == InjectPayloadCallother.class || type == InjectPayloadSegment.class ||
+			type == InjectPayloadJumpAssist.class;
 	}
 
 	@Override

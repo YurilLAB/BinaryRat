@@ -33,6 +33,24 @@ OUTPUT serial|parallel|compare|compare-reverse|scheduled|compare-scheduled|cache
 
 `scheduled`, `compare-scheduled` and `cache-proof` start the C++ engine named by
 the environment variable `BINARYRAT_ENGINE` (a built `binaryrat-engine`).
+Set `BINARYRAT_CACHE_DIR` to a dedicated directory to reuse cached results in
+`scheduled` and `compare-scheduled` exports. For example:
+
+```sh
+export BINARYRAT_ENGINE="$PWD/build/binaryrat/binaryrat-engine"
+export BINARYRAT_CACHE_DIR="$PWD/build/decompile-cache"
+```
+
+Use `scheduled` in the command above and omit `-deleteProject` to save the
+analyzed project. Reopen it with `-process PROGRAM -noanalysis -readOnly` and
+the same cache directory. The engine owns that directory exclusively while it
+runs. Each session replays entries from disk against the current Program before
+reuse. A fresh import can produce different analysis records, which triggers
+recomputation where the recorded answers differ.
+Only results that pass this check can bypass a decompiler lease. The cache
+requires an executable SHA-256, and exports still require an analyzed Program
+without a concurrent writer. The `.schedule.json` report includes cache hits,
+replays, misses, stores, rejections, and the number of compute leases.
 
 `serial` and `parallel` write `OUTPUT`. `compare` writes
 `OUTPUT.serial.jsonl` and `OUTPUT.parallel.jsonl` from the same analyzed Program,
@@ -51,7 +69,7 @@ throws on any byte difference, like `compare`.
 
 ## Scheduled decompilation
 
-Every decompilation takes a lease from the engine's scheduler first. The engine
+Every scheduled cache miss takes a lease from the engine's scheduler first. The engine
 measures CPUs and physical memory (affinity and Linux cgroup limits applied) and
 admits at most `min(CPUs, WORKERS, (RAM - JVM max heap - other reserve) /
 worker reservation)` decompilations at once, first in, first out. Each Java worker
@@ -75,6 +93,7 @@ already reused by another function.
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `BINARYRAT_CACHE_DIR` | unset | Directory for persistent scheduled-export results |
 | `BINARYRAT_WORKER_BYTES` | 768 MiB | reservation and resident-memory ceiling per decompilation |
 | `BINARYRAT_OTHER_RESERVE_BYTES` | 512 MiB | memory kept back for everything else |
 | `BINARYRAT_LEASE_TIMEOUT_MS` | `TIMEOUT_SECONDS` | engine deadline per decompilation; the decompiler's own timeout stays as a backstop 30 s later |
@@ -86,15 +105,14 @@ decompilations, which is how the enforcement paths are checked.
 
 ## Live cache and `cache-proof`
 
-`binaryrat/TracingDecompiler` is a stock `DecompInterface` whose callback is a
-`DecompileCallback` subclass: the native decompiler learns about the Program only
-through those callback queries, so recording every query and a digest of its answer
-captures everything one decompilation read. The decompiler is deterministic, so if
-every recorded query gets the same answer later, it would produce the same output.
+`binaryrat/TracingDecompiler` uses the stock `DecompInterface` to record native
+queries about the Program and hash their answers. During replay, any changed
+answer makes the entry a miss and requests a fresh decompilation.
 Each cached entry (engine schema 2 key: program, entry address, and a digest of
-everything the decompiler was registered with: translator, core types, processor
-and compiler specifications, options) holds the output, that read trace, and its
-dependencies: 256-byte memory lines read or resolved, and symbol names.
+the native build, renderer, translator, compiled SLEIGH, core types, processor
+and compiler specifications, and options) holds the output, read trace, and
+dependencies. Dependencies include 256-byte memory ranges and symbol names.
+Unknown injection payload classes require replay before reuse.
 
 `binaryrat/ChangeTracker` turns every Program change record into the dependencies
 it touched and reports them to the engine, which removes the entries that read them.

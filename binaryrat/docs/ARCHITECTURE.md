@@ -59,9 +59,10 @@ executor, memory-admission executor, preliminary layout-evidence aggregation,
 typed client and headless stock-decompiler adapter exist. The engine's lease
 scheduler admits headless stock decompilations by CPU and RAM, enforces deadlines,
 cancels and per-process resident-memory ceilings, and kills stuck processes. The
-live cache records each decompilation's callback reads, removes entries on mapped
-Program changes, replays entries after changes of unknown reach, and is proven
-against fresh decompilation by `cache-proof` (see `bridge/README.md`). Shared Java
+live cache records callback reads, removes entries on mapped Program changes,
+and replays persisted entries before reuse in scheduled headless exports. The
+integration harness compares cold, warm, and reopened exports against fresh
+decompilation. Shared Java
 proposal services, size-based per-function memory estimates, extraction-time
 change injection tests, coordinated type application and a persistent
 Ghidra/PyGhidra JVM daemon remain implementation gates. A persistent native

@@ -17,6 +17,7 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.data.*;
 import ghidra.program.model.listing.*;
+import ghidra.program.model.lang.InjectPayloadCallother;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.scalar.Scalar;
@@ -100,6 +101,7 @@ public final class CacheProof {
 		report.addProperty("functions", functions.size());
 		try {
 			open();
+			report.add("injection_payload_contract", injectionClassificationProof());
 			referenceEndpointProof();
 			round("populate", null, false, Expect.ANY);
 			round("no change", null, false, Expect.ALL_HITS);
@@ -144,6 +146,22 @@ public final class CacheProof {
 
 	private enum Expect {
 		ANY, ALL_HITS, NO_MISSES
+	}
+
+	/** A dynamic payload remains dynamic even when it extends a stock SLEIGH class. */
+	private JsonObject injectionClassificationProof() {
+		InjectPayloadCallother standard = new InjectPayloadCallother("BinaryRat classification proof");
+		InjectPayloadCallother extension = new InjectPayloadCallother("BinaryRat dynamic proof") {
+		};
+		boolean ok = RecordingCallback.staticInjectionTemplate(standard) &&
+			!RecordingCallback.staticInjectionTemplate(extension);
+		JsonObject result = new JsonObject();
+		result.addProperty("name", "dynamic SLEIGH subclasses require replay");
+		result.addProperty("standard_template_fast_path", RecordingCallback.staticInjectionTemplate(standard));
+		result.addProperty("unknown_subclass_replay_required", !RecordingCallback.staticInjectionTemplate(extension));
+		result.addProperty("passed", ok);
+		if (!ok) failures++;
+		return result;
 	}
 
 	/**

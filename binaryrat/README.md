@@ -45,8 +45,9 @@ See [protocol](protocol/README.md) and [Python client](python/README.md).
   replacement, explicit dependency invalidation, and exclusive process ownership.
 - Live decompiler cache: each decompilation's reads recorded through Ghidra's
   callback, a dependency index that removes entries on mapped Program changes,
-  replay against the Program after changes of unknown reach or a restart, and a
-  `cache-proof` harness comparing every served result with fresh decompilation.
+  and replay against the Program after changes of unknown reach or a restart.
+  Set `BINARYRAT_CACHE_DIR` to reuse results in ordinary scheduled exports.
+  [Usage and cache report](bridge/README.md)
 - Pure C++ layout-evidence aggregation: preserve gaps and overlapping
   alternatives, deduplicate support, expose stride conflicts, and abstain when
   an object origin is unknown. Scores are uncalibrated evidence strength.
@@ -78,9 +79,10 @@ python binaryrat/benchmarks/verify_ghidra.py \
   --engine build/native/binaryrat/binaryrat-engine
 ```
 
-With `--engine`, the verifier checks scheduled output against stock, tests the
-live cache after fixture edits, and exercises deadlines, resident memory limits,
-and interrupted leases through Ghidra. The verifier checks output records and
+With `--engine`, the verifier checks scheduled output against stock, tests cold
+and warm exports in separate JVMs, and exercises deadlines, resident memory limits,
+and interrupted leases through Ghidra. CI also reopens a cached project after a
+function rename made while the engine is offline. The verifier checks output records and
 script success messages because Ghidra can return zero after a postScript fails.
 For repeated diagnostic timing, use `--repetitions 5`. The report explicitly
 labels sampled process-tree RSS and separates overall headless-run wall time
@@ -93,9 +95,9 @@ PATH_TO_ENGINE --seed 0 --steps 1000`.
 
 ## Remaining milestones
 
-The headless scheduler and cache proof use Ghidra directly. The next integration
-is to make cache reuse available in ordinary decompilation and packaging. Type
-work starts with extracting layout evidence from real programs and exposing
+Scheduled headless exports can reuse results across JVM restarts. The next
+integration is packaging and GUI access. Type work starts with extracting layout
+evidence from real programs and exposing
 read-only proposals, followed by protected write-back and native undo. The
 remaining [architecture milestones](docs/ARCHITECTURE.md) cover interprocedural
 and RTTI recovery, a persistent Ghidra daemon, debug-oracle accuracy scoring,

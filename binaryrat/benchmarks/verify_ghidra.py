@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ import re
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 
 import psutil
@@ -114,8 +116,11 @@ def verify_pair(prefix: Path, log: Path) -> dict:
             "phases": phases}
 
 
-def verify_scheduled(prefix: Path, log: Path, workers: int) -> dict:
+def verify_scheduled(prefix: Path, log: Path, workers: int,
+                     cache_expected: str = "disabled") -> dict:
     """Engine-admitted decompilation must equal stock serial output byte for byte."""
+    if cache_expected not in {"disabled", "cold", "warm"}:
+        raise ValueError("cache_expected must be disabled, cold or warm")
     serial = Path(str(prefix) + ".serial.jsonl")
     scheduled = Path(str(prefix) + ".scheduled.jsonl")
     content = log.read_text(encoding="utf-8", errors="replace")
@@ -131,19 +136,115 @@ def verify_scheduled(prefix: Path, log: Path, workers: int) -> dict:
         records += 1
     if records == 0:
         raise RuntimeError(f"empty scheduled decompiler output; see {scheduled}")
+    cache = summary["cache"]
+    if cache["enabled"] is not (cache_expected != "disabled"):
+        raise RuntimeError(f"unexpected persistent cache configuration; see {log}")
+    counters = ("hits", "replayed", "misses", "lookup_rejected", "stored", "store_rejected")
+    if any(type(cache[name]) is not int or cache[name] < 0 for name in counters):
+        raise RuntimeError(f"invalid persistent cache counters; see {log}")
+    if cache_expected == "disabled":
+        if any(cache[name] for name in counters):
+            raise RuntimeError(f"disabled persistent cache reported activity; see {log}")
+        compute_leases = records
+    else:
+        if cache["hits"] + cache["replayed"] + cache["misses"] != records:
+            raise RuntimeError(f"cache outcomes do not cover every exported function; see {log}")
+        if cache["lookup_rejected"] or cache["store_rejected"]:
+            raise RuntimeError(f"unchanged fixture could not reuse/store its cache entries; see {log}")
+        compute_leases = cache["misses"]
+        if cache_expected == "cold" and (
+                cache["misses"] != records or cache["stored"] != records or
+                cache["hits"] or cache["replayed"]):
+            raise RuntimeError(f"cold cache did not compute and store every function; see {log}")
+        if cache_expected == "warm" and (
+                cache["hits"] + cache["replayed"] != records or
+                cache["misses"] or cache["stored"]):
+            raise RuntimeError(f"warm cache did not avoid every compute lease; see {log}")
     engine = summary["engine_stats"]
-    if summary["lease_status_counts"] != {"completed": records}:
+    expected_statuses = {"completed": compute_leases} if compute_leases else {}
+    if summary["lease_status_counts"] != expected_statuses or summary["leases"] != compute_leases:
         raise RuntimeError(f"not every lease completed: {summary['lease_status_counts']}")
-    if not 1 <= engine["peak_running"] <= summary["engine_configuration"]["workers"] or \
-            summary["engine_configuration"]["workers"] > workers:
+    admitted = summary["engine_configuration"]["workers"]
+    if (not 1 <= admitted <= workers or
+            (compute_leases and not 1 <= engine["peak_running"] <= admitted) or
+            (not compute_leases and engine["peak_running"] != 0)):
         raise RuntimeError(f"unexpected peak number of running decompiles; see {log}")
-    if not summary["engine_configuration"]["memory_watch"] or summary["memory_watched_leases"] != records:
+    if engine["running"] or engine["queued"]:
+        raise RuntimeError(f"scheduler left work running or queued; see {log}")
+    if (not summary["engine_configuration"]["memory_watch"] or
+            summary["memory_watched_leases"] != compute_leases):
         raise RuntimeError(f"scheduled decompiler processes were not all memory-watched; see {log}")
     return {"function_count": records, "requested_workers": workers,
-            "admitted_workers": summary["engine_configuration"]["workers"],
+            "admitted_workers": admitted, "compute_leases": compute_leases,
             "peak_running": engine["peak_running"],
             "max_peak_resident_bytes": summary["max_peak_resident_bytes"],
-            "memory_watched_leases": summary["memory_watched_leases"]}
+            "memory_watched_leases": summary["memory_watched_leases"],
+            "cache": cache}
+
+
+def compare_fresh_jvm_exports(cold: Path, warm: Path) -> dict:
+    """Match output and metadata across fresh JVMs, reporting local revisions.
+
+    A Program's in-memory modification number is not a durable program identity.
+    Every other exported field must match. Each JVM separately passed the
+    byte-exact serial/scheduled comparison above.
+    """
+    cold_rows = [json.loads(line) for line in cold.read_text(encoding="utf-8").splitlines()
+                 if line.strip()]
+    warm_rows = [json.loads(line) for line in warm.read_text(encoding="utf-8").splitlines()
+                 if line.strip()]
+    if not cold_rows or len(cold_rows) != len(warm_rows):
+        raise RuntimeError("cold/warm fresh JVMs exported different function coverage")
+    revisions: Counter = Counter()
+    for before, after in zip(cold_rows, warm_rows):
+        before_revision, after_revision = before.pop("revision"), after.pop("revision")
+        revisions[(before_revision, after_revision)] += 1
+        if before != after:
+            raise RuntimeError("cold/warm fresh JVMs differ in output or stable metadata")
+    return {"exact_bytes_including_revision": cold.read_bytes() == warm.read_bytes(),
+            "exact_output_and_metadata_except_local_revision": True,
+            "revision_pairs": [{"cold": before, "warm": after, "functions": count}
+                               for (before, after), count in sorted(revisions.items())]}
+
+
+def check_persistent_cache(headless: Path, binary: Path, script_directory: Path,
+                           identity: str, destination: Path, workers: int, timeout: float,
+                           environment: dict[str, str]) -> dict:
+    """Reopen one saved analyzed Program in a fresh JVM using its persistent cache.
+
+    Independent imports may assign different private symbol/type identities even
+    when their C text matches. Zero compute leases is therefore asserted for a
+    reopened unchanged database, not for independently reconstructed analysis.
+    """
+    runs = {}
+    exports = {}
+    with tempfile.TemporaryDirectory(prefix="persistent cache-", dir=destination) as directory:
+        session = Path(directory)
+        projects = session / "projects"
+        projects.mkdir()
+        cache_env = environment | {"BINARYRAT_CACHE_DIR": str(session / "cache")}
+        for state in ("cold", "warm"):
+            name = f"{identity}-persistent-{state}"
+            prefix, log = destination / name, destination / (name + ".log")
+            for suffix in (".serial.jsonl", ".scheduled.jsonl", ".scheduled.jsonl.schedule.json"):
+                Path(str(prefix) + suffix).unlink(missing_ok=True)
+            argv = [str(headless), str(projects), "persistent"]
+            if state == "cold":
+                argv += ["-import", str(binary)]
+            else:
+                argv += ["-process", binary.name, "-noanalysis", "-readOnly"]
+            argv += ["-scriptPath", str(script_directory), "-postScript", "BinaryRatExport.java",
+                     str(prefix), "compare-scheduled", str(workers), "60", "128"]
+            measured = measured_run(argv, log, timeout, cache_env)
+            if measured["returncode"]:
+                raise RuntimeError(f"Ghidra persistent {state} process failed; see {log}")
+            runs[state] = {**measured, **verify_scheduled(prefix, log, workers, state)}
+            exports[state] = Path(str(prefix) + ".scheduled.jsonl")
+        comparison = compare_fresh_jvm_exports(exports["cold"], exports["warm"])
+    return {"fresh_jvms": 2, "cache_directory_test_owned_and_removed": True,
+            "saved_program_database_test_owned_reused_and_removed": True,
+            "cache_directory_path_contains_space": True, "runs": runs,
+            "cross_jvm_comparison": comparison}
 
 
 def verify_stopped(output: Path, log: Path, expected: str) -> dict:
@@ -176,6 +277,8 @@ def verify_cache_proof(report_path: Path, log: Path) -> dict:
     report = json.loads(report_path.read_text())
     if "BinaryRat cache proof passed:" not in content or not report.get("passed"):
         raise RuntimeError(f"cache proof failed; see {report_path} and {log}")
+    if not report.get("injection_payload_contract", {}).get("passed"):
+        raise RuntimeError(f"dynamic injection replay check missing or failed; see {report_path}")
     reference_checks = [entry for entry in report["rounds"]
                         if entry.get("sentinel_dependency_tracking_only")]
     expected_reference_checks = {"add reference target dependency", "change reference target dependency",
@@ -240,6 +343,12 @@ def main() -> int:
             raise RuntimeError(f"engine not found: {engine}")
         os.environ["BINARYRAT_ENGINE"] = str(engine)
         report["scheduled_runs"], report["cache_proofs"], report["limit_checks"] = [], [], []
+        report["persistent_cache_checks"] = []
+    # Baseline and limit checks explicitly exercise the optional-cache-unset path,
+    # independent of an operator's environment. Only the owned cold/warm check
+    # opts in to persistence; it never touches an existing user cache directory.
+    environment = os.environ.copy()
+    environment.pop("BINARYRAT_CACHE_DIR", None)
     try:
         for artifact in manifest["artifacts"]:
             binary = (corpus_root / artifact["binary"]).resolve()
@@ -265,7 +374,8 @@ def main() -> int:
                     for suffix in (".serial.jsonl", ".parallel.jsonl"):
                         Path(str(prefix) + suffix).unlink(missing_ok=True)
                     mode = "compare" if repetition % 2 == 0 else "compare-reverse"
-                    measured = measured_run(export(name, prefix, mode, workers), log, args.timeout)
+                    measured = measured_run(export(name, prefix, mode, workers), log, args.timeout,
+                                            environment)
                     if measured["returncode"]:
                         raise RuntimeError(f"Ghidra process failed; see {log}")
                     pair = verify_pair(prefix, log)
@@ -284,7 +394,7 @@ def main() -> int:
                 for suffix in (".serial.jsonl", ".scheduled.jsonl", ".scheduled.jsonl.schedule.json"):
                     Path(str(prefix) + suffix).unlink(missing_ok=True)
                 measured = measured_run(export(name, prefix, "compare-scheduled", workers), log,
-                                        args.timeout)
+                                        args.timeout, environment)
                 if measured["returncode"]:
                     raise RuntimeError(f"Ghidra process failed; see {log}")
                 report["scheduled_runs"].append({"artifact_id": artifact["id"], **measured,
@@ -293,13 +403,20 @@ def main() -> int:
                 name = f"{identity}-cache-proof"
                 proof, log = destination / (name + ".json"), destination / (name + ".log")
                 proof.unlink(missing_ok=True)
-                measured = measured_run(export(name, proof, "cache-proof", 1), log, args.timeout)
+                measured = measured_run(export(name, proof, "cache-proof", 1), log, args.timeout,
+                                        environment)
                 if measured["returncode"]:
                     raise RuntimeError(f"Ghidra process failed; see {log}")
                 report["cache_proofs"].append({"artifact_id": artifact["id"],
                                                "wall_seconds": measured["wall_seconds"],
                                                **verify_cache_proof(proof, log)})
                 print(f"PASS {artifact['id']} cache proof", flush=True)
+                if not report["persistent_cache_checks"]:
+                    checked = check_persistent_cache(
+                        headless, binary, PROJECT / "binaryrat/bridge/ghidra_scripts", identity,
+                        destination, workers, args.timeout, environment)
+                    report["persistent_cache_checks"].append({"artifact_id": artifact["id"], **checked})
+                    print(f"PASS {artifact['id']} persistent cache cold/warm fresh JVMs", flush=True)
                 if not report["limit_checks"]:
                     for expected, overrides in (
                         ("timed_out", {"BINARYRAT_LEASE_TIMEOUT_MS": "1"}),
@@ -311,7 +428,7 @@ def main() -> int:
                         output.unlink(missing_ok=True)
                         Path(str(output) + ".schedule.json").unlink(missing_ok=True)
                         measured = measured_run(export(name, output, "scheduled", 1), log,
-                                                args.timeout, os.environ | overrides)
+                                                args.timeout, environment | overrides)
                         if measured["returncode"]:
                             raise RuntimeError(f"Ghidra process failed; see {log}")
                         report["limit_checks"].append({"artifact_id": artifact["id"],
@@ -320,7 +437,7 @@ def main() -> int:
                     name = f"{identity}-lease-lifecycle"
                     log = destination / (name + ".log")
                     measured = measured_run(headless_script(name, "BinaryRatLeaseChecks.java"),
-                                            log, args.timeout)
+                                            log, args.timeout, environment)
                     if (measured["returncode"] or "BinaryRat lease lifecycle checks passed" not in
                             log.read_text(encoding="utf-8", errors="replace")):
                         raise RuntimeError(f"Ghidra lease lifecycle checks failed; see {log}")

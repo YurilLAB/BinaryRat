@@ -92,6 +92,8 @@ jobs:
         run: python -m unittest discover -s binaryrat/python/tests -p "test_*.py"
       - name: Corpus tooling tests
         run: python -m unittest discover -s binaryrat/tools -p "test_*.py"
+      - name: Integration verifier tests
+        run: python -m unittest discover -s binaryrat/benchmarks -p 'test_verify_ghidra.py'
       - if: runner.os == 'Linux'
         name: GCC, Clang and AArch64 corpus with separate debug oracles
         run: python binaryrat/tools/build_corpus.py --output build/corpus --toolchain gcc --toolchain clang --toolchain gcc-aarch64
@@ -102,6 +104,15 @@ jobs:
         run: python binaryrat/tools/fetch_ghidra.py --output build/ghidra
       - name: Stock versus BinaryRat Ghidra integration and benchmark evidence
         run: python binaryrat/benchmarks/verify_ghidra.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report --workers 1 2 4 --repetitions 1 --engine ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
+      - name: Reopen a cached Ghidra project after an offline edit
+        env:
+          BINARYRAT_ENGINE: ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
+        shell: python
+        run: |
+          import os, subprocess, sys
+          subprocess.run([sys.executable, "binaryrat/benchmarks/verify_cache_reopen.py",
+              "--engine", os.environ["BINARYRAT_ENGINE"], "--ghidra", "build/ghidra/ghidra_12.2_PUBLIC",
+              "--corpus", "build/corpus/manifest.json", "--output", "build/ghidra-report/cache-reopen"], check=True)
       - name: Native artifact roundtrip, restart and invalidation benchmark
         env:
           BINARYRAT_ENGINE: ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}

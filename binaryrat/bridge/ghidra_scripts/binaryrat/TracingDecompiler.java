@@ -8,6 +8,8 @@ import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
+import java.util.Map;
+import java.util.TreeMap;
 
 import ghidra.app.decompiler.*;
 import generic.jar.ResourceFile;
@@ -18,6 +20,7 @@ import ghidra.framework.OperatingSystem;
 import ghidra.framework.Platform;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.pcode.XmlEncode;
+import ghidra.program.model.symbol.IllegalCharCppTransformer;
 import ghidra.util.task.TaskMonitor;
 
 /**
@@ -94,6 +97,7 @@ public final class TracingDecompiler extends DecompInterface {
 		add(digest, "core-types", encode.toString());
 		encode.clear();
 		add(digest, "pspec", contentDigest(specFile(language).getInputStream()));
+		add(digest, "compiled sleigh", contentDigest(sleighFile(language).getInputStream()));
 		getCompilerSpec().encode(encode);
 		add(digest, "cspec", encode.toString());
 		encode.clear();
@@ -108,10 +112,15 @@ public final class TracingDecompiler extends DecompInterface {
 			? "decompile.exe" : "decompile";
 		add(digest, "native executable", contentDigest(
 			Files.newInputStream(Application.getOSFile(executable).toPath())));
+		Map<String, Class<?>> implementations = new TreeMap<>();
 		for (Class<?> implementation : new Class<?>[] { DecompInterface.class,
-			DecompileCallback.class, DecompileResults.class, TracingDecompiler.class,
+			DecompileCallback.class, DecompileResults.class, PrettyPrinter.class,
+			IllegalCharCppTransformer.class, DecompOutput.class, TracingDecompiler.class,
 			RecordingCallback.class, Trace.class, TraceVerifier.class, LiveDecompileCache.class,
 			ChangeTracker.class }) {
+			includeImplementation(implementations, implementation);
+		}
+		for (Class<?> implementation : implementations.values()) {
 			String name = implementation.getName();
 			InputStream bytes = implementation.getResourceAsStream("/" + name.replace('.', '/') + ".class");
 			if (bytes == null) {
@@ -120,6 +129,16 @@ public final class TracingDecompiler extends DecompInterface {
 			add(digest, name, contentDigest(bytes));
 		}
 		return Trace.hex(digest.digest(), 32);
+	}
+
+	/** Named nested helpers contain recorder/replay logic too; reflection order is unspecified. */
+	private static void includeImplementation(Map<String, Class<?>> implementations, Class<?> type) {
+		if (implementations.putIfAbsent(type.getName(), type) != null) {
+			return;
+		}
+		for (Class<?> nested : type.getDeclaredClasses()) {
+			includeImplementation(implementations, nested);
+		}
 	}
 
 	private static String contentDigest(InputStream input) throws IOException {
@@ -133,15 +152,25 @@ public final class TracingDecompiler extends DecompInterface {
 		return Trace.hex(digest.digest(), 32);
 	}
 
-	/** The processor specification file; its description class moved packages in 12.2. */
+	/** The processor specification resource used by the pinned 12.2 language. */
 	private static ResourceFile specFile(SleighLanguage language) throws IOException {
-		Object description = language.getLanguageDescription();
-		try {
-			return (ResourceFile) description.getClass().getMethod("getSpecFile").invoke(description);
+		ResourceFile file = language.getLanguageDescription().getSpecFile();
+		if (file == null) {
+			throw new IOException("cannot locate the processor specification");
 		}
-		catch (ReflectiveOperationException exception) {
-			throw new IOException("cannot locate the processor specification", exception);
+		return file;
+	}
+
+	/** Translator XML contains address-space metadata, not the compiled instruction semantics. */
+	private static ResourceFile sleighFile(SleighLanguage language) throws IOException {
+		if (language.getLanguageDescription().getLanguageFile() == null) {
+			throw new IOException("cannot identify compiled SLEIGH instruction semantics");
 		}
+		ResourceFile file = language.getLanguageDescription().getLanguageFile().getSlaFile();
+		if (file == null) {
+			throw new IOException("cannot locate compiled SLEIGH instruction semantics");
+		}
+		return file;
 	}
 
 	private static void add(MessageDigest digest, String label, String value) {
