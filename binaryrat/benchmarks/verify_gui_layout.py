@@ -91,6 +91,8 @@ def main():
                    binary.name, str(report)], output / "gui.log", env, 300)
         result = re.findall(r"^BINARYRAT_GUI_NAVIGATION_OK (\w+) (\w+) (\w+) ([0-9.]+) ([0-9.]+)$",
                             log, re.MULTILINE)
+        if 'Exception in thread "AWT-EventQueue' in log:
+            raise RuntimeError(f"CodeBrowser raised an uncaught Swing exception. See {output / 'gui.log'}")
         if len(result) != 1:
             raise RuntimeError("Missing GUI navigation confirmation")
     entry, cursor, navigated, recovery_time, browse_time = result[0]

@@ -4,7 +4,6 @@
 // Copyright 2026 YurilLAB
 // SPDX-License-Identifier: Apache-2.0
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -19,8 +18,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Stream;
-
-import javax.swing.JFileChooser;
 
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
@@ -63,6 +60,7 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 	private static final int NOT_VISITED = -1;
 	private static final String PARAMETER = "Parameter index";
 	private static final String DEPTH = "Direct-call depth";
+	private static final String OUTPUT = "Output JSON path";
 	private long revision;
 
 	private record Request(Function function, int parameter, int timeout, int depth, Path output) {
@@ -163,9 +161,14 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 		GhidraValuesMap values = new GhidraValuesMap();
 		values.defineInt(PARAMETER, 0);
 		values.defineInt(DEPTH, 0);
+		values.defineString(OUTPUT, Path.of(System.getProperty("user.home"),
+			"layout-" + hex(entry) + ".json").toString());
 		values.setValidator((input, status) -> {
 			String error = input.hasValue(PARAMETER) && input.hasValue(DEPTH) ?
 				parameterError(input.getInt(PARAMETER), input.getInt(DEPTH)) : "Enter both numbers";
+			if (error == null && (!input.hasValue(OUTPUT) || input.getString(OUTPUT).isBlank())) {
+				error = "Enter a path for the new JSON report";
+			}
 			if (error != null) {
 				status.setStatusText(error, MessageType.ERROR);
 			}
@@ -177,20 +180,8 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 			"\nSelect a zero-based decompiler parameter index. Use depth 0 for this function only.",
 			values);
 		checkCursor(cursor);
-		int index = values.getInt(PARAMETER);
-		File selected = Swing.runNow(() -> {
-			JFileChooser chooser = new JFileChooser();
-			chooser.setDialogTitle("Save BinaryRat Layout Report");
-			chooser.setSelectedFile(new File("layout-" + hex(entry) + "-param-" +
-				index + ".json"));
-			return chooser.showSaveDialog(state.getTool().getToolFrame()) == JFileChooser.APPROVE_OPTION ?
-				chooser.getSelectedFile() : null;
-		});
-		if (selected == null) {
-			throw new CancelledException();
-		}
-		checkCursor(cursor);
-		return new Request(function, index, 30, values.getInt(DEPTH), selected.toPath());
+		return new Request(function, values.getInt(PARAMETER), 30, values.getInt(DEPTH),
+			Path.of(values.getString(OUTPUT)));
 	}
 
 	private Function requireSupported(Function function) throws IOException {

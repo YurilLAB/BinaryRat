@@ -34,6 +34,7 @@ import ghidra.framework.Application;
 import ghidra.framework.GhidraApplicationConfiguration;
 import ghidra.framework.main.FrontEndTool;
 import ghidra.framework.plugintool.PluginTool;
+import ghidra.framework.preferences.Preferences;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.*;
 import ghidra.program.util.ProgramLocation;
@@ -52,6 +53,7 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
             Application.initializeApplication(layout, config);
             GhidraHelpService.install();
             ExtensionUtils.initializeExtensions();
+            Preferences.setProperty("SHOW_TIPS", "false");
             GhidraProject project = GhidraProject.openProject(args[0], "layout", true);
             PluginTool tool = swing(() -> {
                 FrontEndTool front = new FrontEndTool(project.getProjectManager());
@@ -136,14 +138,8 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         CountDownLatch recovery = script(tool, "BinaryRatRecoverLayouts.java");
         JDialog options = await("parameter options", () -> dialog("Recover Layout at Cursor"));
         swing(() -> {
+            widget(options, JTextField.class, w -> w.getText().endsWith(".json")).setText(report.toString());
             widget(options, JButton.class, b -> b.getText().equals("OK")).doClick();
-            return null;
-        });
-        JDialog save = await("report destination", () -> dialog("Save BinaryRat Layout Report"));
-        swing(() -> {
-            JFileChooser chooser = widget(save, JFileChooser.class, c -> true);
-            chooser.setSelectedFile(report.toFile());
-            chooser.approveSelection();
             return null;
         });
         await("published GUI recovery report", () -> Files.isRegularFile(report) ? Boolean.TRUE : null);
@@ -194,8 +190,8 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         CountDownLatch browse = script(tool, "BinaryRatBrowseLayout.java");
         JDialog open = await("report picker", () -> dialog("Choose a BinaryRat layout report"));
         swing(() -> {
-            widget(open, JTextField.class, w -> "filenameTextField".equals(w.getName())).setText(report.toString());
-            widget(open, JButton.class, b -> "Browse".equals(b.getText())).doClick();
+            widget(open, JTextField.class, w -> true).setText(report.toString());
+            widget(open, JButton.class, b -> "OK".equals(b.getText())).doClick();
             return null;
         });
         JDialog evidenceTable = await("layout evidence table", () -> dialog("BinaryRat Layout Evidence"));

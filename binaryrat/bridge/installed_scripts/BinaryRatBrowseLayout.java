@@ -4,8 +4,8 @@
 // Copyright 2026 YurilLAB
 // SPDX-License-Identifier: Apache-2.0
 
-import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
@@ -14,8 +14,8 @@ import javax.swing.SwingUtilities;
 import binaryrat.writeback.LayoutEvidenceBrowser;
 import binaryrat.writeback.LayoutEvidenceBrowser.Review;
 import binaryrat.writeback.LayoutEvidenceBrowser.Row;
-import docking.widgets.filechooser.GhidraFileChooser;
-import docking.widgets.filechooser.GhidraFileChooserMode;
+import docking.DockingWindowManager;
+import docking.widgets.dialogs.InputDialog;
 import ghidra.app.script.GhidraScript;
 import ghidra.app.services.GoToService;
 import ghidra.app.services.ProgramManager;
@@ -53,8 +53,8 @@ public class BinaryRatBrowseLayout extends GhidraScript {
         }
 
         try {
-            File file = chooseReport();
-            // The analyst can switch or close a tab while the file chooser or parser is active.
+            Path file = chooseReport();
+            // The analyst can switch or close a tab while the path dialog or parser is active.
             // Keep the selected Program alive only while reading and publishing the result.
             Object consumer = new Object();
             Boolean active = Swing.runNow(() -> programs.getCurrentProgram() == program);
@@ -67,7 +67,7 @@ public class BinaryRatBrowseLayout extends GhidraScript {
             Review review;
             try {
                 monitor.setMessage("Checking layout evidence against the open program");
-                review = LayoutEvidenceBrowser.read(program, file.toPath(), monitor);
+                review = LayoutEvidenceBrowser.read(program, file, monitor);
                 monitor.checkCancelled();
                 if (!review.rows().isEmpty()) {
                     showEvidence(tables, programs, program, review);
@@ -81,49 +81,51 @@ public class BinaryRatBrowseLayout extends GhidraScript {
             }
         }
         catch (CancelledException cancelled) {
-            // Dismissing the chooser or cancelling a load leaves no partial table.
+            // Dismissing the dialog or cancelling a load leaves no partial table.
         }
         catch (IOException | IllegalArgumentException e) {
             popup("Could not open the layout evidence. " + e.getMessage());
         }
     }
 
-    private File chooseReport() throws CancelledException {
-        AtomicReference<GhidraFileChooser> open = new AtomicReference<>();
+    private Path chooseReport() throws CancelledException {
+        AtomicReference<InputDialog> open = new AtomicReference<>();
         CancelledListener cancel = () -> SwingUtilities.invokeLater(() -> {
-            GhidraFileChooser chooser = open.get();
-            if (chooser != null && chooser.isVisible()) {
-                chooser.close();
+            InputDialog dialog = open.get();
+            if (dialog != null && dialog.isVisible()) {
+                dialog.close();
             }
         });
         monitor.addCancelledListener(cancel);
         try {
-            File file = Swing.runNow(() -> {
+            String file = Swing.runNow(() -> {
                 if (monitor.isCancelled()) {
                     return null;
                 }
-                GhidraFileChooser chooser = new GhidraFileChooser(state.getTool().getToolFrame());
-                open.set(chooser);
+                InputDialog dialog = new InputDialog("Choose a BinaryRat layout report",
+                    "Layout JSON path");
+                open.set(dialog);
                 try {
-                    chooser.setTitle("Choose a BinaryRat layout report");
-                    chooser.setApproveButtonText("Browse");
-                    chooser.setFileSelectionMode(GhidraFileChooserMode.FILES_ONLY);
-                    return chooser.getSelectedFile();
+                    DockingWindowManager.showDialog(state.getTool().getToolFrame(), dialog);
+                    return dialog.isCanceled() ? null : dialog.getValue();
                 }
                 finally {
                     open.set(null);
-                    chooser.dispose();
+                    dialog.dispose();
                 }
             });
             monitor.checkCancelled();
             if (file == null) {
                 throw new CancelledException();
             }
-            return file;
+            if (file.isBlank()) {
+                throw new IllegalArgumentException("Enter the path to a saved JSON layout report.");
+            }
+            return Path.of(file);
         }
         finally {
             monitor.removeCancelledListener(cancel);
-            // An interrupted runNow caller can return while the modal picker is still open.
+            // An interrupted runNow caller can return while the modal dialog is still open.
             cancel.cancelled();
         }
     }
