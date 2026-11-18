@@ -10,14 +10,15 @@ BinaryRat is an open-source reverse-engineering project for Linux and Windows, b
 - **Parallel decompilation** schedules native decompiler processes within CPU and memory budgets and enforces per-function deadlines.
 - **Persistent caching** tracks program changes and validates recorded decompiler queries before reusing results across sessions.
 - **Stock-verified exports** check every JSONL record against serial Ghidra output and report where stock results were used.
-- **Read-only layout evidence** links inferred field offsets and widths to the Ghidra p-code instructions that support them.
+- **Layout and C++ recovery** traces field and shared-storage evidence through direct calls and reports Itanium and MSVC class relationships and vtables.
+- **Reviewed type creation** lets an analyst approve a new structure with provenance and native Ghidra undo.
 - **Desktop and scripting access** provides exports from CodeBrowser and headless Ghidra, plus typed Python access to saved Programs through PyGhidra.
 
 ## Project status
 
 Linux CI checks byte-for-byte stock parity on 384 sampled functions from a 130 MB LLVM library. Stock verification uses a separate serial pass. [Benchmark evidence](binaryrat/docs/evidence/llvm19-linux.md)
 
-Whole-program type inference, C++ class recovery, protected type write-back, and measured auto-analysis acceleration are on the development roadmap. [Architecture and milestones](binaryrat/docs/ARCHITECTURE.md)
+The no-return analyzer runs faster on a controlled call-heavy fixture. Whole-program speed on code-heavy binaries, broader type inference, and calibrated confidence remain open. [Analyzer benchmark](binaryrat/docs/core-patches/no-return-candidate-checks.md) · [Architecture and milestones](binaryrat/docs/ARCHITECTURE.md)
 
 ## Guides
 
