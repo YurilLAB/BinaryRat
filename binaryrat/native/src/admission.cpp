@@ -50,7 +50,7 @@ namespace detail {
 using Clock = std::chrono::steady_clock;
 
 struct TaskState;
-using WatchMap = std::multimap<Clock::time_point, TaskState*>;
+using WatchMap = std::multimap<Clock::time_point, std::shared_ptr<TaskState>>;
 
 struct TaskState {
     enum class Phase { Queued, Running, Done };
@@ -82,6 +82,30 @@ struct TaskState {
 
 namespace {
 thread_local const Impl* current_impl = nullptr;
+
+struct ExecutionContext {
+    explicit ExecutionContext(const Impl* executor) : previous(current_impl) {
+        current_impl = executor;
+    }
+    ~ExecutionContext() { current_impl = previous; }
+    const Impl* previous;
+};
+
+Clock::time_point execution_deadline(std::chrono::milliseconds timeout) {
+    const auto now = Clock::now();
+    // Both supported platforms use steady-clock ticks finer than milliseconds.
+    // Check before converting: a positive millisecond count can otherwise
+    // overflow the clock's duration representation during duration_cast.
+    if (timeout > std::chrono::duration_cast<std::chrono::milliseconds>(Clock::duration::max())) {
+        return Clock::time_point::max();
+    }
+    const auto delay = std::chrono::duration_cast<Clock::duration>(timeout);
+    // max - positive delay is safe even if this clock's epoch makes now negative.
+    if (now.time_since_epoch() > Clock::duration::max() - delay) {
+        return Clock::time_point::max();
+    }
+    return now + delay;
+}
 }
 
 // Lock order: Impl::mutex before TaskState::result_mutex. result_mutex is never
@@ -183,11 +207,19 @@ struct Impl {
                 // Decide the outcome before signalling: a job that reacts to the
                 // stop instantly must not be able to resolve Completed first.
                 task->resolve(Status::Cancelled, "cancelled while the task was running");
-                task->stop.request_stop();
+                signal_stop(*task);
                 break;
             case TaskState::Phase::Done:
                 break;
         }
+    }
+
+    void signal_stop(TaskState& task) {
+        // request_stop invokes registered callbacks synchronously. No executor
+        // lock may be held here, and callbacks must obey the same no-recursion
+        // rule as jobs (including when cancellation came from a caller thread).
+        ExecutionContext context(this);
+        task.stop.request_stop();
     }
 
     void worker_loop() {
@@ -200,7 +232,7 @@ struct Impl {
                     if (pending.empty()) {
                         return stopping;
                     }
-                    return reserved + pending.front()->reserved <= pool_bytes;
+                    return pending.front()->reserved <= pool_bytes - reserved;
                 });
                 if (pending.empty()) {
                     return;  // stopping with nothing left to drain
@@ -213,7 +245,7 @@ struct Impl {
                 peak_reserved = std::max(peak_reserved, reserved);
                 peak_running = std::max(peak_running, running);
                 if (task->timeout.count() > 0) {
-                    task->watch_entry = watch.emplace(Clock::now() + task->timeout, task.get());
+                    task->watch_entry = watch.emplace(execution_deadline(task->timeout), task);
                     task->watched = true;
                     watch_cv.notify_one();
                 }
@@ -231,14 +263,23 @@ struct Impl {
                 status = Status::Failed;
                 message = "unknown exception";
             }
+            const auto finished_at = Clock::now();
             task->job = nullptr;  // release captured state on the worker, not the caller
 
             // Return capacity before resolving, so that a caller who sees a
             // Completed or Failed outcome also sees the memory already freed.
             // After this section the task can no longer time out or be cancelled.
+            bool deadline_exceeded = false;
             {
                 std::lock_guard lock(mutex);
                 if (task->watched) {
+                    // A busy or descheduled watchdog must not turn a job that
+                    // returned after its deadline into Completed or Failed.
+                    deadline_exceeded = finished_at >= task->watch_entry->first;
+                    if (deadline_exceeded) {
+                        status = Status::TimedOut;
+                        message = "execution deadline exceeded";
+                    }
                     watch.erase(task->watch_entry);
                     task->watched = false;
                 }
@@ -248,6 +289,9 @@ struct Impl {
             }
             ready.notify_all();
             task->resolve(status, std::move(message));  // no-op if a timeout or cancel won already
+            if (deadline_exceeded) {
+                signal_stop(*task);
+            }
         }
     }
 
@@ -269,14 +313,16 @@ struct Impl {
                 watch_cv.wait_until(lock, deadline);
                 continue;
             }
-            // A watch entry exists only until its worker's final locked section,
-            // so the task is alive while we hold the mutex.
-            TaskState* task = first->second;
+            // Keep ownership after unlocking: the worker may return and release
+            // its last reference as soon as the stop token is requested.
+            auto task = first->second;
             watch.erase(first);
             task->watched = false;
             // Decide the outcome before signalling the job (see Impl::cancel).
             task->resolve(Status::TimedOut, "execution deadline exceeded");
-            task->stop.request_stop();
+            lock.unlock();
+            signal_stop(*task);
+            lock.lock();
         }
     }
 

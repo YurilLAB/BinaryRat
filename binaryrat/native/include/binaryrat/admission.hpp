@@ -63,7 +63,8 @@ struct TaskSpec {
     // Memory this task holds while running. Raised to Budget::worker_bytes.
     std::uint64_t reserve_bytes = 0;
     // Execution deadline, counted from when the job starts, not from submission.
-    // Zero means no deadline.
+    // Zero means no deadline. Values beyond the steady clock's representable
+    // range saturate at its maximum time point instead of overflowing.
     std::chrono::milliseconds timeout{0};
 };
 
@@ -106,15 +107,20 @@ private:
 // tasks behind it, so large tasks cannot be starved. At most max_pending tasks
 // queue; submit() blocks while the queue is full.
 //
-// Cancellation and timeouts are cooperative. When a deadline passes or a task is
-// cancelled, its Outcome resolves immediately and its stop token fires, but the
+// Cancellation and timeouts are cooperative. When expiry is observed or a task
+// is cancelled, its Outcome resolves and its stop token fires, but the
 // job keeps its worker and its memory reservation until it actually returns. A
 // job that ignores its stop token therefore never lets the executor exceed its
 // budget; it only occupies capacity longer. For a job that returns or throws on
 // its own, the capacity is freed before Completed or Failed becomes visible.
+// Completion checks the deadline too, so a delayed watchdog cannot classify an
+// over-deadline job as Completed. Notification is best-effort, not real-time;
+// synchronous stop callbacks should return promptly to avoid delaying delivery.
 //
-// Jobs must not submit to or shut down their own executor: blocking recursive
-// use could deadlock a bounded executor, so these calls throw std::logic_error.
+// Jobs and synchronous stop callbacks must not submit to or shut down their own
+// executor: blocking recursive use could deadlock a bounded executor, so these
+// calls throw std::logic_error. Stop callbacks may query stats(); they are never
+// invoked while holding the executor's state mutex.
 class AdmissionExecutor {
 public:
     // Throws ResourceExhausted when the budget cannot hold one worker, and

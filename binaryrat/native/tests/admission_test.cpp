@@ -143,6 +143,28 @@ void memory_admission_limits_concurrency() {
     }
 }
 
+void reservation_addition_must_not_wrap() {
+    constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+    constexpr auto reservation = maximum / 2 + 1;
+    AdmissionExecutor pool(budget(2, 2, maximum, 0, 0, 1), 2);
+    Gate gate;
+    auto first = pool.submit({reservation, 0ms}, gate.job());
+    require(eventually([&] { return gate.started.load() == 1; }), "first large task must start");
+    auto second = pool.submit({reservation, 0ms}, gate.job());
+    std::this_thread::sleep_for(100ms);
+    const auto held = pool.stats();
+    require(gate.started.load() == 1 && held.running == 1 && held.queued == 1,
+            "two large reservations must not be admitted through unsigned wraparound");
+    require(held.reserved_bytes == reservation && held.peak_reserved_bytes == reservation,
+            "large reservation accounting must remain exact");
+    gate.release.set_value();
+    for (auto* ticket : {&first, &second}) {
+        require(ready(ticket->result) && ticket->result.get().status == Status::Completed,
+                "large reservations must drain in turn");
+    }
+    require(pool.stats().reserved_bytes == 0, "large reservations must be returned");
+}
+
 void strict_fifo_admission() {
     AdmissionExecutor pool(small_budget(), 8);
     Gate gate_a;
@@ -253,6 +275,110 @@ void timeouts() {
                 "queue wait must not count against the execution deadline");
         require(ready(blocker.result) && blocker.result.get().status == Status::Completed, "blocker completes");
     }
+    // A valid positive millisecond count can exceed steady_clock's range.
+    // Saturate it rather than overflowing during conversion or addition.
+    for (const auto timeout : {
+            std::chrono::milliseconds::max(),
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::duration::max())}) {
+        AdmissionExecutor pool(budget(1, 1, 1000, 0, 0, 100), 2);
+        Gate gate;
+        auto ticket = pool.submit({0, timeout}, gate.job());
+        require(eventually([&] { return gate.started.load() == 1; }), "long-deadline task must start");
+        require(ticket.result.wait_for(100ms) == std::future_status::timeout,
+                "an enormous positive timeout must not wrap to an expired deadline");
+        gate.release.set_value();
+        require(ready(ticket.result) && ticket.result.get().status == Status::Completed,
+                "long-deadline task must complete normally");
+    }
+}
+
+void stop_callbacks_run_without_executor_locks() {
+    for (const bool cancel : {false, true}) {
+        AdmissionExecutor pool(budget(1, 1, 1000, 0, 0, 100), 2);
+        std::promise<void> registered, callback_finished, release;
+        auto released = release.get_future().share();
+        auto registered_result = registered.get_future();
+        auto callback_result = callback_finished.get_future();
+        std::atomic<bool> saw_reservation{false}, rejected_submit{false}, rejected_shutdown{false};
+        auto ticket = pool.submit({300, cancel ? 0ms : 250ms}, [&](std::stop_token token) {
+            std::stop_callback callback(token, [&] {
+                // stats() takes the executor mutex. This must work from both
+                // the watchdog thread and a caller performing cancellation.
+                const auto stats = pool.stats();
+                saw_reservation = stats.running == 1 && stats.reserved_bytes == 300;
+                try { (void) pool.submit({0, 0ms}, [](std::stop_token) {}); }
+                catch (const std::logic_error&) { rejected_submit = true; }
+                try { pool.shutdown(); }
+                catch (const std::logic_error&) { rejected_shutdown = true; }
+                callback_finished.set_value();
+            });
+            registered.set_value();
+            released.wait();
+        });
+        require(registered_result.wait_for(10s) == std::future_status::ready,
+                "task must register its stop callback");
+        std::future<void> canceller;
+        if (cancel) {
+            canceller = std::async(std::launch::async, [&] { ticket.cancel(); });
+        }
+        require(ready(ticket.result), "stop outcome must resolve");
+        require(ticket.result.get().status == (cancel ? Status::Cancelled : Status::TimedOut),
+                "stop callback must preserve the winning outcome");
+        require(callback_result.wait_for(10s) == std::future_status::ready,
+                "stop callback must finish without an executor-lock deadlock");
+        require(saw_reservation.load(), "a stopped but running job retains its reservation");
+        require(rejected_submit.load() && rejected_shutdown.load(),
+                "stop callbacks must reject recursive submit and shutdown");
+        if (cancel) canceller.get();
+        release.set_value();
+        pool.shutdown();
+        require(pool.stats().reserved_bytes == 0 && pool.stats().running == 0,
+                "callback completion must not leak capacity");
+    }
+}
+
+void delayed_watchdog_does_not_hide_expired_completion() {
+    AdmissionExecutor pool(budget(2, 2, 1000, 0, 0, 100), 4);
+    std::promise<void> callback_entered, release_callback;
+    auto callback_entered_result = callback_entered.get_future();
+    auto callback_released = release_callback.get_future().share();
+    auto first = pool.submit({100, 250ms}, [&](std::stop_token token) {
+        std::stop_callback callback(token, [&] {
+            callback_entered.set_value();
+            callback_released.wait();
+        });
+        while (!token.stop_requested()) std::this_thread::yield();
+    });
+    require(callback_entered_result.wait_for(10s) == std::future_status::ready,
+            "the first timeout callback must start");
+
+    // Keep the watchdog in the first callback until the second job has actually
+    // returned. The second worker must enforce its own elapsed deadline.
+    std::promise<std::stop_token> second_started;
+    auto second_started_result = second_started.get_future();
+    std::promise<void> release_second;
+    auto second_released = release_second.get_future().share();
+    auto second = pool.submit({100, 10ms}, [&](std::stop_token token) {
+        second_started.set_value(token);
+        second_released.wait();
+    });
+    require(second_started_result.wait_for(10s) == std::future_status::ready,
+            "the second job must start while the watchdog is occupied");
+    const auto token = second_started_result.get();
+    std::this_thread::sleep_for(50ms);
+    release_second.set_value();
+    require(ready(second.result), "an expired job must resolve even with a delayed watchdog");
+    require(second.result.get().status == Status::TimedOut,
+            "completion after the deadline must be TimedOut, not Completed");
+    require(eventually([&] { return token.stop_requested(); }),
+            "a worker-detected timeout must request the stop token");
+    release_callback.set_value();
+    pool.shutdown();
+    require(ready(first.result) && first.result.get().status == Status::TimedOut,
+            "the first job must keep its timeout outcome");
+    require(pool.stats().reserved_bytes == 0 && pool.stats().running == 0,
+            "delayed timeout delivery must not leak reservations");
 }
 
 void cancellation() {
@@ -417,10 +543,13 @@ int main() {
     try {
         worker_limit_formula();
         memory_admission_limits_concurrency();
+        reservation_addition_must_not_wrap();
         strict_fifo_admission();
         rejection();
         bounded_backpressure();
         timeouts();
+        stop_callbacks_run_without_executor_locks();
+        delayed_watchdog_does_not_hide_expired_completion();
         cancellation();
         capacity_freed_before_outcome_visible();
         failures_release_capacity();
