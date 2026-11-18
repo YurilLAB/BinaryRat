@@ -1,7 +1,7 @@
 <!-- Modified by YurilLAB for BinaryRat: project overview and branding. -->
 # BinaryRat
 
-<img src="binaryrat/docs/assets/logo.png" alt="BinaryRat logo, a crimson rat with a black bandana" width="360">
+<img src="binaryrat/docs/assets/logo.png" alt="BinaryRat logo, a gray rat with red eyes and a black headband" width="360">
 
 BinaryRat is an open-source reverse-engineering project for Linux and Windows, built on Ghidra 12.2. Its C++20 engine manages decompilation scheduling and caching, and a Java extension connects it to Ghidra's native decompiler. [Ghidra 12.2 upstream](https://github.com/NationalSecurityAgency/ghidra/tree/Ghidra_12.2_build)
 
