@@ -49,4 +49,8 @@ if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME native.protocol COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/native/tests/protocol_test.py" "$<TARGET_FILE:binaryrat-engine>")
+  add_test(NAME native.live_cache_fuzz COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/native/tests/live_cache_fuzz.py"
+    --engine "$<TARGET_FILE:binaryrat-engine>" --steps 1000)
+  set_tests_properties(native.live_cache_fuzz PROPERTIES TIMEOUT 120)
 endif()

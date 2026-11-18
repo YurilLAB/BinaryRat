@@ -51,13 +51,23 @@ public final class EngineClient implements AutoCloseable {
 			cacheDirectory.toString());
 		builder.redirectError(ProcessBuilder.Redirect.INHERIT);
 		EngineClient client = new EngineClient(builder.start());
-		JsonObject ping = client.call("ping", new JsonObject());
-		if (!ping.has("capabilities") ||
-			!ping.get("capabilities").toString().contains("\"lease-scheduler\"")) {
-			client.close();
-			throw new IOException("engine does not offer the lease scheduler: " + ping);
+		try {
+			JsonObject ping = client.call("ping", new JsonObject());
+			if (!ping.has("capabilities") ||
+				!ping.get("capabilities").toString().contains("\"lease-scheduler\"")) {
+				throw new IOException("engine does not offer the lease scheduler: " + ping);
+			}
+			return client;
 		}
-		return client;
+		catch (IOException | RuntimeException failure) {
+			try {
+				client.close();
+			}
+			catch (IOException cleanup) {
+				failure.addSuppressed(cleanup);
+			}
+			throw failure;
+		}
 	}
 
 	private void readResponses() {

@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -108,6 +109,10 @@ public final class ScheduledDecompiler implements AutoCloseable {
 	 * the engine.
 	 */
 	public Run decompile(Function function, TaskMonitor outer) throws IOException {
+		// TaskMonitorAdapter does not notify a listener added after cancellation.
+		if (outer.isCancelled()) {
+			return new Run(null, "cancelled", "cancelled", 0, 0, 0, false, false);
+		}
 		String lease = "f" + leases.incrementAndGet();
 		TaskMonitorAdapter monitor = new TaskMonitorAdapter(true);
 		AtomicReference<String> stopReason = new AtomicReference<>();
@@ -117,7 +122,15 @@ public final class ScheduledDecompiler implements AutoCloseable {
 				monitor.cancel();
 			}
 		});
-		CancelledListener forward = monitor::cancel;
+		AtomicBoolean acquireSent = new AtomicBoolean();
+		AtomicBoolean cancelSent = new AtomicBoolean();
+		Runnable cancel = () -> {
+			monitor.cancel();
+			if (acquireSent.get() && cancelSent.compareAndSet(false, true)) {
+				engine.send("sched.cancel", leaseRequest(lease));
+			}
+		};
+		CancelledListener forward = cancel::run;
 		outer.addCancelledListener(forward);
 		try {
 			JsonObject request = new JsonObject();
@@ -125,14 +138,25 @@ public final class ScheduledDecompiler implements AutoCloseable {
 			request.addProperty("reserve_bytes", limits.workerBytes());
 			request.addProperty("timeout_ms", limits.leaseTimeoutMillis());
 			CompletableFuture<JsonObject> pending = engine.send("sched.acquire", request);
-			JsonObject grant = awaitGrant(lease, pending, outer);
+			acquireSent.set(true);
+			if (outer.isCancelled()) {
+				cancel.run();
+			}
+			JsonObject grant = awaitGrant(lease, pending, outer, cancel);
 			if (!grant.get("granted").getAsBoolean()) {
 				return new Run(null, grant.get("status").getAsString(), null, 0, 0, 0, false, false);
 			}
-			TracingDecompiler decompiler = idle.poll();
-			if (decompiler == null) {
-				release(lease);
-				throw new IOException("engine granted more leases than decompilers");
+			TracingDecompiler decompiler;
+			try {
+				// A preceding holder releases its lease before returning its process;
+				// a newly admitted holder may have to wait for that handoff.
+				decompiler = idle.take();
+			}
+			catch (InterruptedException exception) {
+				cancel.run();
+				engine.send("sched.release", leaseRequest(lease));
+				Thread.currentThread().interrupt();
+				throw new IOException("interrupted while borrowing a decompiler", exception);
 			}
 			TracingDecompiler.Traced traced;
 			boolean watched = false;
@@ -149,9 +173,10 @@ public final class ScheduledDecompiler implements AutoCloseable {
 					limits.timeoutSeconds() + BACKSTOP_SECONDS, monitor);
 			}
 			finally {
-				// Hand the decompiler back before the lease, so the next grant finds it.
-				idle.add(decompiler);
+				// Once a process is reused, its old lease must no longer watch or kill
+				// that PID. Await release before making the process available again.
 				ended = release(lease);
+				idle.add(decompiler);
 			}
 			return new Run(traced, ended.get("status").getAsString(), stopReason.get(),
 				grant.get("waited_ms").getAsLong(), ended.get("run_ms").getAsLong(),
@@ -165,21 +190,26 @@ public final class ScheduledDecompiler implements AutoCloseable {
 	}
 
 	private JsonObject awaitGrant(String lease, CompletableFuture<JsonObject> pending,
-			TaskMonitor outer) throws IOException {
-		boolean cancelSent = false;
+			TaskMonitor outer, Runnable cancel) throws IOException {
 		while (true) {
+			if (outer.isCancelled()) {
+				cancel.run();
+			}
 			try {
 				return pending.get(100, TimeUnit.MILLISECONDS);
 			}
 			catch (TimeoutException waiting) {
-				if (outer.isCancelled() && !cancelSent) {
-					JsonObject cancel = new JsonObject();
-					cancel.addProperty("lease", lease);
-					engine.send("sched.cancel", cancel);
-					cancelSent = true;
-				}
+				// Check cancellation again while the engine queues this request.
 			}
 			catch (InterruptedException exception) {
+				cancel.run();
+				// Cancellation may race a grant. A late grant still owns a slot and
+				// must be released even though this borrower has stopped waiting.
+				pending.thenAccept(grant -> {
+					if (grant.get("granted").getAsBoolean()) {
+						engine.send("sched.release", leaseRequest(lease));
+					}
+				});
 				Thread.currentThread().interrupt();
 				throw new IOException("interrupted while waiting for a lease", exception);
 			}
@@ -190,9 +220,41 @@ public final class ScheduledDecompiler implements AutoCloseable {
 	}
 
 	private JsonObject release(String lease) throws IOException {
+		CompletableFuture<JsonObject> pending = engine.send("sched.release", leaseRequest(lease));
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+		boolean interrupted = Thread.interrupted();
+		try {
+			while (true) {
+				try {
+					long remaining = deadline - System.nanoTime();
+					if (remaining <= 0) {
+						throw new TimeoutException();
+					}
+					return pending.get(remaining, TimeUnit.NANOSECONDS);
+				}
+				catch (InterruptedException exception) {
+					// Complete ownership cleanup, then restore the caller's interrupt.
+					interrupted = true;
+				}
+				catch (ExecutionException exception) {
+					throw new IOException("lease release failed", exception.getCause());
+				}
+				catch (TimeoutException exception) {
+					throw new IOException("engine did not release lease within 60 seconds", exception);
+				}
+			}
+		}
+		finally {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
+		}
+	}
+
+	private static JsonObject leaseRequest(String lease) {
 		JsonObject request = new JsonObject();
 		request.addProperty("lease", lease);
-		return engine.call("sched.release", request);
+		return request;
 	}
 
 	@Override

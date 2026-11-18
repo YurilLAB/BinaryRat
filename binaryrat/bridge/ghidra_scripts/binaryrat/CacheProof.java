@@ -51,6 +51,7 @@ public final class CacheProof {
 	private TracingDecompiler fresh;
 	private final Map<Address, DecompOutput> previous = new HashMap<>();
 	private final Set<Address> cached = new HashSet<>();
+	private final Set<Address> alwaysReplay = new HashSet<>();
 	private final JsonArray rounds = new JsonArray();
 	private int failures;
 	private int counter;
@@ -99,6 +100,7 @@ public final class CacheProof {
 		report.addProperty("functions", functions.size());
 		try {
 			open();
+			referenceEndpointProof();
 			round("populate", null, false, Expect.ANY);
 			round("no change", null, false, Expect.ALL_HITS);
 			round("bookmark (never read by the decompiler)", () -> {
@@ -142,6 +144,84 @@ public final class CacheProof {
 
 	private enum Expect {
 		ANY, ALL_HITS, NO_MISSES
+	}
+
+	/**
+	 * A reference event names its source, but cached global answers can depend on
+	 * incoming references at the target. Exercise real Ghidra events with a cache
+	 * sentinel dependent ONLY on a different target line. This tests event reach,
+	 * not a claim that every reference edit necessarily changes printed C.
+	 */
+	private void referenceEndpointProof() throws Exception {
+		Address from = functions.get(0).getEntryPoint();
+		Address target = null;
+		ReferenceManager manager = program.getReferenceManager();
+		String sourceLine = Trace.lineKey(from.getAddressSpace(), from.getOffset() >>> Trace.LINE_SHIFT);
+		for (MemoryBlock block : program.getMemory().getBlocks()) {
+			Address candidate = block.getEnd();
+			if (candidate.isMemoryAddress() &&
+				!sourceLine.equals(Trace.lineKey(candidate.getAddressSpace(),
+					candidate.getOffset() >>> Trace.LINE_SHIFT)) &&
+				manager.getReference(from, candidate, 0) == null) {
+				target = candidate;
+				break;
+			}
+		}
+		if (target == null) {
+			rounds.add(skipped("reference endpoint invalidation", "no distinct target line available"));
+			failures++;
+			return;
+		}
+		Address to = target;
+		JsonObject key = cache.key(functions.get(0));
+		key.addProperty("kind", "reference-endpoint-proof");
+		Set<String> targetLines = new TreeSet<>();
+		Trace.addLines(targetLines, to, 1);
+		JsonArray dependencies = new JsonArray();
+		targetLines.forEach(dependencies::add);
+		Reference[] reference = new Reference[1];
+		List<Change> edits = List.of(
+			() -> reference[0] = manager.addMemoryReference(from, to, RefType.READ,
+				SourceType.USER_DEFINED, 0),
+			() -> reference[0] = manager.updateRefType(reference[0], RefType.WRITE),
+			() -> manager.delete(reference[0]));
+		String[] names = { "add reference target dependency", "change reference target dependency",
+			"remove reference target dependency" };
+		try {
+			for (int index = 0; index < edits.size(); index++) {
+				tracker.sync();
+				JsonObject put = new JsonObject();
+				put.add("key", key);
+				put.add("value", new JsonObject());
+				put.add("dependencies", dependencies);
+				engine.call("cache.put", put);
+				change(names[index], edits.get(index));
+				tracker.sync();
+				JsonObject get = new JsonObject();
+				get.add("key", key);
+				JsonObject found = engine.call("cache.get", get);
+				boolean ok = !found.get("hit").getAsBoolean() || !found.get("verified").getAsBoolean();
+				JsonObject result = new JsonObject();
+				result.addProperty("name", names[index]);
+				result.addProperty("sentinel_dependency_tracking_only", true);
+				result.addProperty("distinct_source_target_lines", true);
+				result.addProperty("passed", ok);
+				rounds.add(result);
+				if (!ok) failures++;
+				log.accept("BinaryRat cache proof reference endpoint \"" + names[index] + "\" " +
+					(ok ? "passed" : "FAILED"));
+			}
+		}
+		finally {
+			JsonObject evict = new JsonObject();
+			evict.add("key", key);
+			engine.call("cache.evict", evict);
+			if (manager.getReference(from, to, 0) != null) {
+				change("remove reference endpoint proof residue", () ->
+					manager.delete(manager.getReference(from, to, 0)));
+				tracker.sync();
+			}
+		}
 	}
 
 	@FunctionalInterface
@@ -209,13 +289,19 @@ public final class CacheProof {
 		}
 		int hits = 0, replayed = 0, misses = 0, rejectedReplays = 0, staleVouched = 0,
 				servedWrong = 0, changedOutputs = 0, missedButUnchanged = 0, stored = 0,
-				lostEntries = 0;
+				lostEntries = 0, unexpectedNonHits = 0;
 		Set<Address> expected = new HashSet<>(cached);
+		Set<Address> expectedFastHits = new HashSet<>(expected);
+		expectedFastHits.removeAll(alwaysReplay);
 		List<String> examples = new ArrayList<>();
 		for (Function function : functions) {
 			monitor.checkCancelled();
 			long modification = program.getModificationNumber();
 			LiveDecompileCache.Lookup lookup = cache.lookup(function, true);
+			if (expectedFastHits.contains(function.getEntryPoint()) &&
+				lookup.kind() != LiveDecompileCache.Kind.HIT) {
+				unexpectedNonHits++;
+			}
 			TracingDecompiler.Traced decompiled = fresh.decompile(function, timeoutSeconds, monitor);
 			DecompOutput now = DecompOutput.of(decompiled.results());
 			DecompOutput before0 = previous.put(function.getEntryPoint(), now);
@@ -235,6 +321,7 @@ public final class CacheProof {
 				case MISS -> {
 					misses++;
 					cached.remove(function.getEntryPoint());
+					alwaysReplay.remove(function.getEntryPoint());
 					if (expected.contains(function.getEntryPoint())) {
 						lostEntries++;
 					}
@@ -254,6 +341,12 @@ public final class CacheProof {
 				if (cache.store(function, now, decompiled.trace(), lookup.seq(), modification)) {
 					stored++;
 					cached.add(function.getEntryPoint());
+					if (decompiled.trace().unpredictable().isEmpty()) {
+						alwaysReplay.remove(function.getEntryPoint());
+					}
+					else {
+						alwaysReplay.add(function.getEntryPoint());
+					}
 				}
 			}
 		}
@@ -276,13 +369,23 @@ public final class CacheProof {
 		examples.forEach(shown::add);
 		result.add("examples", shown);
 		result.addProperty("cached_entries_lost", lostEntries);
+		result.addProperty("expected_cached_entries", expected.size());
+		result.addProperty("expected_fast_hits", expectedFastHits.size());
+		result.addProperty("allowed_always_replayed_entries", expected.size() - expectedFastHits.size());
+		result.addProperty("unexpected_non_hits", unexpectedNonHits);
 		boolean ok = blind ? staleVouched > 0 : staleVouched == 0 && servedWrong == 0;
 		if (ok && expect != Expect.ANY) {
-			// Precision: a change that cannot affect a decompilation must not cost its entry.
-			ok = lostEntries == 0;
+			// Uncacheable functions never entered this expected set. A zero-entry round
+			// cannot prove cache hit/reuse coverage and must not pass vacuously.
+			ok = !expected.isEmpty() && lostEntries == 0;
 		}
 		if (ok && expect == Expect.ALL_HITS) {
-			ok = after.removed == before.removed && after.unknownReach == before.unknownReach;
+			// Only traces explicitly marked always-verify may replay here. Every other
+			// previously cached function must actually be a HIT, not an undeclared
+			// replay or miss hidden by unchanged invalidation counters.
+			ok = unexpectedNonHits == 0 &&
+				hits + replayed >= expected.size() &&
+				after.removed == before.removed && after.unknownReach == before.unknownReach;
 		}
 		result.addProperty("passed", ok);
 		if (!ok) {

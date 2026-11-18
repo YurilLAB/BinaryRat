@@ -22,15 +22,20 @@ public record DecompOutput(boolean completed, boolean timedOut, boolean cancelle
 	/** A decompilation the engine stopped before it finished. */
 	public static DecompOutput stopped(DecompileResults results, String status, String reason) {
 		DecompOutput output = of(results);
-		if (output.completed()) {
+		if ("completed".equals(status)) {
+			// The lease ended normally; preserve a native timeout/startup failure
+			// instead of relabelling every incomplete native result as cancelled.
 			return output;
 		}
 		boolean timedOut = "timed_out".equals(status) || "timeout".equals(reason);
 		String error = "memory_exceeded".equals(status) ?
 			"BinaryRat: the decompiler process exceeded its memory reservation" :
-			output.error();
+			"cancelled".equals(status) ? "BinaryRat: decompilation was cancelled" :
+			timedOut ? "BinaryRat: decompilation exceeded its lease deadline" : output.error();
+		// An engine stop is authoritative even if native output completed in the
+		// cancellation race. Never publish or cache output from a stopped lease.
 		return new DecompOutput(false, timedOut, !timedOut, output.failedToStart(), error,
-			output.prototype(), output.c());
+			"", "");
 	}
 
 	/** Only finished decompilations are worth caching; the rest depend on timing. */

@@ -79,6 +79,7 @@ struct LeaseScheduler::State {
     bool granted = false;   // the job started
     bool dropped = false;   // cancelled or rejected before it started
     bool released = false;
+    bool finished = false;  // run() and any in-flight process termination have returned
     bool stop_seen = false;  // the executor requested a stop (deadline or cancel)
     std::optional<StopReason> reason;
     std::optional<host::ProcessId> process;
@@ -180,6 +181,14 @@ void LeaseScheduler::acquire(const std::string& lease, const LeaseOptions& optio
 }
 
 void LeaseScheduler::run(const std::shared_ptr<State>& state, std::stop_token token) {
+    struct Finish {
+        State& state;
+        ~Finish() {
+            std::lock_guard lock(state.mutex);
+            state.finished = true;
+            state.wake.notify_all();
+        }
+    } finish{*state};
     LeaseGrant grant;
     {
         std::lock_guard lock(state->mutex);
@@ -207,9 +216,10 @@ void LeaseScheduler::run(const std::shared_ptr<State>& state, std::stop_token to
     std::unique_lock lock(state->mutex);
     const auto settled = [&] { return state->released || shutting_down_.load(); };
     state->wake.wait(lock, [&] { return settled() || state->stop_seen || state->reason; });
-    if (settled()) return;
+    if (state->released) return;
 
-    const auto reason = state->reason.value_or(StopReason::Timeout);
+    const auto reason = state->reason.value_or(
+        shutting_down_ ? StopReason::Shutdown : StopReason::Timeout);
     state->reason = reason;
     lock.unlock();
     notify(events_.stopped, state->name, reason);
@@ -218,7 +228,11 @@ void LeaseScheduler::run(const std::shared_ptr<State>& state, std::stop_token to
     // The holder keeps the worker and the reservation until it releases. If it
     // does not release in time, kill the process doing the work so that the
     // budget is not held hostage by a stuck job.
-    if (options_.kill_grace.count() > 0 && !state->wake.wait_for(lock, options_.kill_grace, settled) &&
+    // Shutdown still tells the holder to stop and gives an attached process its
+    // grace period. The global flag must not skip cleanup, but an unattached
+    // lease cannot be killed and need not delay shutdown.
+    if (options_.kill_grace.count() > 0 && (!shutting_down_ || state->process) &&
+        !state->wake.wait_for(lock, options_.kill_grace, [&] { return state->released; }) &&
         state->process) {
         const auto process = *state->process;
         lock.unlock();
@@ -286,7 +300,11 @@ LeaseEnd LeaseScheduler::release(const std::string& lease) {
     end.lease = lease;
     std::optional<StopReason> reason;
     {
-        std::lock_guard lock(state->mutex);
+        std::unique_lock lock(state->mutex);
+        // Cancellation/deadline outcomes resolve before the executor job exits.
+        // Do not acknowledge release while that job may still terminate the
+        // attached process: the holder may reuse its process after this returns.
+        state->wake.wait(lock, [&] { return state->finished; });
         end.ran = between(state->granted_at, released_at);
         end.peak_resident_bytes = state->peak;
         end.killed = state->killed;

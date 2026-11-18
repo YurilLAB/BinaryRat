@@ -74,23 +74,32 @@ python -m pip install -r binaryrat/requirements-test.txt
 python binaryrat/tools/build_corpus.py --output build/corpus --toolchain gcc
 python binaryrat/benchmarks/verify_ghidra.py \
   --ghidra /path/to/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json \
-  --output build/verification --workers 1 2 4 --repetitions 1
+  --output build/verification --workers 1 2 4 --repetitions 1 \
+  --engine build/native/binaryrat/binaryrat-engine
 ```
 
-The verifier checks expected exports and useful completion counts as well as
-process exit codes. Ghidra can return exit code zero after a postScript fails.
+With `--engine`, the verifier checks scheduled output against stock, tests the
+live cache after fixture edits, and exercises deadlines, resident memory limits,
+and interrupted leases through Ghidra. The verifier checks output records and
+script success messages because Ghidra can return zero after a postScript fails.
 For repeated diagnostic timing, use `--repetitions 5`. The report explicitly
 labels sampled process-tree RSS and separates overall headless-run wall time
 from exporter-phase times; it does not claim large-binary speedup.
 
+CTest also runs `native.live_cache_fuzz`, which checks the native engine against
+a reference model using seeded sequences of synthetic cache operations. To
+repeat a seed, run `python binaryrat/native/tests/live_cache_fuzz.py --engine
+PATH_TO_ENGINE --seed 0 --steps 1000`.
+
 ## Remaining milestones
 
-See [architecture](docs/ARCHITECTURE.md). Interprocedural inference, RTTI/class
-recovery, calibrated confidence, protected analysis-coordinated write-back,
-native undo/redo integration and proposal-level revert, automatic incremental
-invalidation, the persistent Ghidra daemon,
-and 100 MB+ benchmark gates are not complete. Debug-oracle generation currently
-preserves ground truth; precision/recall scoring is a later implementation gate.
+The headless scheduler and cache proof use Ghidra directly. The next integration
+is to make cache reuse available in ordinary decompilation and packaging. Type
+work starts with extracting layout evidence from real programs and exposing
+read-only proposals, followed by protected write-back and native undo. The
+remaining [architecture milestones](docs/ARCHITECTURE.md) cover interprocedural
+and RTTI recovery, a persistent Ghidra daemon, debug-oracle accuracy scoring,
+and benchmarks on binaries of 100 MB or more.
 
 ## Licensing and contributions
 

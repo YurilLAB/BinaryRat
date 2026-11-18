@@ -62,7 +62,16 @@ on cancel, or when that process grows past the lease's reservation; the bridge t
 cancels the decompilation, which stops the native process. A holder that does not
 release within the grace period has its process killed by the engine. Stopped
 decompilations are exported with `timed_out` or `cancelled` set, and a memory stop
-with an explanatory `error`. Lease outcomes go to `OUTPUT.schedule.json`.
+with an explanatory `error`. Their C and prototype fields are empty even when
+native output finishes in a race with the stop; stopped output is never cached.
+A normally completed lease preserves the native result's own failure flags.
+Lease outcomes go to `OUTPUT.schedule.json`.
+
+Interrupted queued borrowers cancel their requests and release any racing grant.
+An already cancelled monitor starts no native work, and active monitor cancellation
+is forwarded to the engine. A worker returns its decompiler to the idle pool only
+after its old lease release is acknowledged, so that lease cannot kill a process
+already reused by another function.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -164,6 +173,12 @@ check requires byte equality of every exported field, not normalized C text.
 Inspect `completed`/failure counts as well: identical failed decompilations are
 not evidence of useful decompiler coverage. Validate the JSONL with the C++
 consumer and verify the known fixture's function names and nonempty C output.
+
+`BinaryRatLeaseChecks.java`, run as a headless postScript with `BINARYRAT_ENGINE`
+set, checks interrupted queued requests, an already cancelled monitor, successful
+reuse afterwards, authoritative stopped-lease output, and preservation of native
+failure flags. It prints `BinaryRat lease lifecycle checks passed` only after all
+assertions succeed. The main verification harness runs it on a benign fixture.
 
 Timing printed by the script includes JSON serialization, body hashing, and file
 I/O. It is diagnostic only; it does not establish faster auto-analysis or provide

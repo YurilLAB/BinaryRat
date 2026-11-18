@@ -21,20 +21,22 @@ PROJECT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT / "binaryrat" / "python" / "src"))
 from binaryrat import load_export  # noqa: E402
 
-PHASE = re.compile(r"BinaryRat export starting mode=(serial|parallel)")
-TIMING = re.compile(r"BinaryRat exported functions=(\d+) mode=(serial|parallel) "
+PHASE_NAME = r"(serial|parallel|scheduled)"
+PHASE = re.compile(r"BinaryRat export starting mode=" + PHASE_NAME)
+TIMING = re.compile(r"BinaryRat exported functions=(\d+) mode=" + PHASE_NAME + " "
                     r"workers=(\d+) excluded_external=(\d+) elapsed_seconds=([0-9.eE+-]+)")
 
 
-def measured_run(argv: list[str], log: Path, timeout: float) -> dict:
+def measured_run(argv: list[str], log: Path, timeout: float,
+                 env: dict[str, str] | None = None) -> dict:
     """Sample simultaneous process-tree RSS, never sum independent peaks."""
     started = time.monotonic()
     peak, samples = 0, 0
-    phase_peaks = {"serial": 0, "parallel": 0}
+    phase_peaks: dict[str, int] = {}
     current_phase = None
     errors: set[str] = set()
     with log.open("wb") as output, log.open("r", encoding="utf-8", errors="replace") as observer:
-        process = subprocess.Popen(argv, stdout=output, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(argv, stdout=output, stderr=subprocess.STDOUT, env=env)
         root = psutil.Process(process.pid)
         try:
             while process.poll() is None:
@@ -42,6 +44,9 @@ def measured_run(argv: list[str], log: Path, timeout: float) -> dict:
                     match = PHASE.search(line)
                     if match:
                         current_phase = match.group(1)
+                        phase_peaks.setdefault(current_phase, 0)
+                    elif TIMING.search(line):
+                        current_phase = None
                 total = 0
                 try:
                     tree = [root, *root.children(recursive=True)]
@@ -119,20 +124,50 @@ def verify_scheduled(prefix: Path, log: Path, workers: int) -> dict:
     if serial.read_bytes() != scheduled.read_bytes():
         raise RuntimeError(f"exact output mismatch: {serial}, {scheduled}")
     summary = json.loads(Path(str(scheduled) + ".schedule.json").read_text())
-    records = sum(1 for _ in load_export(scheduled))
+    records = 0
+    for record in load_export(scheduled):
+        if not record.successful or not record.c.strip():
+            raise RuntimeError(f"incomplete scheduled decompiler output; see {scheduled}")
+        records += 1
+    if records == 0:
+        raise RuntimeError(f"empty scheduled decompiler output; see {scheduled}")
     engine = summary["engine_stats"]
     if summary["lease_status_counts"] != {"completed": records}:
         raise RuntimeError(f"not every lease completed: {summary['lease_status_counts']}")
-    if engine["peak_running"] > summary["engine_configuration"]["workers"] or \
+    if not 1 <= engine["peak_running"] <= summary["engine_configuration"]["workers"] or \
             summary["engine_configuration"]["workers"] > workers:
-        raise RuntimeError(f"engine ran more decompilations than it admitted workers; see {log}")
-    if summary["engine_configuration"]["memory_watch"] and summary["memory_watched_leases"] != records:
-        raise RuntimeError(f"some decompiler processes were not memory-watched; see {log}")
+        raise RuntimeError(f"unexpected peak number of running decompiles; see {log}")
+    if not summary["engine_configuration"]["memory_watch"] or summary["memory_watched_leases"] != records:
+        raise RuntimeError(f"scheduled decompiler processes were not all memory-watched; see {log}")
     return {"function_count": records, "requested_workers": workers,
             "admitted_workers": summary["engine_configuration"]["workers"],
             "peak_running": engine["peak_running"],
             "max_peak_resident_bytes": summary["max_peak_resident_bytes"],
             "memory_watched_leases": summary["memory_watched_leases"]}
+
+
+def verify_stopped(output: Path, log: Path, expected: str) -> dict:
+    """Require a real fixture decompilation to stop under the requested limit."""
+    summary = json.loads(Path(str(output) + ".schedule.json").read_text(encoding="utf-8"))
+    statuses = summary["lease_status_counts"]
+    stopped = 0
+    records = 0
+    for record in load_export(output):
+        records += 1
+        if expected == "timed_out":
+            stopped += record.timed_out and not record.completed
+        else:
+            stopped += (record.cancelled and not record.completed and
+                        "exceeded its memory reservation" in record.error)
+    if (not stopped or statuses.get(expected) != stopped or sum(statuses.values()) != records or
+            set(statuses) - {"completed", expected}):
+        raise RuntimeError(f"expected {expected} lease outcomes and matching export records; see {log}")
+    if expected == "memory_exceeded" and (not summary["engine_configuration"]["memory_watch"] or
+                                            summary["memory_watched_leases"] != records):
+        raise RuntimeError(f"memory limit check requires watched decompiler processes; see {log}")
+    if summary["engine_stats"]["running"] or summary["engine_stats"]["queued"]:
+        raise RuntimeError(f"scheduler left work running or queued; see {log}")
+    return {"limit": expected, "functions": records, "stopped": stopped}
 
 
 def verify_cache_proof(report_path: Path, log: Path) -> dict:
@@ -141,7 +176,15 @@ def verify_cache_proof(report_path: Path, log: Path) -> dict:
     report = json.loads(report_path.read_text())
     if "BinaryRat cache proof passed:" not in content or not report.get("passed"):
         raise RuntimeError(f"cache proof failed; see {report_path} and {log}")
-    rounds = [entry for entry in report["rounds"] if not entry.get("skipped")]
+    reference_checks = [entry for entry in report["rounds"]
+                        if entry.get("sentinel_dependency_tracking_only")]
+    expected_reference_checks = {"add reference target dependency", "change reference target dependency",
+                                 "remove reference target dependency"}
+    if ({entry["name"] for entry in reference_checks} != expected_reference_checks or
+            not all(entry["passed"] and entry["distinct_source_target_lines"] for entry in reference_checks)):
+        raise RuntimeError("reference changes did not invalidate their target dependencies")
+    rounds = [entry for entry in report["rounds"]
+              if not entry.get("skipped") and not entry.get("sentinel_dependency_tracking_only")]
     if not any(entry["name"].startswith("NEGATIVE CONTROL") and entry["vouched_but_stale"] > 0
                for entry in rounds):
         raise RuntimeError("negative control did not detect the hidden change")
@@ -149,6 +192,7 @@ def verify_cache_proof(report_path: Path, log: Path) -> dict:
            if not entry["name"].startswith("NEGATIVE CONTROL")):
         raise RuntimeError("a cached result differed from fresh decompilation")
     return {"function_count": report["functions"], "rounds": len(rounds),
+            "reference_dependency_checks": len(reference_checks),
             "skipped_rounds": [entry["name"] for entry in report["rounds"] if entry.get("skipped")],
             "timing": report.get("timing")}
 
@@ -195,7 +239,7 @@ def main() -> int:
         if not engine.is_file():
             raise RuntimeError(f"engine not found: {engine}")
         os.environ["BINARYRAT_ENGINE"] = str(engine)
-        report["scheduled_runs"], report["cache_proofs"] = [], []
+        report["scheduled_runs"], report["cache_proofs"], report["limit_checks"] = [], [], []
     try:
         for artifact in manifest["artifacts"]:
             binary = (corpus_root / artifact["binary"]).resolve()
@@ -205,12 +249,14 @@ def main() -> int:
                 raise RuntimeError(f"corpus binary hash mismatch: {binary}")
             identity = hashlib.sha256(artifact["id"].encode()).hexdigest()[:12]
 
-            def script(name: str, output: Path, mode: str, workers: int,
-                       binary: Path = binary) -> list[str]:
+            def headless_script(name: str, filename: str, *script_args: str) -> list[str]:
                 return [str(headless), str(projects), name, "-import", str(binary),
                         "-overwrite", "-scriptPath", str(PROJECT / "binaryrat/bridge/ghidra_scripts"),
-                        "-postScript", "BinaryRatExport.java", str(output), mode,
-                        str(workers), "60", "128", "-deleteProject"]
+                        "-postScript", filename, *script_args, "-deleteProject"]
+
+            def export(name: str, output: Path, mode: str, workers: int) -> list[str]:
+                return headless_script(name, "BinaryRatExport.java", str(output), mode,
+                                       str(workers), "60", "128")
             for workers in args.workers:
                 for repetition in range(args.repetitions):
                     name = f"{identity}-w{workers}-r{repetition}"
@@ -219,11 +265,7 @@ def main() -> int:
                     for suffix in (".serial.jsonl", ".parallel.jsonl"):
                         Path(str(prefix) + suffix).unlink(missing_ok=True)
                     mode = "compare" if repetition % 2 == 0 else "compare-reverse"
-                    argv = [str(headless), str(projects), name, "-import", str(binary),
-                            "-overwrite", "-scriptPath", str(PROJECT / "binaryrat/bridge/ghidra_scripts"),
-                            "-postScript", "BinaryRatExport.java", str(prefix), mode,
-                            str(workers), "60", "128", "-deleteProject"]
-                    measured = measured_run(argv, log, args.timeout)
+                    measured = measured_run(export(name, prefix, mode, workers), log, args.timeout)
                     if measured["returncode"]:
                         raise RuntimeError(f"Ghidra process failed; see {log}")
                     pair = verify_pair(prefix, log)
@@ -241,7 +283,7 @@ def main() -> int:
                 prefix, log = destination / name, destination / (name + ".log")
                 for suffix in (".serial.jsonl", ".scheduled.jsonl", ".scheduled.jsonl.schedule.json"):
                     Path(str(prefix) + suffix).unlink(missing_ok=True)
-                measured = measured_run(script(name, prefix, "compare-scheduled", workers), log,
+                measured = measured_run(export(name, prefix, "compare-scheduled", workers), log,
                                         args.timeout)
                 if measured["returncode"]:
                     raise RuntimeError(f"Ghidra process failed; see {log}")
@@ -251,17 +293,44 @@ def main() -> int:
                 name = f"{identity}-cache-proof"
                 proof, log = destination / (name + ".json"), destination / (name + ".log")
                 proof.unlink(missing_ok=True)
-                measured = measured_run(script(name, proof, "cache-proof", 1), log, args.timeout)
+                measured = measured_run(export(name, proof, "cache-proof", 1), log, args.timeout)
                 if measured["returncode"]:
                     raise RuntimeError(f"Ghidra process failed; see {log}")
                 report["cache_proofs"].append({"artifact_id": artifact["id"],
                                                "wall_seconds": measured["wall_seconds"],
                                                **verify_cache_proof(proof, log)})
                 print(f"PASS {artifact['id']} cache proof", flush=True)
+                if not report["limit_checks"]:
+                    for expected, overrides in (
+                        ("timed_out", {"BINARYRAT_LEASE_TIMEOUT_MS": "1"}),
+                        ("memory_exceeded", {"BINARYRAT_WORKER_BYTES": str(1024 * 1024),
+                                             "BINARYRAT_LEASE_TIMEOUT_MS": "60000"}),
+                    ):
+                        name = f"{identity}-limit-{expected}"
+                        output, log = destination / (name + ".jsonl"), destination / (name + ".log")
+                        output.unlink(missing_ok=True)
+                        Path(str(output) + ".schedule.json").unlink(missing_ok=True)
+                        measured = measured_run(export(name, output, "scheduled", 1), log,
+                                                args.timeout, os.environ | overrides)
+                        if measured["returncode"]:
+                            raise RuntimeError(f"Ghidra process failed; see {log}")
+                        report["limit_checks"].append({"artifact_id": artifact["id"],
+                                                       **verify_stopped(output, log, expected)})
+                        print(f"PASS {artifact['id']} scheduler {expected}", flush=True)
+                    name = f"{identity}-lease-lifecycle"
+                    log = destination / (name + ".log")
+                    measured = measured_run(headless_script(name, "BinaryRatLeaseChecks.java"),
+                                            log, args.timeout)
+                    if (measured["returncode"] or "BinaryRat lease lifecycle checks passed" not in
+                            log.read_text(encoding="utf-8", errors="replace")):
+                        raise RuntimeError(f"Ghidra lease lifecycle checks failed; see {log}")
+                    report["lease_lifecycle"] = {"artifact_id": artifact["id"], "passed": True}
+                    print(f"PASS {artifact['id']} lease lifecycle", flush=True)
         report["correctness_passed"] = True
         report["memory_evidence_complete"] = all(
             not run["memory_sampling_errors"] and all(
-                value is not None for value in run["phase_sampled_process_tree_peak_rss_bytes"].values())
+                run["phase_sampled_process_tree_peak_rss_bytes"].get(phase) is not None
+                for phase in ("serial", "parallel"))
             for run in report["runs"])
     finally:
         (destination / "report.json").write_text(json.dumps(report, indent=2) + "\n")

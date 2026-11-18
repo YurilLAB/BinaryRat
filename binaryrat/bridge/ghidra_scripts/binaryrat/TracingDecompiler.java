@@ -3,15 +3,19 @@
 package binaryrat;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Field;
-import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.security.MessageDigest;
 
 import ghidra.app.decompiler.*;
 import generic.jar.ResourceFile;
 import ghidra.app.plugin.processors.sleigh.SleighLanguage;
 import ghidra.app.plugin.processors.sleigh.UniqueLayout;
 import ghidra.framework.Application;
+import ghidra.framework.OperatingSystem;
+import ghidra.framework.Platform;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.pcode.XmlEncode;
 import ghidra.util.task.TaskMonitor;
@@ -89,8 +93,7 @@ public final class TracingDecompiler extends DecompInterface {
 		getDataTypeManager().encodeCoreTypes(encode);
 		add(digest, "core-types", encode.toString());
 		encode.clear();
-		add(digest, "pspec", new String(specFile(language).getInputStream().readAllBytes(),
-			StandardCharsets.UTF_8));
+		add(digest, "pspec", contentDigest(specFile(language).getInputStream()));
 		getCompilerSpec().encode(encode);
 		add(digest, "cspec", encode.toString());
 		encode.clear();
@@ -99,6 +102,34 @@ public final class TracingDecompiler extends DecompInterface {
 		add(digest, "actions", getSimplificationStyle() + "|c|tree");
 		add(digest, "decompiler", getMajorVersion() + "." + getMinorVersion());
 		add(digest, "ghidra", Application.getApplicationVersion());
+		// Match DecompileProcessFactory's executable resolution. Version strings
+		// alone cannot distinguish two builds of the same Ghidra release.
+		String executable = Platform.CURRENT_PLATFORM.getOperatingSystem() == OperatingSystem.WINDOWS
+			? "decompile.exe" : "decompile";
+		add(digest, "native executable", contentDigest(
+			Files.newInputStream(Application.getOSFile(executable).toPath())));
+		for (Class<?> implementation : new Class<?>[] { DecompInterface.class,
+			DecompileCallback.class, DecompileResults.class, TracingDecompiler.class,
+			RecordingCallback.class, Trace.class, TraceVerifier.class, LiveDecompileCache.class,
+			ChangeTracker.class }) {
+			String name = implementation.getName();
+			InputStream bytes = implementation.getResourceAsStream("/" + name.replace('.', '/') + ".class");
+			if (bytes == null) {
+				throw new IOException("cannot identify decompiler implementation: " + name);
+			}
+			add(digest, name, contentDigest(bytes));
+		}
+		return Trace.hex(digest.digest(), 32);
+	}
+
+	private static String contentDigest(InputStream input) throws IOException {
+		MessageDigest digest = Trace.sha256();
+		try (input) {
+			byte[] buffer = new byte[64 * 1024];
+			for (int count; (count = input.read(buffer)) != -1;) {
+				digest.update(buffer, 0, count);
+			}
+		}
 		return Trace.hex(digest.digest(), 32);
 	}
 

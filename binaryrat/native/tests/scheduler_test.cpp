@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
@@ -300,6 +301,51 @@ void holder_that_ignores_a_stop_has_its_process_killed() {
     require(scheduler.stats().killed == 1, "kills are counted");
 }
 
+void release_waits_for_in_flight_process_termination() {
+    class BlockingProbe final : public ProcessProbe {
+    public:
+        std::promise<void> terminating;
+        std::promise<void> allow_termination;
+        std::shared_future<void> allowed = allow_termination.get_future().share();
+        std::optional<host::ProcessId> identify(std::uint64_t pid) override {
+            return host::ProcessId{pid, 1};
+        }
+        std::optional<std::uint64_t> resident_bytes(const host::ProcessId&) override {
+            return 10;
+        }
+        bool terminate(const host::ProcessId&) override {
+            terminating.set_value();
+            allowed.wait();
+            return true;
+        }
+    };
+    auto probe = std::make_shared<BlockingProbe>();
+    auto config = options(std::make_shared<FakeProbe>(), 10ms);
+    config.probe = probe;
+    Recorder recorder;
+    LeaseScheduler scheduler(config, recorder.events());
+    scheduler.acquire("stuck", lease(100), recorder.callbacks());
+    require(eventually([&] { return recorder.was_granted("stuck"); }), "lease granted");
+    require(scheduler.attach("stuck", 77).attached, "process attached");
+    scheduler.cancel("stuck");
+    require(probe->terminating.get_future().wait_for(10s) == std::future_status::ready,
+            "process termination has started");
+    std::promise<void> releasing;
+    auto end = std::async(std::launch::async, [&] {
+        releasing.set_value();
+        return scheduler.release("stuck");
+    });
+    releasing.get_future().wait();
+    const bool waited = end.wait_for(50ms) == std::future_status::timeout;
+    probe->allow_termination.set_value();
+    require(waited, "release must not acknowledge while its process termination is in flight");
+    require(end.wait_for(10s) == std::future_status::ready, "release finishes after termination");
+    const auto result = end.get();
+    require(result.status == LeaseStatus::Cancelled && result.killed,
+            "release reports the completed termination result");
+    require(scheduler.stats().killed == 1, "termination is counted exactly once");
+}
+
 void prompt_release_or_zero_grace_kills_nothing() {
     auto probe = std::make_shared<FakeProbe>();
     probe->set(5, 10);
@@ -392,6 +438,42 @@ void shutdown_cancels_queued_and_unblocks_running() {
     scheduler.shutdown();
 }
 
+void shutdown_notifies_and_cleans_attached_processes() {
+    for (const auto grace : {0ms, 10ms}) {
+        auto probe = std::make_shared<FakeProbe>();
+        probe->set(88, 10);
+        Recorder recorder;
+        auto config = options(probe, grace);
+        config.budget.cpu_workers = 1;
+        LeaseScheduler scheduler(config, recorder.events());
+        scheduler.acquire("running", lease(100), recorder.callbacks());
+        require(eventually([&] { return recorder.was_granted("running"); }), "lease running");
+        require(scheduler.attach("running", 88).attached, "process attached");
+        scheduler.acquire("queued", lease(100), recorder.callbacks());
+        auto stopped = std::async(std::launch::async, [&] { scheduler.shutdown(); });
+        require(stopped.wait_for(2s) == std::future_status::ready,
+                "shutdown must finish without a holder releasing its lease");
+        stopped.get();
+        require(recorder.stops() == std::vector<std::pair<std::string, StopReason>>{
+                    {"running", StopReason::Shutdown}},
+                "shutdown must notify a running holder exactly once");
+        const auto refused = recorder.refused();
+        require(refused.size() == 1 && refused[0] ==
+                    std::make_pair(std::string("queued"), LeaseStatus::Cancelled),
+                "shutdown must cancel its queued lease");
+        if (grace.count() == 0) {
+            require(probe->terminated().empty() && recorder.kills().empty(),
+                    "zero-grace shutdown must not terminate an attached process");
+        } else {
+            require(probe->terminated() == std::vector<std::uint64_t>{88},
+                    "shutdown must terminate only the attached process after its grace period");
+            require(recorder.kills().size() == 1, "shutdown must report completed process cleanup");
+        }
+        require(scheduler.stats().executor.reserved_bytes == 0,
+                "shutdown must release admission reservations after cleanup");
+    }
+}
+
 // Shutdown visits leases in hash-map order, which differs between standard
 // libraries. A running lease visited first frees its worker while queued leases
 // are still unvisited; none of them may be granted after shutdown has begun.
@@ -453,10 +535,12 @@ int main() {
     cancelling_running_and_queued_leases();
     attached_process_over_its_reservation_is_stopped();
     holder_that_ignores_a_stop_has_its_process_killed();
+    release_waits_for_in_flight_process_termination();
     prompt_release_or_zero_grace_kills_nothing();
     misuse_is_reported();
     full_queue_is_refused_without_blocking();
     shutdown_cancels_queued_and_unblocks_running();
+    shutdown_notifies_and_cleans_attached_processes();
     shutdown_never_grants_queued_leases();
     host_probe_reads_this_process_and_refuses_stale_identities();
     std::cout << "scheduler tests passed" << std::endl;

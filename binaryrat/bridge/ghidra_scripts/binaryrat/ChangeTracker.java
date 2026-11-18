@@ -15,6 +15,7 @@ import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.Namespace;
+import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.Symbol;
 import ghidra.program.util.ProgramChangeRecord;
 import ghidra.program.util.ProgramEvent;
@@ -49,8 +50,7 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 		ProgramEvent.MEMORY_BYTES_CHANGED, ProgramEvent.CODE_ADDED, ProgramEvent.CODE_REMOVED,
 		ProgramEvent.CODE_REPLACED, ProgramEvent.CODE_UNIT_PROPERTY_CHANGED,
 		ProgramEvent.CODE_UNIT_PROPERTY_RANGE_REMOVED, ProgramEvent.CODE_UNIT_USER_DATA_CHANGED,
-		ProgramEvent.COMMENT_CHANGED, ProgramEvent.REFERENCE_ADDED, ProgramEvent.REFERENCE_REMOVED,
-		ProgramEvent.REFERENCE_TYPE_CHANGED, ProgramEvent.REFERNCE_PRIMARY_SET,
+		ProgramEvent.COMMENT_CHANGED, ProgramEvent.REFERNCE_PRIMARY_SET,
 		ProgramEvent.REFERENCE_PRIMARY_REMOVED, ProgramEvent.SYMBOL_ASSOCIATION_ADDED,
 		ProgramEvent.SYMBOL_ASSOCIATION_REMOVED, ProgramEvent.EQUATE_REFERENCE_ADDED,
 		ProgramEvent.EQUATE_REFERENCE_REMOVED, ProgramEvent.VARIABLE_REFERENCE_ADDED,
@@ -59,6 +59,11 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 		ProgramEvent.REGISTER_VALUES_CHANGED, ProgramEvent.DATA_TYPE_SETTING_CHANGED,
 		ProgramEvent.USER_DATA_CHANGED, ProgramEvent.ADDRESS_PROPERTY_MAP_CHANGED,
 		ProgramEvent.INT_PROPERTY_MAP_CHANGED, ProgramEvent.FUNCTION_CHANGED);
+
+	/** Reference sets are consulted at both ends, including global mutability. */
+	private static final EnumSet<ProgramEvent> REFERENCES = EnumSet.of(
+		ProgramEvent.REFERENCE_ADDED, ProgramEvent.REFERENCE_REMOVED,
+		ProgramEvent.REFERENCE_TYPE_CHANGED);
 
 	private static final EnumSet<ProgramEvent> SYMBOLS = EnumSet.of(ProgramEvent.SYMBOL_ADDED,
 		ProgramEvent.SYMBOL_REMOVED, ProgramEvent.SYMBOL_SOURCE_CHANGED,
@@ -247,6 +252,9 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 		if (!(record instanceof ProgramChangeRecord change)) {
 			return Outcome.UNKNOWN;
 		}
+		if (REFERENCES.contains(event)) {
+			return reference(change, keys);
+		}
 		if (RANGED.contains(event)) {
 			return lines(keys, change.getStart(), change.getEnd()) ? Outcome.PRECISE : Outcome.UNKNOWN;
 		}
@@ -268,6 +276,32 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 		// image base, property maps added or removed, source archives, and any event
 		// added later: reach unknown.
 		return Outcome.UNKNOWN;
+	}
+
+	private static Outcome reference(ProgramChangeRecord change, Set<String> keys) {
+		// ReferenceDBManager reports these events at the source address, but
+		// MappedEntry.getMutabilityOfAddress also reads references TO a global.
+		// A write reference from another function can therefore change the C of
+		// a cached reader. Inspect all payload forms (removal supplies oldValue,
+		// addition newValue, and type changes retain the Reference as object).
+		boolean found = false;
+		try {
+			for (Object value : new Object[] {
+				change.getObject(), change.getOldValue(), change.getNewValue() }) {
+				if (value instanceof Reference reference) {
+					found = true;
+					if (!lines(keys, reference.getFromAddress(), null) ||
+						!lines(keys, reference.getToAddress(), null)) {
+						return Outcome.UNKNOWN;
+					}
+				}
+			}
+		}
+		catch (RuntimeException deleted) {
+			// A deleted or otherwise unreadable reference cannot establish reach.
+			return Outcome.UNKNOWN;
+		}
+		return found ? Outcome.PRECISE : Outcome.UNKNOWN;
 	}
 
 	private static Outcome symbol(ProgramChangeRecord change, Set<String> keys) {

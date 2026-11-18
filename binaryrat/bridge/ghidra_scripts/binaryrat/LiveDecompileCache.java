@@ -5,6 +5,7 @@ package binaryrat;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -61,6 +62,10 @@ public final class LiveDecompileCache {
 	}
 
 	JsonObject key(Function function) {
+		return key(function, registration);
+	}
+
+	private JsonObject key(Function function, String registered) {
 		Address entry = function.getEntryPoint();
 		JsonObject key = new JsonObject();
 		key.addProperty("schema_version", 2);
@@ -69,8 +74,13 @@ public final class LiveDecompileCache {
 		key.addProperty("program_id", programId);
 		key.addProperty("address_space", entry.getAddressSpace().getName());
 		key.addProperty("address", Long.toUnsignedString(entry.getOffset(), 16));
-		key.addProperty("options_digest", registration);
+		key.addProperty("options_digest", registered);
 		return key;
+	}
+
+	private boolean unchanged(long modification, String registered) {
+		return program.getModificationNumber() == modification &&
+			Objects.equals(registration, registered);
 	}
 
 	/**
@@ -79,11 +89,17 @@ public final class LiveDecompileCache {
 	 * with kind HIT: that would be a missed change, i.e. a stale result served.
 	 */
 	public Lookup lookup(Function function, boolean audit) throws IOException {
+		long modification = program.getModificationNumber();
+		String registered = registration;
 		tracker.sync();
+		JsonObject lookupKey = key(function, registered);
 		JsonObject request = new JsonObject();
-		request.add("key", key(function));
+		request.add("key", lookupKey);
 		JsonObject found = engine.call("cache.get", request);
 		long seq = found.get("seq").getAsLong();
+		if (!unchanged(modification, registered)) {
+			return new Lookup(Kind.MISS, null, seq, "program or registration changed during lookup");
+		}
 		if (!found.get("hit").getAsBoolean()) {
 			return new Lookup(Kind.MISS, null, seq, null);
 		}
@@ -92,24 +108,40 @@ public final class LiveDecompileCache {
 		boolean vouched = found.get("verified").getAsBoolean() &&
 			!value.get("always_verify").getAsBoolean();
 		if (vouched && !audit) {
-			return new Lookup(Kind.HIT, output, seq, null);
+			return unchanged(modification, registered) ? new Lookup(Kind.HIT, output, seq, null) :
+				new Lookup(Kind.MISS, null, seq, "program or registration changed before cache hit");
 		}
 		List<String> reads = new ArrayList<>();
 		for (JsonElement read : value.getAsJsonArray("reads")) {
 			reads.add(read.getAsString());
 		}
 		String why = verifiers.get().verify(function, reads, value.get("reads_sha256").getAsString());
+		if (!unchanged(modification, registered)) {
+			return new Lookup(Kind.MISS, null, seq, "program or registration changed during replay");
+		}
 		if (why == null) {
 			JsonObject confirm = new JsonObject();
-			confirm.add("key", key(function));
+			confirm.add("key", lookupKey);
 			confirm.addProperty("seq", seq);
 			confirm.addProperty("generation", found.get("generation").getAsLong());
-			engine.call("cache.confirm", confirm);
+			JsonObject confirmed = engine.call("cache.confirm", confirm);
+			if (!confirmed.get("confirmed").getAsBoolean()) {
+				return new Lookup(Kind.MISS, null, seq, "cache generation changed during replay");
+			}
+			if (!unchanged(modification, registered)) {
+				return new Lookup(Kind.MISS, null, seq, "program or registration changed during confirmation");
+			}
 			return new Lookup(vouched ? Kind.HIT : Kind.REPLAYED, output, seq, null);
 		}
 		JsonObject evict = new JsonObject();
-		evict.add("key", key(function));
+		evict.add("key", lookupKey);
 		engine.call("cache.evict", evict);
+		if (!unchanged(modification, registered)) {
+			return new Lookup(Kind.MISS, null, seq, "program or registration changed before replay rejection");
+		}
+		// Only an explicit audit can reach this vouched-but-invalid diagnostic. Normal
+		// lookups never knowingly serve a failed replay; the negative control needs
+		// the old output to prove that the omitted change would have served stale C.
 		return new Lookup(vouched ? Kind.HIT : Kind.MISS, vouched ? output : null, seq, why);
 	}
 
