@@ -6,6 +6,8 @@ Copyright 2026 YurilLAB.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -37,11 +39,40 @@ def evidence(prefix: Path, log: Path, state: str, revision: int = 4) -> dict:
              "store_rejected": 0, "store_diagnostics": {}, "lookup_diagnostics": {}}
     summary = {"cache": cache, "leases": compute,
                "lease_status_counts": {"completed": compute} if compute else {},
+               "traced_leases": compute if state == "cold" else 0,
                "engine_stats": {"peak_running": compute, "running": 0, "queued": 0},
                "engine_configuration": {"workers": 2, "memory_watch": True},
                "memory_watched_leases": compute, "max_peak_resident_bytes": 4096 if compute else 0}
     Path(str(prefix) + ".scheduled.jsonl.schedule.json").write_text(json.dumps(summary), encoding="utf-8")
     return summary
+
+
+class ProcessMeasurementTests(unittest.TestCase):
+    def test_denied_process_list_still_times_out_and_reaps_root(self):
+        children = []
+        spawn = subprocess.Popen
+
+        def capture(*args, **kwargs):
+            process = spawn(*args, **kwargs)
+            children.append(process)
+            self.addCleanup(process.wait)
+            self.addCleanup(process.kill)
+            return process
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            verify_ghidra.psutil.Process, "children", side_effect=verify_ghidra.psutil.AccessDenied()
+        ), patch.object(subprocess, "Popen", side_effect=capture):
+            with self.assertRaises(TimeoutError):
+                verify_ghidra.measured_run([sys.executable, "-c", "import time; time.sleep(10)"],
+                                           Path(directory) / "timeout.log", 0.2)
+            self.assertIsNotNone(children[0].returncode)
+
+    def test_nonfinite_deadline_rejected_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(subprocess, "Popen") as spawn:
+            for timeout in (float("nan"), float("inf"), 0, -1):
+                with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                    verify_ghidra.measured_run([], Path(directory) / "invalid.log", timeout)
+            spawn.assert_not_called()
 
 
 class ScheduledEvidenceTests(unittest.TestCase):
@@ -53,6 +84,29 @@ class ScheduledEvidenceTests(unittest.TestCase):
                 result = verify_ghidra.verify_scheduled(prefix, log, 2, state)
                 self.assertEqual(result["function_count"], 2)
                 self.assertEqual(result["compute_leases"], leases)
+
+    def test_uncached_run_rejects_unnecessary_traces(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix, log = Path(directory) / "uncached", Path(directory) / "uncached.log"
+            summary = evidence(prefix, log, "disabled")
+            summary["traced_leases"] = 2
+            Path(str(prefix) + ".scheduled.jsonl.schedule.json").write_text(json.dumps(summary))
+            with self.assertRaisesRegex(RuntimeError, "dependency traces"):
+                verify_ghidra.verify_scheduled(prefix, log, 2, "disabled")
+
+    def test_streaming_raw_comparison_at_chunk_boundaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            left, right = Path(directory) / "left", Path(directory) / "right"
+            body = b"a" * 131072
+            left.write_bytes(body)
+            for position in (0, 65535, 65536, len(body) - 1, len(body)):
+                with self.subTest(position=position):
+                    right.write_bytes(body[:position] + b"b" + body[position + 1:])
+                    self.assertEqual(verify_ghidra.first_differing_byte(left, right), position)
+            right.write_bytes(body[:65536])
+            self.assertEqual(verify_ghidra.first_differing_byte(left, right), 65536)
+            right.write_bytes(body)
+            self.assertIsNone(verify_ghidra.first_differing_byte(left, right))
 
     def test_warm_evidence_rejects_a_recomputed_result(self):
         with tempfile.TemporaryDirectory() as directory:

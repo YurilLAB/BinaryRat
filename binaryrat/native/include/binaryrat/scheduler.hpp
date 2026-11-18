@@ -16,6 +16,8 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace binaryrat {
 
@@ -127,7 +129,8 @@ public:
     void acquire(const std::string& lease, const LeaseOptions& options, LeaseCallbacks callbacks);
 
     // Watches the resident memory of the process doing the lease's work.
-    // Replaces an earlier attachment. Throws for a lease that is not running.
+    // Replaces an earlier attachment only while the lease is still working.
+    // Throws for a lease that is not running.
     AttachResult attach(const std::string& lease, std::uint64_t pid);
 
     // Ends a granted lease and reports how it ended. Throws std::invalid_argument
@@ -149,7 +152,10 @@ private:
 
     void run(const std::shared_ptr<State>& state, std::stop_token token);
     void request_stop(const std::shared_ptr<State>& state, StopReason reason);
-    void watch_memory();
+    void observe_memory(const std::shared_ptr<State>& state, const host::ProcessId& process,
+                        std::uint64_t resident);
+    using Attachment = std::pair<std::shared_ptr<State>, host::ProcessId>;
+    void watch_memory(std::vector<Attachment> attached);
     std::shared_ptr<State> find(const std::string& lease) const;
     void count(LeaseStatus status);
 

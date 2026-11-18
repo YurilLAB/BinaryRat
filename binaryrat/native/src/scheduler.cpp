@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <binaryrat/scheduler.hpp>
 
+#include "deadline.hpp"
+
 #include <algorithm>
+#include <new>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -96,8 +99,12 @@ LeaseScheduler::LeaseScheduler(SchedulerOptions options, SchedulerEvents events)
     if (options_.kill_grace.count() < 0)
         throw std::invalid_argument("kill_grace must not be negative");
     workers_ = worker_limit(options_.budget);
-    executor_ = std::make_unique<AdmissionExecutor>(options_.budget, options_.max_pending + 1);
-    watcher_ = std::thread([this] { watch_memory(); });
+    executor_ = std::make_unique<AdmissionExecutor>(options_.budget, options_.max_pending);
+    // Allocate sampling slots before starting the watcher. Queued leases have
+    // no process to measure and must not grow the watcher's allocation.
+    std::vector<Attachment> attached;
+    attached.reserve(workers_);
+    watcher_ = std::thread(&LeaseScheduler::watch_memory, this, std::move(attached));
 }
 
 LeaseScheduler::~LeaseScheduler() {
@@ -232,7 +239,8 @@ void LeaseScheduler::run(const std::shared_ptr<State>& state, std::stop_token to
     // grace period. The global flag must not skip cleanup, but an unattached
     // lease cannot be killed and need not delay shutdown.
     if (options_.kill_grace.count() > 0 && (!shutting_down_ || state->process) &&
-        !state->wake.wait_for(lock, options_.kill_grace, [&] { return state->released; }) &&
+        !state->wake.wait_until(lock, detail::deadline_after(options_.kill_grace),
+                                [&] { return state->released; }) &&
         state->process) {
         const auto process = *state->process;
         lock.unlock();
@@ -272,16 +280,16 @@ AttachResult LeaseScheduler::attach(const std::string& lease, std::uint64_t pid)
     }
     const auto process = options_.probe->identify(pid);
     if (!process) return {false, "process not found or not readable", 0};
-    const auto resident = options_.probe->resident_bytes(*process).value_or(0);
-    bool over = false;
+    const auto resident = options_.probe->resident_bytes(*process);
+    if (!resident) return {false, "process resident memory is not readable", 0};
     {
         std::lock_guard lock(state->mutex);
+        if (state->reason && state->process && *state->process != *process)
+            return {false, "cannot replace process on a stopping lease", 0};
         state->process = process;
-        state->peak = std::max(state->peak, resident);
-        over = resident > state->reserve;
     }
-    if (over) request_stop(state, StopReason::Memory);
-    return {true, {}, resident};
+    observe_memory(state, *process, *resident);
+    return {true, {}, *resident};
 }
 
 LeaseEnd LeaseScheduler::release(const std::string& lease) {
@@ -423,34 +431,47 @@ SchedulerStats LeaseScheduler::stats() const {
     return result;
 }
 
-void LeaseScheduler::watch_memory() {
+void LeaseScheduler::observe_memory(const std::shared_ptr<State>& state,
+                                    const host::ProcessId& process, std::uint64_t resident) {
+    std::shared_ptr<Ticket> ticket;
+    {
+        std::lock_guard guard(state->mutex);
+        // A read started on the previous attachment may finish after reattachment.
+        if (state->released || state->process != process) return;
+        state->peak = std::max(state->peak, resident);
+        if (resident <= state->reserve || state->reason) return;
+        state->reason = StopReason::Memory;
+        ticket = state->ticket;
+        state->wake.notify_all();
+    }
+    if (ticket) ticket->cancel();
+}
+
+void LeaseScheduler::watch_memory(std::vector<Attachment> attached) {
     std::unique_lock lock(watch_mutex_);
     while (!watch_stop_) {
-        watch_wake_.wait_for(lock, options_.memory_poll, [&] { return watch_stop_; });
+        watch_wake_.wait_until(lock, detail::deadline_after(options_.memory_poll),
+                              [&] { return watch_stop_; });
         if (watch_stop_) break;
         lock.unlock();
-        std::vector<std::shared_ptr<State>> running;
         {
             std::lock_guard leases(mutex_);
-            for (const auto& entry : leases_) running.push_back(entry.second);
-        }
-        for (const auto& state : running) {
-            std::optional<host::ProcessId> process;
-            {
+            for (const auto& [name, state] : leases_) {
                 std::lock_guard guard(state->mutex);
-                if (state->granted && !state->released && !state->reason) process = state->process;
+                if (state->granted && !state->released && !state->reason && state->process)
+                    attached.emplace_back(state, *state->process);
             }
-            if (!process) continue;
-            const auto resident = options_.probe->resident_bytes(*process);
-            if (!resident) continue;  // exited; the holder reattaches a restarted process
-            bool over = false;
-            {
-                std::lock_guard guard(state->mutex);
-                state->peak = std::max(state->peak, *resident);
-                over = *resident > state->reserve;
-            }
-            if (over) request_stop(state, StopReason::Memory);
         }
+        for (const auto& [state, process] : attached) {
+            try {
+                const auto resident = options_.probe->resident_bytes(process);
+                if (resident) observe_memory(state, process, *resident);
+            } catch (const std::bad_alloc&) {
+                // OS readers can allocate. Retry at the normal interval while
+                // preserving this lease's reservation and sampling the others.
+            }
+        }
+        attached.clear();
         lock.lock();
     }
 }

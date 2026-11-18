@@ -21,6 +21,8 @@ import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.plugin.core.analysis.StoredAnalyzerTimes;
 import ghidra.app.util.headless.HeadlessScript;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressSet;
+import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.util.GhidraProgramUtilities;
@@ -28,6 +30,7 @@ import ghidra.program.util.GhidraProgramUtilities;
 /** Benchmark script for both sides of a single, fresh headless import. */
 public class BinaryRatAnalysisProfile extends HeadlessScript {
     private static final String START = "binaryrat.analysis-profile.start";
+    private static final int INVENTORY_VERSION = 2;
 
     @Override
     public void run() throws Exception {
@@ -102,6 +105,7 @@ public class BinaryRatAnalysisProfile extends HeadlessScript {
         work.addProperty("reference_destinations", referenceManager.getReferenceDestinationCount());
         if (analyzed && !timedOut && !manager.isAnalyzing()) {
             long inventoryStart = System.nanoTime();
+            work.addProperty("inventory_version", INVENTORY_VERSION);
             work.addProperty("inventory_sha256", inventoryDigest());
             report.addProperty("inventory_wall_ns", System.nanoTime() - inventoryStart);
         }
@@ -109,14 +113,17 @@ public class BinaryRatAnalysisProfile extends HeadlessScript {
         Files.writeString(Path.of(args[1]), new GsonBuilder().setPrettyPrinting().create().toJson(report) + "\n");
     }
 
-    private String inventoryDigest() throws Exception {
+    protected final String inventoryDigest() throws Exception {
         var digest = MessageDigest.getInstance("SHA-256");
         var listing = currentProgram.getListing();
         var references = currentProgram.getReferenceManager();
         try (var data = new DataOutputStream(new BufferedOutputStream(
             new DigestOutputStream(OutputStream.nullOutputStream(), digest)))) {
-            putString(data, "binaryrat/analysis-inventory/1");
-            var functions = currentProgram.getFunctionManager().getFunctions(true);
+            putString(data, "binaryrat/analysis-inventory/" + INVENTORY_VERSION);
+            var functionSpaces = new AddressSet(currentProgram.getMemory());
+            functionSpaces.addRange(AddressSpace.EXTERNAL_SPACE.getMinAddress(),
+                AddressSpace.EXTERNAL_SPACE.getMaxAddress());
+            var functions = currentProgram.getFunctionManager().getFunctions(functionSpaces, true);
             while (functions.hasNext()) {
                 monitor.checkCancelled();
                 var function = functions.next();
@@ -125,10 +132,32 @@ public class BinaryRatAnalysisProfile extends HeadlessScript {
                 putString(data, function.getName(true));
                 putString(data, function.getPrototypeString(true, true));
                 data.writeBoolean(function.isThunk());
+                data.writeBoolean(function.hasNoReturn());
                 data.writeInt(function.getBody().getNumAddressRanges());
                 for (var range : function.getBody().getAddressRanges()) {
                     putAddress(data, range.getMinAddress());
                     putAddress(data, range.getMaxAddress());
+                }
+            }
+            var manager = currentProgram.getBookmarkManager();
+            var addresses = new AddressSet();
+            var bookmarks = manager.getBookmarksIterator();
+            while (bookmarks.hasNext()) {
+                monitor.checkCancelled();
+                addresses.add(bookmarks.next().getAddress());
+            }
+            // Database IDs and insertion order can differ across fresh imports. Keep only
+            // address ranges, then sort and encode the bookmarks at one address at a time.
+            for (Address address : addresses.getAddresses(true)) {
+                monitor.checkCancelled();
+                var atAddress = manager.getBookmarks(address);
+                Arrays.sort(atAddress);
+                for (var bookmark : atAddress) {
+                    data.writeByte(5);
+                    putAddress(data, address);
+                    putString(data, bookmark.getTypeString());
+                    putString(data, bookmark.getCategory());
+                    putString(data, bookmark.getComment());
                 }
             }
             var instructions = listing.getInstructions(true);

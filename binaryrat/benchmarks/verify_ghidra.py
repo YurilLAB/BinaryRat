@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import hashlib
+from itertools import zip_longest
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -29,9 +31,33 @@ TIMING = re.compile(r"BinaryRat exported functions=(\d+) mode=" + PHASE_NAME + "
                     r"workers=(\d+) excluded_external=(\d+) elapsed_seconds=([0-9.eE+-]+)")
 
 
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(65536):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def first_differing_byte(left: Path, right: Path) -> int | None:
+    """Return the first raw byte offset, including a length-only difference."""
+    with left.open("rb") as a, right.open("rb") as b:
+        offset = 0
+        while True:
+            before, after = a.read(65536), b.read(65536)
+            if before != after:
+                return offset + next((i for i, (x, y) in enumerate(zip(before, after)) if x != y),
+                                     min(len(before), len(after)))
+            if not before:
+                return None
+            offset += len(before)
+
+
 def measured_run(argv: list[str], log: Path, timeout: float,
                  env: dict[str, str] | None = None) -> dict:
     """Sample simultaneous process-tree RSS, never sum independent peaks."""
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("process timeout must be positive and finite")
     started = time.monotonic()
     peak, samples = 0, 0
     phase_peaks: dict[str, int] = {}
@@ -39,8 +65,12 @@ def measured_run(argv: list[str], log: Path, timeout: float,
     errors: set[str] = set()
     with log.open("wb") as output, log.open("r", encoding="utf-8", errors="replace") as observer:
         process = subprocess.Popen(argv, stdout=output, stderr=subprocess.STDOUT, env=env)
-        root = psutil.Process(process.pid)
+        root = None
         try:
+            try:
+                root = psutil.Process(process.pid)
+            except psutil.NoSuchProcess:
+                process.wait()
             while process.poll() is None:
                 for line in observer.readlines():
                     match = PHASE.search(line)
@@ -51,7 +81,12 @@ def measured_run(argv: list[str], log: Path, timeout: float,
                         current_phase = None
                 total = 0
                 try:
-                    tree = [root, *root.children(recursive=True)]
+                    try:
+                        children = root.children(recursive=True)
+                    except psutil.AccessDenied:
+                        errors.add("access_denied")
+                        children = []
+                    tree = [root, *children]
                     for member in tree:
                         try:
                             total += member.memory_info().rss
@@ -70,15 +105,17 @@ def measured_run(argv: list[str], log: Path, timeout: float,
                 time.sleep(0.05)
         except BaseException:
             try:
-                for child in root.children(recursive=True):
-                    try:
-                        child.kill()
-                    except psutil.NoSuchProcess:
-                        pass
-            except psutil.NoSuchProcess:
+                if root is not None:
+                    for child in root.children(recursive=True):
+                        try:
+                            child.kill()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
-            process.kill()
-            process.wait()
+            finally:
+                process.kill()
+                process.wait()
             raise
     return {"returncode": process.returncode, "wall_seconds": time.monotonic() - started,
             "sampled_process_tree_peak_rss_bytes": peak, "memory_samples": samples,
@@ -95,24 +132,28 @@ def verify_pair(prefix: Path, log: Path) -> dict:
         raise RuntimeError(f"postScript success marker missing; see {log}")
     if not serial.is_file() or not parallel.is_file():
         raise RuntimeError(f"expected export missing; see {log}")
-    if serial.read_bytes() != parallel.read_bytes():
+    if first_differing_byte(serial, parallel) is not None:
         raise RuntimeError(f"exact output mismatch: {serial}, {parallel}")
-    records = list(load_export(serial))
-    if not records or not all(record.successful and record.c.strip() for record in records):
+    count = 0
+    for record in load_export(serial):
+        if not record.successful or not record.c.strip():
+            raise RuntimeError(f"empty or incomplete decompiler coverage; see {serial}")
+        count += 1
+    if not count:
         raise RuntimeError(f"empty or incomplete decompiler coverage; see {serial}")
     phases = {}
     for match in TIMING.finditer(content):
-        count, mode, workers, excluded, elapsed = match.groups()
-        phases[mode] = {"function_count": int(count), "workers": int(workers),
+        logged_count, mode, workers, excluded, elapsed = match.groups()
+        phases[mode] = {"function_count": int(logged_count), "workers": int(workers),
                         "excluded_external_count": int(excluded),
                         "export_wall_seconds": float(elapsed)}
     if set(phases) != {"serial", "parallel"}:
         raise RuntimeError(f"missing phase timings; see {log}")
-    if any(phase["function_count"] != len(records) for phase in phases.values()):
+    if any(phase["function_count"] != count for phase in phases.values()):
         raise RuntimeError("export count differs from parsed record count")
-    return {"exact_match": True, "function_count": len(records),
-            "completed_count": len(records),
-            "export_sha256": hashlib.sha256(serial.read_bytes()).hexdigest(),
+    return {"exact_match": True, "function_count": count,
+            "completed_count": count,
+            "export_sha256": sha256(serial),
             "phases": phases}
 
 
@@ -126,7 +167,7 @@ def verify_scheduled(prefix: Path, log: Path, workers: int,
     content = log.read_text(encoding="utf-8", errors="replace")
     if "BinaryRat exact serial/scheduled comparison passed:" not in content:
         raise RuntimeError(f"scheduled comparison marker missing; see {log}")
-    if serial.read_bytes() != scheduled.read_bytes():
+    if first_differing_byte(serial, scheduled) is not None:
         raise RuntimeError(f"exact output mismatch: {serial}, {scheduled}")
     summary = json.loads(Path(str(scheduled) + ".schedule.json").read_text())
     records = 0
@@ -160,6 +201,9 @@ def verify_scheduled(prefix: Path, log: Path, workers: int,
                 cache["hits"] + cache["replayed"] != records or
                 cache["misses"] or cache["stored"]):
             raise RuntimeError(f"warm cache did not avoid every compute lease; see {log}")
+    expected_traces = compute_leases if cache["enabled"] else 0
+    if type(summary["traced_leases"]) is not int or summary["traced_leases"] != expected_traces:
+        raise RuntimeError(f"unexpected number of dependency traces collected; see {log}")
     engine = summary["engine_stats"]
     expected_statuses = {"completed": compute_leases} if compute_leases else {}
     if summary["lease_status_counts"] != expected_statuses or summary["leases"] != compute_leases:
@@ -189,19 +233,19 @@ def compare_fresh_jvm_exports(cold: Path, warm: Path) -> dict:
     Every other exported field must match. Each JVM separately passed the
     byte-exact serial/scheduled comparison above.
     """
-    cold_rows = [json.loads(line) for line in cold.read_text(encoding="utf-8").splitlines()
-                 if line.strip()]
-    warm_rows = [json.loads(line) for line in warm.read_text(encoding="utf-8").splitlines()
-                 if line.strip()]
-    if not cold_rows or len(cold_rows) != len(warm_rows):
-        raise RuntimeError("cold/warm fresh JVMs exported different function coverage")
     revisions: Counter = Counter()
-    for before, after in zip(cold_rows, warm_rows):
-        before_revision, after_revision = before.pop("revision"), after.pop("revision")
-        revisions[(before_revision, after_revision)] += 1
-        if before != after:
-            raise RuntimeError("cold/warm fresh JVMs differ in output or stable metadata")
-    return {"exact_bytes_including_revision": cold.read_bytes() == warm.read_bytes(),
+    with cold.open(encoding="utf-8") as left, warm.open(encoding="utf-8") as right:
+        cold_rows = (json.loads(line) for line in left if line.strip())
+        warm_rows = (json.loads(line) for line in right if line.strip())
+        for before, after in zip_longest(cold_rows, warm_rows):
+            if before is None or after is None:
+                raise RuntimeError("cold/warm fresh JVMs exported different function coverage")
+            revisions[(before.pop("revision"), after.pop("revision"))] += 1
+            if before != after:
+                raise RuntimeError("cold/warm fresh JVMs differ in output or stable metadata")
+    if not revisions:
+        raise RuntimeError("cold/warm fresh JVMs had no function coverage")
+    return {"exact_bytes_including_revision": first_differing_byte(cold, warm) is None,
             "exact_output_and_metadata_except_local_revision": True,
             "revision_pairs": [{"cold": before, "warm": after, "functions": count}
                                for (before, after), count in sorted(revisions.items())]}
@@ -281,6 +325,8 @@ def verify_cache_proof(report_path: Path, log: Path) -> dict:
         raise RuntimeError(f"cache proof failed; see {report_path} and {log}")
     if not report.get("injection_payload_contract", {}).get("passed"):
         raise RuntimeError(f"dynamic injection replay check missing or failed; see {report_path}")
+    if not report.get("cache_resource_limits", {}).get("passed"):
+        raise RuntimeError(f"cache resource limits check missing or failed; see {report_path}")
     reference_checks = [entry for entry in report["rounds"]
                         if entry.get("sentinel_dependency_tracking_only")]
     expected_reference_checks = {"add reference target dependency", "change reference target dependency",
@@ -345,7 +391,7 @@ def check_stock_verified(headless: Path, binary: Path, scripts: Path, destinatio
                                 log, timeout, environment)
         if (measured["returncode"] or "BinaryRat stock verification passed:" not in
                 log.read_text(encoding="utf-8", errors="replace") or
-                verified.read_bytes() != reference.read_bytes()):
+                first_differing_byte(verified, reference) is not None):
             raise RuntimeError(f"stock-verified export did not match the independent stock pass; see {log}")
         rows = list(load_export(verified))
         proof = json.loads(Path(str(verified) + ".parity.json").read_text(encoding="utf-8"))
@@ -353,7 +399,7 @@ def check_stock_verified(headless: Path, binary: Path, scripts: Path, destinatio
         if (not rows or not all(row.successful for row in rows) or
                 any(type(count) is not int or count < 0 for count in counts) or
                 proof["reference"] != "stock-reused-serial" or
-                proof["output_sha256"] != hashlib.sha256(verified.read_bytes()).hexdigest() or
+                proof["output_sha256"] != sha256(verified) or
                 proof["function_count"] != sum(counts) or sum(counts) != len(rows)):
             raise RuntimeError(f"invalid stock verification evidence; see {log}")
 
@@ -462,7 +508,7 @@ def main() -> int:
             binary = (corpus_root / artifact["binary"]).resolve()
             if corpus_root.resolve() not in binary.parents:
                 raise RuntimeError("corpus binary is outside its declared root")
-            if hashlib.sha256(binary.read_bytes()).hexdigest() != artifact["binary_sha256"]:
+            if sha256(binary) != artifact["binary_sha256"]:
                 raise RuntimeError(f"corpus binary hash mismatch: {binary}")
             identity = hashlib.sha256(artifact["id"].encode()).hexdigest()[:12]
 

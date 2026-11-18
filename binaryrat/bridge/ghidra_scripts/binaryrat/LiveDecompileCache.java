@@ -169,8 +169,14 @@ public final class LiveDecompileCache {
 		request.add("value", value);
 		request.add("dependencies", dependencies);
 		request.addProperty("as_of", asOf);
-		engine.call("cache.put", request);
-		return true;
+		try {
+			engine.call("cache.put", request);
+			return true;
+		}
+		catch (EngineClient.FrameTooLarge oversized) {
+			// The completed decompilation is still usable by the caller.
+			return false;
+		}
 	}
 
 	public JsonObject stats() throws IOException {

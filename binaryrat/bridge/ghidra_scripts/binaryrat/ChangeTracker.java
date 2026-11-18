@@ -167,7 +167,15 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 			keys.forEach(dependencies::add);
 			request.add("dependencies", dependencies);
 		}
-		JsonObject result = engine.call("cache.changed", request);
+		JsonObject result;
+		try {
+			result = engine.call("cache.changed", request);
+		}
+		catch (EngineClient.FrameTooLarge oversized) {
+			JsonObject all = new JsonObject();
+			all.addProperty("all", true);
+			result = engine.call("cache.changed", all);
+		}
 		seq = result.get("seq").getAsLong();
 		counts.removed += result.get("removed").getAsLong();
 	}
@@ -189,10 +197,10 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 				}
 				if (System.nanoTime() > deadline) {
 					counts.resyncs++;
-					baseline = current - delivered;
 					if (!blind) {
 						report(Set.of(), true);
 					}
+					baseline = current - delivered;
 					return;
 				}
 			}
@@ -304,6 +312,12 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 		return found ? Outcome.PRECISE : Outcome.UNKNOWN;
 	}
 
+	private static boolean addName(Set<String> keys, String name) {
+		if (keys.size() >= Trace.MAX_LINES || name.length() > Trace.MAX_KEY_CHARS) return false;
+		keys.add(Trace.nameKey(name));
+		return true;
+	}
+
 	private static Outcome symbol(ProgramChangeRecord change, Set<String> keys) {
 		Object affected = change.getObject();
 		Symbol symbol = affected instanceof Symbol s ? s : null;
@@ -312,16 +326,16 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 		}
 		for (Object value : new Object[] { change.getOldValue(), change.getNewValue() }) {
 			if (value instanceof String name) {
-				keys.add(Trace.nameKey(name));
+				if (!addName(keys, name)) return Outcome.UNKNOWN;
 			}
 		}
 		Address start = change.getStart();
 		try {
 			if (symbol != null) {
-				keys.add(Trace.nameKey(symbol.getName()));
+				if (!addName(keys, symbol.getName())) return Outcome.UNKNOWN;
 			}
 			if (start != null && start.isMemoryAddress()) {
-				lines(keys, start, null);
+				if (!lines(keys, start, null)) return Outcome.UNKNOWN;
 				if (change.getEventType() == ProgramEvent.SYMBOL_ADDRESS_CHANGED &&
 					change.getNewValue() instanceof Address moved && !lines(keys, moved, null)) {
 					return Outcome.UNKNOWN;

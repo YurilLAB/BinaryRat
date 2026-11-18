@@ -73,7 +73,7 @@ def diagnose(log: Path, data: dict | None, expected_sha256: str,
     if (data.get("schema_version") != 1 or data.get("input_sha256") != expected_sha256
             or data.get("program_marked_analyzed") is not True or data.get("analysis_active") is not False
             or data.get("timed_out") is not False or not isinstance(inventory_hash, str)
-            or not DIGEST.fullmatch(inventory_hash) or not tasks
+            or work.get("inventory_version") != 2 or not DIGEST.fullmatch(inventory_hash) or not tasks
             or any(type(value) is not int or value <= 0 for value in
                    (data.get("analysis_wall_ns"), work.get("instructions"), work.get("functions")))
             or any(type(ms) is not int or ms < 0 for ms in tasks.values())
@@ -133,9 +133,17 @@ def comparable(start: dict, end: dict) -> bool:
 
 
 def summarize(runs: dict[str, list[dict]]) -> dict:
-    stock = runs["stock"]
     all_complete = all(group and all(run["status"] == "completed" for run in group) for group in runs.values())
-    equivalent = all_complete and all(comparable(stock[0], run) for group in runs.values() for run in group)
+    reference = next((run for run in runs["stock"] if run["status"] == "completed"), None)
+    comparisons = [
+        comparable(reference, run) for group in runs.values() for run in group
+        if reference is not None and run is not reference and run["status"] == "completed"
+    ]
+    equivalent = None
+    if False in comparisons:
+        equivalent = False
+    elif all_complete and comparisons:
+        equivalent = True
     metrics = {}
     for label, group in runs.items():
         if group and all(run["status"] == "completed" for run in group):
@@ -145,9 +153,13 @@ def summarize(runs: dict[str, list[dict]]) -> dict:
                 "median_process_tree_peak_rss_bytes": statistics.median(
                     run["measurements"]["sampled_process_tree_peak_rss_bytes"] for run in group),
             }
-    status = "completed" if all_complete and equivalent else "work_mismatch" if all_complete else "incomplete"
+    status = "completed"
+    if not all_complete:
+        status = "incomplete"
+    elif equivalent is False:
+        status = "work_mismatch"
     return {"status": status, "equivalent_inventory": equivalent,
-            "independent_comparisons": sum(len(group) for group in runs.values()) - 1,
+            "independent_comparisons": len(comparisons),
             "completed_run_metrics": metrics}
 
 
@@ -194,7 +206,7 @@ def main() -> int:
                   "The runner uses fresh XDG application settings and cache directories for each import; host filesystem cache is uncontrolled.",
                   "Analysis wall brackets scheduling and analysis with pre/post scripts; process wall and peak RSS also include import and inventory.",
                   "Task times are elapsed Ghidra command times, including waits for analyzer-owned workers.",
-                  "The scoped inventory compares function entries, names, signatures and bodies, instruction boundaries, mnemonics and flow overrides, defined data type paths and sizes, and references from Program memory."],
+                  "Inventory v2 compares function entries, names, signatures, bodies and no-return flags including external functions, all bookmark addresses, types, categories and comments, instruction boundaries, mnemonics and flow overrides, defined data type paths and sizes, and references from Program memory."],
         "runs": runs,
     }
     environment = os.environ.copy()

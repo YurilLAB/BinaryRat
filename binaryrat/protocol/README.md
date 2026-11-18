@@ -59,9 +59,12 @@ reservation larger than the pool is rejected at once; a full queue
 The lease deadline counts from the grant. A deadline, `sched.cancel`, or an
 attached process whose resident memory (Windows working set, Linux RSS, polled
 every `memory_poll_ms`) exceeds the lease's reservation produces `lease.stop`.
-The holder keeps the worker and the reservation until `sched.release`; if it
-has not released `kill_grace_ms` after the stop, the engine kills the attached
-process (identified by PID and start time, so a reused PID is never killed).
+Attachment requires a readable resident-memory sample. A failed replacement
+leaves the existing attachment in place. The holder keeps the worker and
+reservation until `sched.release`. When a positive `kill_grace_ms` expires,
+the engine can terminate the attached process using a Windows
+process handle or a Linux pidfd and a matching start time. On Linux hosts where
+pidfds are unavailable, the holder must stop the process and release the lease.
 `sched.release` reports `completed`, `timed_out`, `cancelled`,
 `memory_exceeded` or `failed`. Lease names are client-chosen, 1 to 256
 characters, unique among live leases.

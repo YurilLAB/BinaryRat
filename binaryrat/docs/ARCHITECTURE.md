@@ -62,11 +62,10 @@ cancels and per-process resident-memory ceilings, and kills stuck processes. The
 live cache records callback reads, removes entries on mapped Program changes,
 and replays persisted entries before reuse in scheduled headless exports. The
 integration harness compares cold, warm, and reopened exports against fresh
-decompilation. Shared Java
-proposal services, size-based per-function memory estimates, extraction-time
-change injection tests, coordinated type application and a persistent
-Ghidra/PyGhidra JVM daemon remain implementation gates. A persistent native
-process is not a persistent Ghidra JVM.
+decompilation. A local PyGhidra service keeps a read-only JVM open for scripts.
+The headless review service can create a new structure after approval through
+a coordinated native transaction. Shared GUI and Python review, applying
+types to existing targets, and per-function memory estimates remain open.
 
 ## Reuse the existing implementations
 

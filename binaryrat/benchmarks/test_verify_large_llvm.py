@@ -104,6 +104,18 @@ class LargeParityTests(unittest.TestCase):
         self.assertEqual(len(report["differences"]), 2)
         self.assertEqual(report["differences"][0]["fields"], [])
 
+    def test_trailing_missing_and_extra_rows_keep_mismatch_diagnostics(self):
+        _, rows = self.sample_rows()
+        for path, other, missing in ((self.stock, self.candidate, "candidate"),
+                                     (self.candidate, self.stock, "stock")):
+            with self.subTest(missing=missing):
+                self.write(path, rows)
+                self.write(other, rows[:1])
+                result = probe.compare_exports(self.stock, self.candidate)
+                self.assertEqual(result["first_differing_byte"], other.stat().st_size)
+                self.assertEqual(result["differences"], [{"name": rows[1]["name"],
+                                 "address": rows[1]["address"], "missing_from": missing}])
+
     def test_coverage_tracks_native_errors_and_rejects_engine_stops(self):
         sample, rows = self.sample_rows(100)
         rows[-1].update(completed=False, c="", error="Low-level Error")

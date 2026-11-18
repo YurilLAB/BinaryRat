@@ -6,9 +6,10 @@ Apache-2.0; Copyright 2026 YurilLAB.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 import json
+from itertools import chain
 import math
 import re
 import secrets
@@ -87,9 +88,36 @@ def _frame(sock: socket.socket, maximum: int, deadline: float) -> bytes:
     raise LiveProtocolError("live packet exceeds byte limit")
 
 
+def _packet_items(value: Any, active: set[int]) -> Iterator[Any]:
+    yield value
+    if isinstance(value, (dict, list, tuple)):
+        marker = id(value)
+        if marker in active:
+            raise ValueError("Circular reference detected")
+        active.add(marker)
+        children = chain.from_iterable(value.items()) if isinstance(value, dict) else value
+        for child in children:
+            yield from _packet_items(child, active)
+        active.remove(marker)
+
+
 def _encode(value: Any, maximum: int) -> bytes:
     packet = bytearray()
     encoder = json.JSONEncoder(ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    # iterencode can allocate an entire escaped string before yielding it.
+    # Bound the precheck by a lower estimate of the packet's total size.
+    remaining = maximum
+    for item in _packet_items(value, set()):
+        remaining -= 1 + (len(item) if isinstance(item, str) else 0)
+        if remaining < 0:
+            raise LiveProtocolError("live packet exceeds byte limit")
+        # A non-BMP character takes at most twelve ASCII bytes in JSON.
+        if isinstance(item, str) and len(item) > maximum // 12:
+            length = 2
+            for offset in range(0, len(item), 1024):
+                length += len(encoder.encode(item[offset:offset + 1024])) - 2
+                if length >= maximum:
+                    raise LiveProtocolError("live packet exceeds byte limit")
     for piece in encoder.iterencode(value):
         if len(packet) + len(piece) >= maximum:
             raise LiveProtocolError("live packet exceeds byte limit")

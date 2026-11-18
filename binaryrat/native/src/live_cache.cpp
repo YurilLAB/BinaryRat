@@ -19,8 +19,9 @@ void LiveCache::index(const std::string& id, std::vector<std::string> dependenci
     unindex(id);
     std::sort(dependencies.begin(), dependencies.end());
     dependencies.erase(std::unique(dependencies.begin(), dependencies.end()), dependencies.end());
-    for (const auto& dependency : dependencies) dependents_[dependency].insert(id);
-    dependencies_of_.emplace(id, Indexed{std::move(dependencies), generation});
+    // Install the forward list first so unindex can unwind a partial reverse index.
+    const auto entry = dependencies_of_.emplace(id, Indexed{std::move(dependencies), generation}).first;
+    for (const auto& dependency : entry->second.dependencies) dependents_[dependency].insert(id);
 }
 
 void LiveCache::unindex(const std::string& id) {
@@ -57,7 +58,7 @@ bool LiveCache::verified(const std::string& id) const {
 
 bool LiveCache::affected_since(std::uint64_t as_of,
                                const std::vector<std::string>& dependencies) const {
-    if (as_of < forgotten_seq_) return true;  // the changes in between are no longer known
+    if (as_of < forgotten_seq_ || as_of < everything_seq_) return true;
     for (const auto& change : journal_) {
         if (change.seq <= as_of) continue;
         if (change.everything) return true;
@@ -97,26 +98,43 @@ void LiveCache::put(const nlohmann::json& key, const nlohmann::json& value,
     std::lock_guard lock(mutex_);
     if (as_of && *as_of > seq_) throw std::invalid_argument("as_of is ahead of the change sequence");
     store_.put(key, value, dependencies);
-    index(id, dependencies, ++generation_);
-    if (!as_of || !affected_since(*as_of, dependencies)) verified_at_[id] = seq_;
+    try {
+        index(id, dependencies, ++generation_);
+        if (!as_of || !affected_since(*as_of, dependencies)) verified_at_[id] = seq_;
+    } catch (...) {
+        // The file was already replaced. A failed index update must not leave
+        // this value verified against its predecessor's dependencies.
+        unindex(id);
+        throw;
+    }
 }
 
 LiveCache::Change LiveCache::changed(const std::vector<std::string>& dependencies) {
     std::lock_guard lock(mutex_);
     Change result;
     result.seq = ++seq_;
-    Journaled change;
-    change.seq = seq_;
-    std::unordered_set<std::string> affected;
-    for (const auto& dependency : dependencies) {
-        change.dependencies.insert(dependency);
-        const auto users = dependents_.find(dependency);
-        if (users != dependents_.end()) affected.insert(users->second.begin(), users->second.end());
+    try {
+        Journaled change;
+        change.seq = seq_;
+        std::unordered_set<std::string> affected;
+        for (const auto& dependency : dependencies) {
+            change.dependencies.insert(dependency);
+            const auto users = dependents_.find(dependency);
+            if (users != dependents_.end()) affected.insert(users->second.begin(), users->second.end());
+        }
+        for (const auto& id : affected) {
+            if (remove(id)) {
+                ++result.removed;
+                ++counters_.removed;
+            }
+        }
+        journal(std::move(change));
+    } catch (...) {
+        // A partial invalidation can leave affected records on disk. Force
+        // replay for surviving records and for work started before this change.
+        everything_seq_ = result.seq;
+        throw;
     }
-    for (const auto& id : affected)
-        if (remove(id)) ++result.removed;
-    counters_.removed += result.removed;
-    journal(std::move(change));
     return result;
 }
 

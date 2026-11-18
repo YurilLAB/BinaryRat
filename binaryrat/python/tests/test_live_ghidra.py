@@ -15,6 +15,7 @@ import sys
 from threading import Event, Thread, enumerate as active_threads
 from tempfile import TemporaryDirectory
 from time import monotonic, sleep
+import tracemalloc
 import unittest
 from unittest.mock import patch
 
@@ -76,6 +77,41 @@ class LiveProgramInputTests(unittest.TestCase):
             second.sendall(b'{"incomplete":')
             with self.assertRaises(TimeoutError):
                 _frame(first, 1024, monotonic() + 0.05)
+
+    def test_frame_encoding_matches_json_and_bounds_rejected_strings(self):
+        # Include escaped characters across a chunk boundary and non-BMP code points.
+        label = "x" * 1023 + '"\\\n\N{GRINNING FACE}' * 300
+        shared = {1: label, None: False}
+        sample = {label: [label, None, True, (1, 0.5)], "repeated": [shared, shared]}
+        expected = (json.dumps(sample, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+        self.assertEqual(_encode(sample, len(expected)), expected)
+        with self.assertRaises(LiveProtocolError):
+            _encode(sample, len(expected) - 1)
+
+        oversized = [(16 * 1024, {"name": "\N{GREEK CAPITAL LETTER OMEGA}" * (1 << 20)}),
+                     (1 << 20, {"name": "\N{GRINNING FACE}" * (1 << 18)})]
+        already_tracing = tracemalloc.is_tracing()
+        if not already_tracing:
+            tracemalloc.start()
+        try:
+            baseline = tracemalloc.get_traced_memory()[0]
+            tracemalloc.reset_peak()
+            for limit, value in oversized:
+                with self.assertRaises(LiveProtocolError):
+                    _encode(value, limit)
+            self.assertLess(tracemalloc.get_traced_memory()[1] - baseline, 512 * 1024)
+        finally:
+            if not already_tracing:
+                tracemalloc.stop()
+
+    def test_circular_client_argument_is_rejected_before_connecting(self):
+        client = LiveClient(LiveEndpoint(12345, "a" * 43))
+        cycle = []
+        cycle.append({"cycle": cycle})
+        with patch("socket.create_connection") as connect:
+            with self.assertRaisesRegex(ValueError, "Circular reference"):
+                client.data_type(cycle, "Name")
+            connect.assert_not_called()
 
 
 @unittest.skipUnless(_INSTALL_DIR, "set BINARYRAT_GHIDRA_INSTALL_DIR to run PyGhidra tests")

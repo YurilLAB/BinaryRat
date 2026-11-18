@@ -2,23 +2,38 @@
 // @category BinaryRat.Tests
 /* Copyright 2026 YurilLAB. SPDX-License-Identifier: Apache-2.0 */
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.StringReader;
+import java.math.BigInteger;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.gson.JsonObject;
 
-import binaryrat.EngineClient;
 import binaryrat.DecompOutput;
+import binaryrat.EngineClient;
 import binaryrat.ScheduledDecompiler;
 import ghidra.app.decompiler.DecompileProcess;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
+import ghidra.app.decompiler.DecompiledFunction;
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.util.exception.CancelledException;
+import ghidra.util.task.TaskMonitor;
 import ghidra.util.task.TaskMonitorAdapter;
+import utilities.util.FileUtilities;
 
 /** Checks cancellation ownership against the real engine and stock native decompiler. */
 public class BinaryRatLeaseChecks extends GhidraScript {
@@ -37,13 +52,11 @@ public class BinaryRatLeaseChecks extends GhidraScript {
             }
         }
         require(fixture != null, "fixture must contain an initialized function");
+        checkSampleReader();
+        checkExportPolicy(fixture.getEntryPoint());
         Path directory = Files.createTempDirectory("binaryrat-lease-check-");
         try (EngineClient engine = EngineClient.start(Path.of(System.getenv("BINARYRAT_ENGINE")), directory);
-                ScheduledDecompiler scheduler = new ScheduledDecompiler(engine, currentProgram, d -> {
-                    DecompileOptions options = new DecompileOptions();
-                    options.grabFromProgram(currentProgram);
-                    d.setOptions(options);
-                }, new ScheduledDecompiler.Limits(1, 256L << 20, 0, 0, 60, 5000, 60000))) {
+                ScheduledDecompiler scheduler = testScheduler(engine)) {
             JsonObject blocker = request("blocker");
             blocker.addProperty("reserve_bytes", 256L << 20);
             blocker.addProperty("timeout_ms", 60000);
@@ -103,7 +116,191 @@ public class BinaryRatLeaseChecks extends GhidraScript {
                 require(DecompOutput.stopped(nativeFailure, "completed", null).equals(DecompOutput.of(nativeFailure)),
                     "normal lease must preserve native failure status: " + state);
             }
-            println("BinaryRat lease lifecycle checks passed");
+            DecompileResults discarded = new DecompileResults(fixture, currentProgram.getLanguage(),
+                currentProgram.getCompilerSpec(), scheduler.sample().getDataTypeManager(),
+                "native fixture failure", null, DecompileProcess.DisposeState.DISPOSED_ON_CANCEL) {
+                @Override
+                public DecompiledFunction getDecompiledFunction() {
+                    throw new AssertionError("stopped leases must not allocate rendered output");
+                }
+            };
+            for (String status : new String[] { "memory_exceeded", "timed_out", "cancelled", "failed" }) {
+                require(!DecompOutput.stopped(discarded, status, null).cacheable(),
+                    "stopped lease must not render or cache discarded text: " + status);
+            }
+
+            var configured = scheduler.sample();
+            String initial = configured.registrationDigest();
+            Set<String> registrations = new HashSet<>(Set.of(initial));
+            // Exercise toggles after openProgram as well as the default registration.
+            require(configured.toggleCCode(false), "disable C");
+            require(registrations.add(configured.registrationDigest()), "C output changes cache identity");
+            require(configured.toggleCCode(true) && configured.toggleParamMeasures(true), "enable measures");
+            require(registrations.add(configured.registrationDigest()), "measures change cache identity");
+            require(configured.toggleParamMeasures(false) && configured.toggleJumpLoads(true), "enable jump loads");
+            require(registrations.add(configured.registrationDigest()), "jump loads change cache identity");
+            require(configured.toggleJumpLoads(false) && configured.toggleSyntaxTree(false), "use C-only output");
+            require(registrations.add(configured.registrationDigest()), "syntax tree changes cache identity");
+            ScheduledDecompiler.Run cOnly = scheduler.decompileUntraced(fixture, new TaskMonitorAdapter(true));
+            require(cOnly.memoryWatched() && cOnly.status().equals("completed") &&
+                cOnly.traced() != null && cOnly.traced().trace() == null, "C-only lease must be untraced");
+            require(cOnly.traced().results().getHighFunction() != null &&
+                !cOnly.traced().results().getHighFunction().getPcodeOps().hasNext(),
+                "C-only result must omit the p-code operation tree");
+            require(DecompOutput.of(cOnly.traced().results()).equals(DecompOutput.of(next.traced().results())),
+                "C-only untraced output must match the traced stock configuration");
+            require(configured.toggleSyntaxTree(true) && initial.equals(configured.registrationDigest()),
+                "restoring actions must restore the initial cache identity");
+            checkCancellationDuringStartup(scheduler, fixture, true);
+            checkCancellationDuringStartup(scheduler, fixture, false);
+            checkReleaseFailure(fixture, directory.resolve("release-failure"));
+        }
+        finally {
+            if (!FileUtilities.deleteDir(directory)) {
+                throw new IOException("Could not remove the lease check cache: " + directory);
+            }
+        }
+        println("BinaryRat lease lifecycle checks passed");
+    }
+
+    private static void checkExportPolicy(ghidra.program.model.address.Address entry) throws Exception {
+        require(BinaryRatExport.Mode.SERIAL.syntaxTree() && BinaryRatExport.Mode.PARALLEL.syntaxTree() &&
+            BinaryRatExport.Mode.SCHEDULED.syntaxTree() && !BinaryRatExport.Mode.VERIFIED_CANDIDATE.syntaxTree(),
+            "standalone exports must retain stock response-size semantics");
+        JsonObject cOnly = new DecompOutput(true, false, false, false, "", "int f()", "int f() {}").toJson();
+        cOnly.addProperty("address_space", entry.getAddressSpace().getName());
+        cOnly.addProperty("address", Long.toUnsignedString(entry.getOffset(), 16));
+        JsonObject stock = cOnly.deepCopy();
+        stock.addProperty("completed", false);
+        stock.addProperty("prototype", "");
+        stock.addProperty("c", "");
+        stock.addProperty("error", "Response buffer size exceeded for: fixture");
+        try (var reader = new BufferedReader(new StringReader(cOnly.toString()))) {
+            var audit = new BinaryRatExport.StockParityAudit(reader);
+            require(audit.select(entry, stock.toString()).equals(stock.toString()) &&
+                audit.finish(new byte[32]).get("stock_fallbacks").getAsInt() == 1,
+                "stock payload failure must win over a successful C-only candidate");
+        }
+    }
+
+    private static void checkSampleReader() throws Exception {
+        String longName = "x".repeat(2 * 1024 * 1024);
+        String records = "0\t1\t" + longName + "\r\nffffffffffffffff\tA\tλ\r2\t1\tz\n3\t1\tq";
+        try (var input = new BufferedReader(new StringReader(records))) {
+            for (String expected : new String[] { "0", "ffffffffffffffff", "2", "3" }) {
+                require(new BigInteger(expected, 16).equals(BinaryRatExport.nextSampleOffset(input,
+                    TaskMonitor.DUMMY)), "sample offset with long name or mixed line endings");
+            }
+            require(BinaryRatExport.nextSampleOffset(input, TaskMonitor.DUMMY) == null, "sample EOF");
+        }
+        for (String invalid : new String[] { "\n", "0\t0\tx", "0\t1\t\u2003 ", "0\t1\tx\textra",
+                "00000000000000000\t1\tx", "\uff10\t1\tx", "0\t1", "\t1\tx", "0\t\tx" }) {
+            try (var input = new BufferedReader(new StringReader(invalid))) {
+                BinaryRatExport.nextSampleOffset(input, TaskMonitor.DUMMY);
+                throw new AssertionError("invalid sample accepted");
+            }
+            catch (IOException expected) {
+                // Each malformed row must fail before producing an offset.
+            }
+        }
+        var cancelling = new TaskMonitorAdapter(true) {
+            private int checks;
+            @Override
+            public void checkCancelled() throws CancelledException {
+                if (++checks == 2) {
+                    cancel();
+                }
+                super.checkCancelled();
+            }
+        };
+        try (var input = new BufferedReader(new StringReader(records))) {
+            BinaryRatExport.nextSampleOffset(input, cancelling);
+            throw new AssertionError("large sample row ignored cancellation");
+        }
+        catch (CancelledException expected) {
+            // Cancellation must be observed inside a single long name.
+        }
+    }
+
+    private ScheduledDecompiler testScheduler(EngineClient engine) throws IOException {
+        return new ScheduledDecompiler(engine, currentProgram, d -> {
+            DecompileOptions options = new DecompileOptions();
+            options.grabFromProgram(currentProgram);
+            d.setOptions(options);
+        }, new ScheduledDecompiler.Limits(1, 256L << 20, 0, 0, 60, 5000, 60000));
+    }
+
+    private void checkCancellationDuringStartup(ScheduledDecompiler pool, Function function,
+            boolean trace) throws Exception {
+        TaskMonitorAdapter outer = new TaskMonitorAdapter(true);
+        AtomicBoolean cancelled = new AtomicBoolean();
+        // Stock has installed its cancellation listener when it requests the entry point,
+        // but has yet to verify the process to which it will send decompileAt.
+        Function duringStartup = (Function) Proxy.newProxyInstance(Function.class.getClassLoader(),
+            new Class<?>[] { Function.class }, (proxy, method, args) -> {
+                if (method.getName().equals("getEntryPoint") && cancelled.compareAndSet(false, true)) {
+                    outer.cancel();
+                }
+                try {
+                    return method.invoke(function, args);
+                }
+                catch (InvocationTargetException wrapped) {
+                    throw wrapped.getCause();
+                }
+            });
+        ScheduledDecompiler.Run stopped = trace ? pool.decompile(duringStartup, outer) :
+            pool.decompileUntraced(duringStartup, outer);
+        require(cancelled.get() && stopped.memoryWatched() && stopped.status().equals("cancelled") &&
+            stopped.traced() != null && !stopped.traced().results().decompileCompleted(),
+            "a cancelled lease must not complete native work on an unwatched replacement PID");
+        ScheduledDecompiler.Run next = pool.decompileUntraced(function, new TaskMonitorAdapter(true));
+        require(next.memoryWatched() && next.status().equals("completed") &&
+            next.traced().results().decompileCompleted(), "the next lease can attach a fresh process");
+    }
+
+    private void checkReleaseFailure(Function function, Path directory) throws Exception {
+        try (EngineClient engine = EngineClient.start(EngineClient.findExecutable(), directory);
+                ScheduledDecompiler pool = testScheduler(engine)) {
+            // Complete the fresh pool's first lease after attach, before the bridge
+            // receives native results. The bridge's own release will now be refused.
+            AtomicBoolean released = new AtomicBoolean();
+            Function fault = (Function) Proxy.newProxyInstance(Function.class.getClassLoader(),
+                new Class<?>[] { Function.class }, (proxy, method, args) -> {
+                    if (method.getName().equals("getEntryPoint") && released.compareAndSet(false, true)) {
+                        engine.call("sched.release", request("f1"));
+                    }
+                    try {
+                        return method.invoke(function, args);
+                    }
+                    catch (InvocationTargetException wrapped) {
+                        throw wrapped.getCause();
+                    }
+                });
+            try {
+                pool.decompileUntraced(fault, new TaskMonitorAdapter(true));
+                throw new AssertionError("lost release acknowledgement must fail the export");
+            }
+            catch (IOException expected) {
+                require(released.get() && expected.getMessage().contains("lease release failed"),
+                    "fixture must lose the release acknowledgement");
+            }
+            FutureTask<ScheduledDecompiler.Run> retry = new FutureTask<>(
+                () -> pool.decompileUntraced(function, new TaskMonitorAdapter(true)));
+            Thread borrower = new Thread(retry, "binaryrat-retired-pool");
+            borrower.start();
+            try {
+                retry.get(5, TimeUnit.SECONDS);
+                throw new AssertionError("retired pool reused a decompiler");
+            }
+            catch (ExecutionException expected) {
+                require(expected.getCause() instanceof IOException failure &&
+                    failure.getMessage().contains("pool retired"), "retired pool rejects new borrowers");
+            }
+            finally {
+                retry.cancel(true);
+                borrower.join(5000);
+            }
+            waitFor(pool, "running", 0);
         }
     }
 

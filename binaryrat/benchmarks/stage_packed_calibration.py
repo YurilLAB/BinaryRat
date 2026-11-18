@@ -15,7 +15,7 @@ from calibrate_type_confidence import SCHEMA_VERSION, load_json, parse_dataset
 from verify_type_accuracy import (
     FUNCTION,
     PROJECT,
-    checked_file,
+    checked_artifact_pair,
     digest,
     footprint,
     oracle_layout,
@@ -65,10 +65,7 @@ def stage(manifest_path: Path, report_path: Path, fixture_source: Path,
                 fixture["binary_sha256"] != artifact["binary_sha256"] or
                 fixture["debug_sha256"] != artifact["debug_sha256"]):
             raise ValueError("accuracy evidence does not bind to the declared corpus source and artifacts")
-        binary = checked_file(root, artifact, "binary", "binary_sha256")
-        debug = checked_file(root, artifact, "debug_file", "debug_sha256")
-        if binary.parent == debug.parent or binary.samefile(debug):
-            raise ValueError("binary and oracle artifacts must be separate")
+        _, debug = checked_artifact_pair(root, artifact)
         export = load_json(_evidence_path(report_path.parent, fixture["evidence"]))
         if (export["score_kind"] != SCORE_KIND or export["analysis_mode"] != "read_only_layout_evidence"
                 or type(export["follow_depth"]) is not int or export["follow_depth"] != 0):

@@ -215,7 +215,7 @@ std::vector<ArtifactCache::Stored> ArtifactCache::scan() {
 
 bool ArtifactCache::remove(const std::string& id) {
     const auto name = std::filesystem::path(id + ".json");
-    if (!artifact_filename(name)) {
+    if (name.has_parent_path() || !artifact_filename(name)) {
         throw std::invalid_argument("not a cache record id");
     }
     std::lock_guard lock(mutex_);

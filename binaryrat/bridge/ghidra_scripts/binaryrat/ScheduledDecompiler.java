@@ -55,6 +55,7 @@ public final class ScheduledDecompiler implements AutoCloseable {
 	private final BlockingQueue<TracingDecompiler> idle = new LinkedBlockingQueue<>();
 	private final List<TracingDecompiler> all = new ArrayList<>();
 	private final AtomicLong leases = new AtomicLong();
+	private volatile IOException releaseFailure;
 
 	public ScheduledDecompiler(EngineClient engine, Program program,
 			Consumer<DecompInterface> configure, Limits limits) throws IOException {
@@ -119,6 +120,7 @@ public final class ScheduledDecompiler implements AutoCloseable {
 
 	private Run decompile(Function function, TaskMonitor outer, boolean recordQueries)
 			throws IOException {
+		checkPool();
 		// TaskMonitorAdapter does not notify a listener added after cancellation.
 		if (outer.isCancelled()) {
 			return new Run(null, "cancelled", "cancelled", 0, 0, 0, false, false);
@@ -172,6 +174,7 @@ public final class ScheduledDecompiler implements AutoCloseable {
 			boolean watched = false;
 			JsonObject ended;
 			try {
+				checkPool();
 				long pid = decompiler.processId();
 				if (pid > 0) {
 					JsonObject attach = new JsonObject();
@@ -180,22 +183,26 @@ public final class ScheduledDecompiler implements AutoCloseable {
 					watched = engine.call("sched.attach", attach).get("attached").getAsBoolean();
 				}
 				int timeout = limits.timeoutSeconds() + BACKSTOP_SECONDS;
-				if (recordQueries) {
-					traced = decompiler.decompile(function, timeout, monitor);
+				if (!watched) {
+					throw new IOException("cannot watch decompiler process memory");
 				}
-				else {
-					if (!watched) {
-						throw new IOException("cannot watch decompiler process memory");
-					}
-					traced = new TracingDecompiler.Traced(
-						decompiler.decompileFunction(function, timeout, monitor), null);
-				}
+				traced = decompiler.decompileAttached(function, timeout, monitor, pid, recordQueries);
 			}
 			finally {
 				// Once a process is reused, its old lease must no longer watch or kill
 				// that PID. Await release before making the process available again.
-				ended = release(lease);
-				idle.add(decompiler);
+				try {
+					ended = release(lease);
+				}
+				catch (IOException failure) {
+					releaseFailure = failure;
+					throw failure;
+				}
+				finally {
+					// Wake any borrower waiting for the handoff, even after a failed
+					// release. checkPool() prevents it from touching that process.
+					idle.add(decompiler);
+				}
 			}
 			return new Run(traced, ended.get("status").getAsString(), stopReason.get(),
 				grant.get("waited_ms").getAsLong(), ended.get("run_ms").getAsLong(),
@@ -208,9 +215,30 @@ public final class ScheduledDecompiler implements AutoCloseable {
 		}
 	}
 
+	private void checkPool() throws IOException {
+		if (releaseFailure != null) {
+			throw new IOException("decompiler pool retired after an unacknowledged lease release",
+				releaseFailure);
+		}
+	}
+
+	private void abandonGrant(String lease, CompletableFuture<JsonObject> pending, Runnable cancel) {
+		cancel.run();
+		// Cancellation can race a grant. Release any slot granted to this waiter.
+		pending.thenAccept(grant -> {
+			if (grant.get("granted").getAsBoolean()) {
+				engine.send("sched.release", leaseRequest(lease));
+			}
+		});
+	}
+
 	private JsonObject awaitGrant(String lease, CompletableFuture<JsonObject> pending,
 			TaskMonitor outer, Runnable cancel) throws IOException {
 		while (true) {
+			if (releaseFailure != null) {
+				abandonGrant(lease, pending, cancel);
+				checkPool();
+			}
 			if (outer.isCancelled()) {
 				cancel.run();
 			}
@@ -221,14 +249,7 @@ public final class ScheduledDecompiler implements AutoCloseable {
 				// Check cancellation again while the engine queues this request.
 			}
 			catch (InterruptedException exception) {
-				cancel.run();
-				// Cancellation may race a grant. A late grant still owns a slot and
-				// must be released even though this borrower has stopped waiting.
-				pending.thenAccept(grant -> {
-					if (grant.get("granted").getAsBoolean()) {
-						engine.send("sched.release", leaseRequest(lease));
-					}
-				});
+				abandonGrant(lease, pending, cancel);
 				Thread.currentThread().interrupt();
 				throw new IOException("interrupted while waiting for a lease", exception);
 			}

@@ -88,7 +88,10 @@ recomputation where the recorded answers differ.
 Only results that pass this check can bypass a decompiler lease. The cache
 requires an executable SHA-256, and exports still require an analyzed Program
 without a concurrent writer. The `.schedule.json` report includes cache hits,
-replays, misses, stores, rejections, and the number of compute leases.
+replays, misses, stores, rejections, and the numbers of compute and traced leases.
+Scheduled exports collect query traces only when caching is enabled. A trace
+or UTF-8 cache record that exceeds the storage budget still produces an export
+row and increments the rejected-store count.
 
 `serial` and `parallel` write `OUTPUT`. `compare` writes
 `OUTPUT.serial.jsonl` and `OUTPUT.parallel.jsonl` from the same analyzed Program,
@@ -179,8 +182,11 @@ cited instructions, then pass the printed approval code to
 Acceptance uses a writable headless processing run. Check the creation message
 and Ghidra's save result for persistence.
 
-The approval covers the report bytes, exact destination, and current state of
-the cited function bodies. Acceptance creates a fresh structure under
+The approval covers the report bytes, exact destination, and each cited
+function's name, prototype, signature source, body ranges, and bytes. This
+includes intermediate forwarders. Each forwarding edge must still reach its
+recorded callee in both decoded flow and effective p-code.
+Acceptance creates a fresh structure under
 `/BinaryRat/Reviewed`, with opaque byte-width components and provenance in
 one native undoable transaction. It rejects overlaps, variable-offset evidence,
 and existing destination names. This action creates the type for later use
@@ -210,7 +216,8 @@ Interrupted queued borrowers cancel their requests and release any racing grant.
 An already cancelled monitor starts no native work, and active monitor cancellation
 is forwarded to the engine. A worker returns its decompiler to the idle pool only
 after its old lease release is acknowledged, so that lease cannot kill a process
-already reused by another function.
+already reused by another function. A failed process-memory attachment aborts
+the export. An unacknowledged release retires the pool and wakes waiting borrowers.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -235,7 +242,9 @@ answer makes the entry a miss and requests a fresh decompilation.
 Each cached entry (engine schema 2 key: program, entry address, and a digest of
 the native build, renderer, translator, compiled SLEIGH, core types, processor
 and compiler specifications, and options) holds the output, read trace, and
-dependencies. Dependencies include 256-byte memory ranges and symbol names.
+dependencies. The digest includes the C, tree, parameter-measure, and jump-load
+output actions. Entries written before the action-key update get one cold miss
+and are recomputed automatically. Dependencies include 256-byte memory ranges and symbol names.
 Unknown injection payload classes require replay before reuse.
 For redirected calls, the cache also records the original targets whose call
 fixups are consulted during SLEIGH translation, including inherited thunk
@@ -279,9 +288,13 @@ freshly imported program has been analyzed.
 - Serial mode directly reuses a stock `DecompInterface`. Parallel mode uses the
   stock `DecompilerCallback`/`CachingPool` with a local fixed-size executor; it
   does not alter Ghidra's globally shared thread-pool configuration.
-- All modes use identical `DecompileOptions.grabFromProgram`, `decompile` style,
-  C-code and syntax-tree settings. Ghidra 12.2 already flushes native function
-  cache state at the end of `decompileFunction`; the bridge adds no duplicate flush.
+- All modes use `DecompileOptions.grabFromProgram`, the `decompile` style, and C
+  output. Serial, parallel, and standalone scheduled exports retain the stock
+  high p-code tree and its native result-size limit. Only the scheduled phase of
+  stock verification omits the tree. When a C-only response fits and the full
+  stock response exceeds the limit, verification publishes the stock error.
+  Layout recovery requests the tree for its p-code evidence. Ghidra 12.2 flushes
+  native function cache state at the end of `decompileFunction`.
 - Work and result buffers are bounded by the chunk size, plus native worker
   memory. This is **not** an adaptive memory budget; size workers accordingly.
 - CodeBrowser exports release their empty script transaction before prompting.

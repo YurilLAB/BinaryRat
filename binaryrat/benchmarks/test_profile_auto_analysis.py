@@ -18,7 +18,7 @@ class AnalysisProfileTests(unittest.TestCase):
             "schema_version": 1, "input_sha256": self.sha256, "analysis_active": False,
             "program_marked_analyzed": True, "timed_out": False, "analysis_wall_ns": 5_200_000_000,
             "recorded_task_total_ms": 4800, "task_times_ms": {"Stack": 3200, "Reference": 1600},
-            "work": {"instructions": 80, "functions": 12, "inventory_sha256": "b" * 64},
+            "work": {"instructions": 80, "functions": 12, "inventory_version": 2, "inventory_sha256": "b" * 64},
             "language": "x86:LE:64:default", "compiler_spec": "gcc", "image_base": "00100000",
             "analysis_options": {"Stack": "true"}, "java_version": "25", "heap_max_bytes": 200,
             "analyzer_messages": "", "analyzer_message_characters": 0,
@@ -37,6 +37,9 @@ class AnalysisProfileTests(unittest.TestCase):
         self.assertEqual(self.status(self.success_log[:-1], self.program), "missing_evidence")
         self.assertEqual(self.status(self.success_log, self.program | {"input_sha256": "b" * 64}), "invalid_evidence")
         self.assertEqual(self.status(self.success_log, self.program | {"work": {}}), "invalid_evidence")
+        old_work = self.program["work"].copy()
+        del old_work["inventory_version"]
+        self.assertEqual(self.status(self.success_log, self.program | {"work": old_work}), "invalid_evidence")
 
     def test_failing_analyzer_overrides_apparent_headless_success(self):
         self.assertEqual(self.status(self.success_log + ["ERROR Unexpected analyzer failure"], self.program), "failed")
@@ -66,6 +69,16 @@ class AnalysisProfileTests(unittest.TestCase):
         self.assertEqual(report["status"], "work_mismatch")
         self.assertFalse(report["equivalent_inventory"])
         self.assertEqual(summarize({"stock": [stock, {"status": "analysis_timeout"}]})["status"], "incomplete")
+
+    def test_only_independent_complete_imports_can_establish_parity(self):
+        run = {"status": "completed", "program": self.program, "measurements": self.metrics}
+        for runs in ({"stock": [run]}, {"stock": [run], "candidate": [{"status": "analysis_timeout"}]}):
+            summary = summarize(runs)
+            self.assertIsNone(summary["equivalent_inventory"])
+            self.assertEqual(summary["independent_comparisons"], 0)
+        summary = summarize({"stock": [run, copy.deepcopy(run)]})
+        self.assertTrue(summary["equivalent_inventory"])
+        self.assertEqual(summary["independent_comparisons"], 1)
 
 
 if __name__ == "__main__":

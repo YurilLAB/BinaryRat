@@ -8,8 +8,28 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <new>
 #include <stdexcept>
 #include <string>
+
+// Inject a single failure when copying a long dependency in this test process.
+// Ordinary allocations, including JSON cleanup, remain unaffected.
+namespace {
+thread_local int dependency_copies_before_failure = -1;
+constexpr std::size_t dependency_length = 2039;
+}
+
+void* operator new(std::size_t size) {
+    if (dependency_copies_before_failure >= 0 && size >= dependency_length + 1 &&
+        size <= dependency_length + 32 && dependency_copies_before_failure-- == 0) {
+        throw std::bad_alloc();
+    }
+    if (void* pointer = std::malloc(size == 0 ? 1 : size)) return pointer;
+    throw std::bad_alloc();
+}
+
+void operator delete(void* pointer) noexcept { std::free(pointer); }
+void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
 
 using namespace binaryrat;
 using json = nlohmann::json;
@@ -121,6 +141,63 @@ void values_computed_during_changes_stay_unverified() {
         [&] { live.put(key("d"), {{"c", "D"}}, {"x"}, live.get(key("d")).seq + 1); }, "as_of from the future");
 }
 
+void failed_disk_invalidation_requires_revalidation() {
+    TemporaryDirectory directory;
+    ArtifactCache store(directory.path());
+    LiveCache live(store);
+    live.put(key("a"), "A", {"affected"}, std::nullopt);
+    const auto before = live.get(key("a")).seq;
+    const auto path = directory.path() / (ArtifactCache::key_digest(key("a")) + ".json");
+    const auto dir_perms = std::filesystem::status(directory.path()).permissions();
+    const auto file_perms = std::filesystem::status(path).permissions();
+    std::filesystem::permissions(path, std::filesystem::perms::owner_read);
+    std::filesystem::permissions(directory.path(), std::filesystem::perms::owner_read |
+        std::filesystem::perms::owner_exec);
+    bool failed = false;
+    try {
+        live.changed({"affected"});
+    } catch (const std::filesystem::filesystem_error&) {
+        failed = true;
+    }
+    std::filesystem::permissions(directory.path(), dir_perms);
+    if (std::filesystem::exists(path)) std::filesystem::permissions(path, file_perms);
+    // Some hosts (e.g. a test running as root) can remove read-only records.
+    if (!failed) return;
+    require(!live.get(key("a")).verified, "failed invalidation must not serve stale verified data");
+    live.put(key("b"), "old", {"affected"}, before);
+    require(!live.get(key("b")).verified, "in-flight work must observe failed invalidation");
+    require(live.changed({"affected"}).removed == 2, "retry removes both indexed records");
+}
+
+void allocation_failure_during_replacement_cannot_verify_stale_data() {
+    const auto identity = key("a");
+    const std::vector<std::string> dependencies{std::string(dependency_length, 'd')};
+    bool failed_after_write = false;
+    for (int site = 0; site < 128; ++site) {
+        TemporaryDirectory directory;
+        ArtifactCache store(directory.path());
+        LiveCache live(store);
+        live.put(identity, "old", {"old-dependency"}, std::nullopt);
+        dependency_copies_before_failure = site;
+        try {
+            live.put(identity, "replacement", dependencies, std::nullopt);
+        } catch (const std::bad_alloc&) {
+            dependency_copies_before_failure = -1;
+            if (store.get(identity) != "replacement") continue;
+            failed_after_write = true;
+            live.changed(dependencies);
+            require(!live.get(identity).verified,
+                    "failed reindex cannot serve a replacement using the old verified index");
+            require(live.stats().dependencies == 0, "failed reindex leaves no dangling dependencies");
+            continue;
+        }
+        dependency_copies_before_failure = -1;
+        require(failed_after_write, "injected a dependency copy failure after persistent replacement");
+        return;
+    }
+    fail("dependency allocation fault campaign did not terminate");
+}
+
 void forgotten_changes_are_treated_as_related() {
     TemporaryDirectory directory;
     ArtifactCache store(directory.path());
@@ -172,9 +249,11 @@ void index_follows_rewrites() {
 } // namespace
 
 int main() {
+    allocation_failure_during_replacement_cannot_verify_stale_data();
     precise_changes_remove_only_dependents();
     unknown_changes_require_verification();
     values_computed_during_changes_stay_unverified();
+    failed_disk_invalidation_requires_revalidation();
     forgotten_changes_are_treated_as_related();
     later_sessions_start_unverified_with_the_index_rebuilt();
     index_follows_rewrites();

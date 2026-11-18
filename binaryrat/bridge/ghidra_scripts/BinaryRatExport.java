@@ -79,7 +79,20 @@ public class BinaryRatExport extends GhidraScript {
     private ScheduleSummary summary;
     private Set<Address> sample;
 
-    private enum Mode { SERIAL, PARALLEL, SCHEDULED }
+    enum Mode {
+        SERIAL("serial"), PARALLEL("parallel"), SCHEDULED("scheduled"), VERIFIED_CANDIDATE("scheduled");
+
+        final String phase;
+        Mode(String phase) {
+            this.phase = phase;
+        }
+
+        boolean syntaxTree() {
+            // The stock response cap applies to the tree and C markup together.
+            // Only the audited candidate can omit the tree without changing published failures.
+            return this != VERIFIED_CANDIDATE;
+        }
+    }
 
     @Override
     protected void run() throws Exception {
@@ -162,16 +175,10 @@ public class BinaryRatExport extends GhidraScript {
     private Set<Address> readSample(Path path) throws Exception {
         Set<Address> addresses = new HashSet<>();
         try (BufferedReader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
-            String line;
-            while ((line = reader.readLine()) != null) {
+            BigInteger offset;
+            while ((offset = nextSampleOffset(reader, monitor)) != null) {
                 checkEpoch();
-                String[] fields = line.split("\\t", -1);
-                if (fields.length != 3 || !fields[0].matches("[0-9a-fA-F]{1,16}") ||
-                        !fields[1].matches("[0-9a-fA-F]{1,16}") || fields[2].isBlank() ||
-                        new BigInteger(fields[1], 16).signum() == 0) {
-                    throw new IOException("Expected sample offset, size and name: " + line);
-                }
-                Address address = currentProgram.getImageBase().addNoWrap(new BigInteger(fields[0], 16));
+                Address address = currentProgram.getImageBase().addNoWrap(offset);
                 Function function = currentProgram.getFunctionManager().getFunctionAt(address);
                 if (function == null || !exported(function) || !addresses.add(address)) {
                     throw new IOException("Sample address must name a unique exported function: " + address);
@@ -182,6 +189,59 @@ public class BinaryRatExport extends GhidraScript {
             throw new IOException("Export sample is empty: " + path);
         }
         return Set.copyOf(addresses);
+    }
+
+    // The exporter needs the offset; the symbol name can be arbitrarily long.
+    // Consume it without retaining the row or splitting it into strings.
+    static BigInteger nextSampleOffset(BufferedReader input, TaskMonitor monitor)
+            throws IOException, CancelledException {
+        monitor.checkCancelled();
+        int first = input.read();
+        if (first == -1) {
+            return null;
+        }
+        BigInteger offset = readSampleHex(input, first);
+        if (readSampleHex(input, input.read()).signum() == 0) {
+            throw new IOException("Expected a positive sample size");
+        }
+        boolean hasName = false;
+        int untilCheck = 8192;
+        int ch;
+        while ((ch = input.read()) != -1 && ch != '\r' && ch != '\n') {
+            if (ch == '\t') {
+                throw new IOException("Unexpected extra sample field");
+            }
+            hasName |= !Character.isWhitespace(ch);
+            if (--untilCheck == 0) {
+                monitor.checkCancelled();
+                untilCheck = 8192;
+            }
+        }
+        if (!hasName) {
+            throw new IOException("Expected a nonblank sample name");
+        }
+        if (ch == '\r') {
+            input.mark(1);
+            if (input.read() != '\n') {
+                input.reset();
+            }
+        }
+        return offset;
+    }
+
+    private static BigInteger readSampleHex(BufferedReader input, int ch) throws IOException {
+        StringBuilder digits = new StringBuilder(16);
+        while (ch != '\t') {
+            if (ch < 0 || ch > 127 || Character.digit(ch, 16) < 0 || digits.length() == 16) {
+                throw new IOException("Expected 1 to 16 hexadecimal digits in sample offset or size");
+            }
+            digits.append((char) ch);
+            ch = input.read();
+        }
+        if (digits.isEmpty()) {
+            throw new IOException("Expected a hexadecimal sample offset or size");
+        }
+        return new BigInteger(digits.toString(), 16);
     }
 
     private String[] desktopArguments() throws Exception {
@@ -261,13 +321,13 @@ public class BinaryRatExport extends GhidraScript {
         }
     }
 
-    private void configure(DecompInterface decompiler) {
+    private void configure(DecompInterface decompiler, Mode mode) {
         DecompileOptions options = new DecompileOptions();
         options.grabFromProgram(currentProgram);
         decompiler.setOptions(options);
         decompiler.setSimplificationStyle("decompile");
         decompiler.toggleCCode(true);
-        decompiler.toggleSyntaxTree(true);
+        decompiler.toggleSyntaxTree(mode.syntaxTree());
     }
 
     private boolean exported(Function function) {
@@ -375,6 +435,7 @@ public class BinaryRatExport extends GhidraScript {
         long maxWaitMillis;
         long maxPeakResident;
         long memoryWatched;
+        long traced;
         long killed;
 
         ScheduleSummary(boolean cacheEnabled) {
@@ -389,11 +450,12 @@ public class BinaryRatExport extends GhidraScript {
             maxWaitMillis = Math.max(maxWaitMillis, run.waitedMillis());
             maxPeakResident = Math.max(maxPeakResident, run.peakResidentBytes());
             memoryWatched += run.memoryWatched() ? 1 : 0;
+            traced += run.traced() != null && run.traced().trace() != null ? 1 : 0;
             killed += run.killed() ? 1 : 0;
         }
     }
 
-    private static final class StockParityAudit {
+    static final class StockParityAudit {
         private final BufferedReader candidate;
         private final JsonArray fallbackSample = new JsonArray();
         private long matches;
@@ -450,7 +512,7 @@ public class BinaryRatExport extends GhidraScript {
         Path workspace = Files.createTempDirectory(output.getParent(), ".binaryrat-parity-");
         try {
             Path candidate = workspace.resolve("scheduled.jsonl");
-            export(candidate, Mode.SCHEDULED, workers, timeout, chunkSize);
+            export(candidate, Mode.VERIFIED_CANDIDATE, workers, timeout, chunkSize);
             if (summary.leases.keySet().stream().anyMatch(status -> !status.equals("completed"))) {
                 throw new IOException("Cannot verify interrupted leases: " + summary.leases);
             }
@@ -475,7 +537,7 @@ public class BinaryRatExport extends GhidraScript {
             throws Exception {
         long exportStarted = System.nanoTime();
         checkEpoch();
-        String name = mode.name().toLowerCase();
+        String name = mode.phase;
         println("BinaryRat export starting mode=" + name);
         // Keep the temporary file beside its destination so publication can be atomic.
         Path temporary = Files.createTempFile(output.getParent(), ".binaryrat-", ".jsonl.tmp");
@@ -497,7 +559,7 @@ public class BinaryRatExport extends GhidraScript {
             if (mode == Mode.PARALLEL) {
                 // Reuse the tagged Ghidra pool implementation, with a local executor so
                 // requested concurrency does not mutate Ghidra's shared thread-pool settings.
-                callback = new DecompilerCallback<String>(currentProgram, this::configure) {
+                callback = new DecompilerCallback<String>(currentProgram, d -> configure(d, mode)) {
                     @Override
                     public String process(DecompileResults results, TaskMonitor taskMonitor)
                             throws Exception {
@@ -512,7 +574,7 @@ public class BinaryRatExport extends GhidraScript {
                 executor = Executors.newFixedThreadPool(workers);
                 activeWorkers = workers;
             }
-            else if (mode == Mode.SCHEDULED) {
+            else if (mode == Mode.SCHEDULED || mode == Mode.VERIFIED_CANDIDATE) {
                 String cachePath = System.getenv("BINARYRAT_CACHE_DIR");
                 if (cachePath != null && !cachePath.isBlank()) {
                     if (!programId.matches("sha256:[0-9a-fA-F]{64}")) {
@@ -530,7 +592,7 @@ public class BinaryRatExport extends GhidraScript {
                 }
                 engine = EngineClient.start(EngineClient.findExecutable(), engineCache);
                 long leaseTimeout = environment("BINARYRAT_LEASE_TIMEOUT_MS", timeout * 1000L);
-                scheduler = new ScheduledDecompiler(engine, currentProgram, this::configure,
+                scheduler = new ScheduledDecompiler(engine, currentProgram, d -> configure(d, mode),
                     new ScheduledDecompiler.Limits(workers,
                         environment("BINARYRAT_WORKER_BYTES", 768L << 20),
                         Runtime.getRuntime().maxMemory(),
@@ -557,7 +619,8 @@ public class BinaryRatExport extends GhidraScript {
             }
             else {
                 serialDecompiler = new DecompInterface();
-                configure(serialDecompiler);
+                // Keep the serial reference on stock output settings, including its payload limit.
+                configure(serialDecompiler, mode);
                 if (!serialDecompiler.openProgram(currentProgram)) {
                     throw new IOException("Cannot start stock decompiler: " + serialDecompiler.getLastMessage());
                 }
@@ -741,7 +804,8 @@ public class BinaryRatExport extends GhidraScript {
                 return result;
             }
         }
-        ScheduledDecompiler.Run run = scheduler.decompile(function, monitor);
+        ScheduledDecompiler.Run run = cache == null ? scheduler.decompileUntraced(function, monitor) :
+            scheduler.decompile(function, monitor);
         summary.add(run);
         checkEpoch();
         if (run.traced() == null) {
@@ -761,7 +825,7 @@ public class BinaryRatExport extends GhidraScript {
             }
             else {
                 boolean stored = cache.store(function, output, run.traced().trace(), lookup.seq(), modification);
-                summary.cache.store(stored, "cache store refused optimistic guard");
+                summary.cache.store(stored, "cache entry exceeded storage limits or failed optimistic validation");
             }
             checkEpoch();
         }
@@ -793,6 +857,7 @@ public class BinaryRatExport extends GhidraScript {
         report.addProperty("max_wait_millis", summary.maxWaitMillis);
         report.addProperty("max_peak_resident_bytes", summary.maxPeakResident);
         report.addProperty("memory_watched_leases", summary.memoryWatched);
+        report.addProperty("traced_leases", summary.traced);
         report.addProperty("killed_processes", summary.killed);
         report.add("cache", summary.cache.report(cache));
         return report;
@@ -814,7 +879,7 @@ public class BinaryRatExport extends GhidraScript {
         end(true);
         try {
             CacheProof proof = new CacheProof(currentProgram, monitor, EngineClient.findExecutable(), cacheDirectory,
-                this::configure, programId, functions, timeout, this::println);
+                d -> configure(d, Mode.SCHEDULED), programId, functions, timeout, this::println);
             JsonObject report = proof.run();
             Files.writeString(output, new GsonBuilder().setPrettyPrinting().create().toJson(report) +
                 "\n", StandardCharsets.UTF_8);

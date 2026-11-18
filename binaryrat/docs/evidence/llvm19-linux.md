@@ -118,3 +118,34 @@ all 384 leases and returned exit status 1 from the byte comparator. The C
 bodies differed for `LLVMGetNamedMetadataNumOperands` and
 `LLVMGetDebugLocDirectory`. The number of differing rows can vary with
 the work assigned to each native process.
+
+## Export allocation check
+
+On Linux x86-64 with official Ghidra 12.2 and JDK 25.0.5, a separate
+allocation probe opened the same analyzed GCC O0 `types` corpus project
+read-only. Each pass opened a fresh native decompiler with the same program
+options, visited its 19 internal functions in ascending order, rendered every
+C record and compared all fields with the first pass. All records matched.
+
+| Query recording | High p-code tree | Recorded queries per pass | Median calling-thread bytes allocated |
+| --- | --- | ---: | ---: |
+| On | On | 585 | 7,138,236 |
+| On | Off | 585 | 6,749,088 |
+| Off | On | 0 | 3,455,548 |
+| Off | Off | 0 | 3,047,560 |
+
+The probe read JDK `ThreadMXBean.getCurrentThreadAllocatedBytes()` immediately
+before iterating the functions and after rendering the last result. It executed
+the four rows top to bottom, then bottom to top, twice. Each median covers
+four passes. These counts cover Java allocation on the calling thread. Native
+process memory, retained Java heap and whole-program analysis time have different
+measurement boundaries. The release integration checks verify whether scheduled
+leases actually collected traces.
+
+On `LLVMConstIntOfArbitraryPrecision`, setting Ghidra's native response cap to
+1 MiB reproduced a difference between the two output configurations. Full-tree
+decompilation reported “Response buffer size exceeded” with no timeout,
+cancellation, or startup failure. C-only decompilation completed and returned
+72,435 C characters. BinaryRat therefore preserves the stock tree for standalone
+exports and omits it only in the candidate phase of stock verification. The
+stock error takes precedence when the candidate fits under the cap.

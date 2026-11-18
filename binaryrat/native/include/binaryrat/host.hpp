@@ -39,8 +39,7 @@ struct ProcessId {
 [[nodiscard]] std::optional<std::uint64_t> resident_bytes(const ProcessId& process);
 
 // Kills the identified process. Returns false, killing nothing, when the PID no
-// longer names that process. On Linux the check and the kill are two steps, so a
-// PID recycled between them in the same instant is a theoretical gap.
+// longer names that process or the host cannot pin it for safe termination.
 bool terminate(const ProcessId& process);
 
 } // namespace binaryrat::host

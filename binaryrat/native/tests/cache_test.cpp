@@ -105,6 +105,10 @@ void corruption_limits_and_paths() {
     { std::ofstream output(path); output << std::string(2048, 'x'); }
     require(!cache.get(key(1)), "oversized on-disk record must miss");
 
+    const auto id = ArtifactCache::key_digest(key(1));
+    requires_throw<std::invalid_argument>([&] { cache.remove("subdir/" + id); });
+    requires_throw<std::invalid_argument>([&] { cache.remove((directory.path / id).string()); });
+
     const json unsafe{{"path", "../../outside"}};
     cache.put(unsafe, "safe");
     require(cache.get(unsafe).value() == "safe", "untrusted key text is not a path");

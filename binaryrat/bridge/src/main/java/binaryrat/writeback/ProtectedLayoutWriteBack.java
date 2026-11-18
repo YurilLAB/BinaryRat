@@ -48,9 +48,11 @@ import ghidra.program.model.data.DataTypePath;
 import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.StructureDataType;
 import ghidra.program.model.data.Undefined;
+import ghidra.program.model.listing.FlowOverride;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.mem.MemoryAccessException;
+import ghidra.program.model.pcode.PcodeOp;
 import ghidra.util.SystemUtilities;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
@@ -71,6 +73,8 @@ public final class ProtectedLayoutWriteBack {
 	private static final int MAXIMUM_EVIDENCE_PER_FIELD = 512;
 	private static final int MAXIMUM_FUNCTIONS = 32;
 	private static final int MAXIMUM_FUNCTION_BYTES = 65_536;
+	private static final int MAXIMUM_FOLLOW_DEPTH = 4;
+	private static final int MAXIMUM_FORWARDING_EDGES = 128;
 	private static final HexFormat HEX = HexFormat.of();
 	private static final ReentrantLock WRITE = new ReentrantLock();
 
@@ -174,8 +178,7 @@ public final class ProtectedLayoutWriteBack {
 			throw new IOException("Layout object id does not identify its declared target");
 		}
 		int extent = integer(layout.get("minimum_extent"), 1, MAXIMUM_EXTENT, "minimum_extent");
-		Map<Address, Function> citedFunctions = new TreeMap<>();
-		citedFunctions.put(function.getEntryPoint(), function);
+		Map<Address, Function> citedFunctions = forwardingPath(program, artifact, function, monitor);
 		List<Field> fields = fields(program, layout, extent, objectId,
 			array(artifact.get("observations"), "observations"), citedFunctions, monitor);
 		String code = approvalCode(program, destination, reportHash, citedFunctions, monitor);
@@ -379,6 +382,77 @@ public final class ProtectedLayoutWriteBack {
 		return entry;
 	}
 
+	/** Validate every reported transfer, including intermediate functions with no field accesses. */
+	private static Map<Address, Function> forwardingPath(Program program, JsonObject report,
+			Function root, TaskMonitor monitor) throws IOException, CancelledException {
+		int limit = integer(report.get("follow_depth"), 0, MAXIMUM_FOLLOW_DEPTH, "follow_depth");
+		JsonArray calls = array(report.get("forwarded_calls"), "forwarded_calls");
+		if (calls.size() > MAXIMUM_FORWARDING_EDGES || limit == 0 && !calls.isEmpty()) {
+			throw new IOException("Forwarded calls exceed the report's traversal limits");
+		}
+		Map<Address, Function> functions = new TreeMap<>();
+		functions.put(root.getEntryPoint(), root);
+		Map<Address, Integer> depths = new HashMap<>();
+		depths.put(root.getEntryPoint(), 0);
+		var reached = new HashSet<Address>();
+		reached.add(root.getEntryPoint());
+		for (var element : calls) {
+			monitor.checkCancelled();
+			JsonObject edge = object(element, "forwarded call");
+			int hop = limit == 1 ? 1 : integer(edge.get("hop"), 1, limit, "hop");
+			Function caller = limit == 1 ? root : findFunction(program,
+				string(edge.get("caller_address_space"), "caller address space"),
+				string(edge.get("caller_address"), "caller address"));
+			Function callee = findFunction(program,
+				string(edge.get("callee_address_space"), "callee address space"),
+				string(edge.get("callee_address"), "callee address"));
+			Address site = readAddress(program, string(edge.get("address_space"), "call address space"),
+				string(edge.get("address"), "call address"));
+			integer(edge.get("callee_parameter_index"), 0, 0, "callee_parameter_index");
+			if ((hop == 1 && !caller.equals(root)) ||
+					depths.computeIfAbsent(caller.getEntryPoint(), k -> hop - 1) != hop - 1 ||
+					depths.computeIfAbsent(callee.getEntryPoint(), k -> hop) != hop) {
+				throw new IOException("Inconsistent forwarded call path");
+			}
+			if (!caller.getBody().contains(site) || !currentDirectCall(program, site, callee)) {
+				throw new IOException("Forwarded call no longer matches the reviewed instruction");
+			}
+			functions.put(caller.getEntryPoint(), caller);
+			functions.put(callee.getEntryPoint(), callee);
+			if (functions.size() > MAXIMUM_FUNCTIONS) {
+				throw new IOException("Reviewed functions exceed the review limit");
+			}
+			reached.add(callee.getEntryPoint());
+		}
+		// Every non-root caller needs a validated incoming edge at the preceding depth.
+		if (!reached.containsAll(functions.keySet())) {
+			throw new IOException("Disconnected forwarded call path");
+		}
+		return functions;
+	}
+
+	private static boolean currentDirectCall(Program program, Address site, Function callee) {
+		var instruction = program.getListing().getInstructionAt(site);
+		if (instruction == null || instruction.getFlowOverride() != FlowOverride.NONE ||
+				!instruction.getFlowType().isCall() || instruction.getFlowType().isComputed() ||
+				callee.getCallFixup() != null) {
+			return false;
+		}
+		Address target = callee.getEntryPoint();
+		Address[] decoded = instruction.getDefaultFlows();
+		if (decoded == null || decoded.length != 1 || !target.equals(decoded[0])) {
+			return false;
+		}
+		// The effective p-code includes primary call-reference overrides. They can
+		// redirect a call without changing its bytes, prototype, or decoded flow.
+		for (PcodeOp op : instruction.getPcode(true)) {
+			if (op.getOpcode() == PcodeOp.CALL && target.equals(op.getInput(0).getAddress())) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private static String approvalCode(Program program, DataTypePath destination, String reportHash,
 			Map<Address, Function> citedFunctions, TaskMonitor monitor) throws IOException, CancelledException {
 		var file = program.getDomainFile();
@@ -522,9 +596,8 @@ public final class ProtectedLayoutWriteBack {
 		if (!function.getBody().contains(address) || program.getListing().getInstructionAt(address) == null) {
 			throw new IOException("Field evidence must cite a current instruction in its reported function");
 		}
-		citedFunctions.putIfAbsent(function.getEntryPoint(), function);
-		if (citedFunctions.size() > MAXIMUM_FUNCTIONS) {
-			throw new IOException("Reviewed functions exceed the review limit");
+		if (!citedFunctions.containsKey(function.getEntryPoint())) {
+			throw new IOException("Field evidence must cite the root or a verified forwarded function");
 		}
 		return new Evidence(id, function.getEntryPoint().toString(true), address.toString(true), operation);
 	}

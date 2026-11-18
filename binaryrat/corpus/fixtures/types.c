@@ -79,6 +79,10 @@ BR_NOINLINE BR_LAYOUT_ANCHOR uint32_t forward_packed(const PackedRecord *record)
     return read_packed(record) + UINT32_C(1);
 }
 
+BR_NOINLINE BR_LAYOUT_ANCHOR uint32_t forward_packed_twice(const PackedRecord *record) {
+    return forward_packed(record) + UINT32_C(2);
+}
+
 /* Distinct layout used by the call-destination override regression. */
 BR_NOINLINE BR_LAYOUT_ANCHOR uint32_t read_alternate_layout(const Record *record) {
     return (uint32_t) record->samples[3];

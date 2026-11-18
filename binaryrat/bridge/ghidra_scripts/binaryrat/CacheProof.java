@@ -3,6 +3,7 @@
 package binaryrat;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.function.Consumer;
@@ -15,6 +16,8 @@ import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSet;
+import ghidra.program.model.address.AddressSpace;
+import ghidra.program.model.address.GenericAddressSpace;
 import ghidra.program.model.data.*;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.lang.InjectPayloadCallother;
@@ -100,8 +103,10 @@ public final class CacheProof {
 		JsonObject report = new JsonObject();
 		report.addProperty("functions", functions.size());
 		try {
+			report.addProperty("failed_invalidation_retried", failedInvalidationProof());
 			open();
 			report.add("injection_payload_contract", injectionClassificationProof());
+			report.add("cache_resource_limits", cacheLimitProof());
 			referenceEndpointProof();
 			round("populate", null, false, Expect.ANY);
 			round("no change", null, false, Expect.ALL_HITS);
@@ -142,6 +147,103 @@ public final class CacheProof {
 		report.addProperty("failures", failures);
 		report.addProperty("passed", failures == 0);
 		return report;
+	}
+
+	/** A listener unable to account for a revision must report it before acknowledging it. */
+	private boolean failedInvalidationProof() throws Exception {
+		program.flushEvents();
+		try (EngineClient offline = EngineClient.start(engineBinary, cacheDirectory.resolve("offline"));
+				ChangeTracker pending = new ChangeTracker(program, offline)) {
+			offline.close();
+			boolean eventsEnabled = program.isSendingEvents();
+			int transaction = program.startTransaction("BinaryRat missing event probe");
+			try {
+				program.setEventsEnabled(false);
+				program.getBookmarkManager().setBookmark(functions.get(0).getEntryPoint(),
+					BookmarkType.NOTE, "BinaryRat missing event", "probe");
+				for (int attempt = 0; attempt < 2; attempt++) {
+					try {
+						pending.sync();
+						failures++;
+						return false;
+					}
+					catch (IOException expected) {
+						// Even on the retry, this closed engine cannot acknowledge the revision.
+					}
+				}
+			}
+			finally {
+				try {
+					program.endTransaction(transaction, false);
+				}
+				finally {
+					program.setEventsEnabled(eventsEnabled);
+				}
+			}
+		}
+		return true;
+	}
+
+	/** Limits are optional-cache boundaries. Crossing them must preserve the result and the session. */
+	private JsonObject cacheLimitProof() throws Exception {
+		JsonObject input = new JsonObject();
+		input.addProperty("text", "quote \" newline\n α界🐀");
+		byte[] expected = input.toString().getBytes(StandardCharsets.UTF_8);
+		boolean exact = Arrays.equals(expected,
+			EngineClient.encodeRequest(input, expected.length).toByteArray());
+		boolean over = false;
+		try {
+			EngineClient.encodeRequest(input, expected.length - 1);
+		}
+		catch (EngineClient.FrameTooLarge refused) {
+			over = true;
+		}
+
+		Trace count = new Trace();
+		byte[] digest = new byte[32];
+		for (int i = 0; i < Trace.MAX_READS; i++) {
+			count.answer("P|0", digest);
+		}
+		boolean countBoundary = count.replayable() && count.reads().size() == Trace.MAX_READS;
+		count.answer("P|0", digest);
+		count.answer("P|1", digest);
+		boolean countBounded = !count.replayable() && count.reads().isEmpty();
+		Trace chars = new Trace();
+		chars.answer("x".repeat(Trace.MAX_READ_CHARS - 17), digest);
+		boolean charBoundary = chars.replayable();
+		chars.answer("", digest);
+		boolean charsBounded = !chars.replayable() && chars.reads().isEmpty();
+		Set<String> lines = new HashSet<>();
+		Address start = new GenericAddressSpace("proof", 64, AddressSpace.TYPE_RAM, 0).getAddress(0);
+		long span = Trace.MAX_LINES << Trace.LINE_SHIFT;
+		boolean lineBoundary = Trace.addLines(lines, start, span) && lines.size() == Trace.MAX_LINES &&
+			Trace.addLines(lines, start, 1) && !Trace.addLines(lines, start.add(span), 1) &&
+			lines.size() == Trace.MAX_LINES;
+		Trace uncertain = new Trace();
+		uncertain.depends(start, (Trace.MAX_LINES + 1) << Trace.LINE_SHIFT);
+		uncertain.dependsOnName("n".repeat(300));
+		boolean partialRequiresReplay = uncertain.replayable() &&
+			uncertain.unpredictable().size() == 1 && uncertain.dependencies().isEmpty();
+
+		Function function = functions.get(0);
+		long seq = cache.stats().get("seq").getAsLong();
+		DecompOutput large = new DecompOutput(true, false, false, false, "", "",
+			"界".repeat(16 * 1024 * 1024 / 3));
+		boolean tooLargeSkipped = !cache.store(function, large, new Trace(), seq,
+			program.getModificationNumber());
+		boolean sessionIntact = cache.lookup(function, false).kind() == LiveDecompileCache.Kind.MISS &&
+			cache.stats().get("entries").getAsLong() == 0;
+		JsonObject result = new JsonObject();
+		result.addProperty("exact_and_one_byte_over_utf8", exact && over);
+		result.addProperty("trace_count_boundary", countBoundary && countBounded);
+		result.addProperty("trace_size_boundary", charBoundary && charsBounded);
+		result.addProperty("partial_dependencies_require_replay", partialRequiresReplay && lineBoundary);
+		result.addProperty("oversized_output_skips_cache_and_session_survives", tooLargeSkipped && sessionIntact);
+		boolean ok = exact && over && countBoundary && countBounded && charBoundary && charsBounded &&
+			partialRequiresReplay && lineBoundary && tooLargeSkipped && sessionIntact;
+		result.addProperty("passed", ok);
+		if (!ok) failures++;
+		return result;
 	}
 
 	private enum Expect {

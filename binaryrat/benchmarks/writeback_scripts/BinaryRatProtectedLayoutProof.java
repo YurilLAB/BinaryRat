@@ -20,6 +20,8 @@ import ghidra.program.model.data.IntegerDataType;
 import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.StructureDataType;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.pcode.PcodeOp;
+import ghidra.program.model.symbol.RefType;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
@@ -39,7 +41,7 @@ public class BinaryRatProtectedLayoutProof extends GhidraScript {
 	@Override
 	protected void run() throws Exception {
 		String[] args = getScriptArgs();
-		if (!isRunningHeadless() || currentProgram == null || args.length < 1 || args.length > 2) {
+		if (!isRunningHeadless() || currentProgram == null || args.length < 1 || args.length > 3) {
 			throw new IllegalArgumentException("Run on a disposable writable saved Program with a layout report");
 		}
 		end(true);
@@ -180,8 +182,11 @@ public class BinaryRatProtectedLayoutProof extends GhidraScript {
 			(COMMENT + " after preview").equals(function.getComment()) &&
 			prototype.equals(function.getPrototypeString(false, true)), "approved write changed analyst work");
 		println("PASS late cancellation reports the committed change and preserves analyst work");
-		if (args.length == 2) {
+		if (args.length >= 2) {
 			verifyForwardedApproval(Path.of(args[1]));
+		}
+		if (args.length == 3) {
+			verifyForwardingPath(Path.of(args[2]));
 		}
 		println("BINARYRAT_PROTECTED_LAYOUT_PROOF_OK");
 	}
@@ -213,6 +218,69 @@ public class BinaryRatProtectedLayoutProof extends GhidraScript {
 		var restored = currentProgram.getFunctionManager().getFunctionAt(citedEntry);
 		expect(previous.equals(restored.getName(true)), "native undo failed to restore cited function");
 		println("PASS edits to a cited callee invalidate a prior approval on a fresh handle");
+	}
+
+	private void verifyForwardingPath(Path report) throws Exception {
+		String name = "BinaryRatProofTwoHops";
+		var artifact = JsonParser.parseString(Files.readString(report)).getAsJsonObject();
+		var edges = artifact.getAsJsonArray("forwarded_calls");
+		expect(edges.size() == 2, "two-hop fixture must report both forwarding edges");
+		var second = edges.get(1).getAsJsonObject();
+		var space = currentProgram.getAddressFactory().getAddressSpace(second.get("address_space").getAsString());
+		var site = space.getAddress(Long.parseUnsignedLong(second.get("address").getAsString(), 16));
+		Function middle = currentProgram.getFunctionManager().getFunctionContaining(site);
+		var leaf = space.getAddress(Long.parseUnsignedLong(second.get("callee_address").getAsString(), 16));
+		var prepared = ProtectedLayoutWriteBack.prepare(currentProgram, report, name, monitor);
+		expect(prepared.review().fields().stream().flatMap(field -> field.evidence().stream())
+			.allMatch(row -> leaf.toString(true).equals(row.function())),
+			"two-hop fixture must have evidence only in the leaf");
+		edit("Rename intermediate forwarder", () -> middle.setName("ProofRenamedMiddle", SourceType.USER_DEFINED));
+		try {
+			var changed = ProtectedLayoutWriteBack.prepare(currentProgram, report, name, monitor);
+			expect(!code(changed).equals(code(prepared)), "a forwarder-only edit left an old approval valid");
+			expectFailure(() -> apply(changed, code(prepared), monitor), "fresh review");
+		}
+		finally {
+			currentProgram.undo();
+		}
+
+		edit("Redirect forwarded call", () -> {
+			var references = currentProgram.getReferenceManager();
+			var reference = references.addMemoryReference(site, middle.getEntryPoint(),
+				RefType.CALL_OVERRIDE_UNCONDITIONAL, SourceType.USER_DEFINED, 0);
+			references.setPrimary(reference, true);
+		});
+		try {
+			var instruction = currentProgram.getListing().getInstructionAt(site);
+			expect(leaf.equals(instruction.getDefaultFlows()[0]) &&
+				java.util.Arrays.stream(instruction.getPcode(true)).anyMatch(op ->
+					op.getOpcode() == PcodeOp.CALL && middle.getEntryPoint().equals(op.getInput(0).getAddress())),
+				"test must redirect the effective p-code call while preserving the decoded target");
+			expectFailure(() -> ProtectedLayoutWriteBack.prepare(currentProgram, report, name, monitor),
+				"Forwarded call no longer matches");
+		}
+		finally {
+			currentProgram.undo();
+		}
+		var restored = ProtectedLayoutWriteBack.prepare(currentProgram, report, name, monitor);
+		expect(code(restored).equals(code(prepared)), "undo did not restore the forwarding path");
+		Path editedReport = Files.createTempFile("binaryrat-forwarded", ".json");
+		try {
+			// Remove the root-to-intermediate edge. The leaf instruction and its caller still exist.
+			edges.remove(0);
+			Files.writeString(editedReport, artifact.toString());
+			expectFailure(() -> ProtectedLayoutWriteBack.prepare(currentProgram, editedReport, name, monitor),
+				"Disconnected forwarded call path");
+			edges.remove(0);
+			Files.writeString(editedReport, artifact.toString());
+			expectFailure(() -> ProtectedLayoutWriteBack.prepare(currentProgram, editedReport, name, monitor),
+				"verified forwarded function");
+		}
+		finally {
+			Files.deleteIfExists(editedReport);
+		}
+		absent(name);
+		println("PASS two-hop approvals bind intermediate functions and require connected effective calls");
 	}
 
 	private TaskMonitor cancelWhenPresent(String name, boolean afterCommit) {

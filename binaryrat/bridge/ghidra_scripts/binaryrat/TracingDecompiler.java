@@ -30,6 +30,37 @@ import ghidra.util.task.TaskMonitor;
  */
 public final class TracingDecompiler extends DecompInterface {
 	private RecordingCallback recorder;
+	private long attachedPid;
+	// DecompInterface exposes setters but no getters for these registration actions.
+	// Its 12.2 constructor enables C and tree output and disables measures and jump loads.
+	private boolean syntaxTree = true;
+	private boolean cCode = true;
+	private boolean paramMeasures;
+	private boolean jumpLoads;
+
+	@Override
+	public synchronized boolean toggleSyntaxTree(boolean value) {
+		syntaxTree = value;
+		return super.toggleSyntaxTree(value);
+	}
+
+	@Override
+	public synchronized boolean toggleCCode(boolean value) {
+		cCode = value;
+		return super.toggleCCode(value);
+	}
+
+	@Override
+	public synchronized boolean toggleParamMeasures(boolean value) {
+		paramMeasures = value;
+		return super.toggleParamMeasures(value);
+	}
+
+	@Override
+	public synchronized boolean toggleJumpLoads(boolean value) {
+		jumpLoads = value;
+		return super.toggleJumpLoads(value);
+	}
 
 	/** The decompilation and its query trace, or a null trace if recording was disabled. */
 	public record Traced(DecompileResults results, Trace trace) {
@@ -62,6 +93,33 @@ public final class TracingDecompiler extends DecompInterface {
 		}
 	}
 
+	/** Run only on the PID whose memory is reserved and watched by the caller's lease. */
+	synchronized Traced decompileAttached(Function function, int timeoutSeconds, TaskMonitor monitor,
+			long pid, boolean recordQueries) {
+		attachedPid = pid;
+		try {
+			return recordQueries ? decompile(function, timeoutSeconds, monitor) :
+				new Traced(decompileFunction(function, timeoutSeconds, monitor), null);
+		}
+		finally {
+			attachedPid = 0;
+		}
+	}
+
+	@Override
+	protected synchronized void verifyProcess() throws IOException, DecompileException {
+		if (attachedPid == 0) {
+			super.verifyProcess();
+			return;
+		}
+		// Ghidra normally restarts a disposed worker here, including after cancellation
+		// between its initial monitor check and decompileAt. A replacement needs a new
+		// attachment. The next lease may restart it through processId().
+		if (decompProcess == null || !decompProcess.isReady() || currentProcessId() != attachedPid) {
+			throw new IOException("memory-watched decompiler process is unavailable during this lease");
+		}
+	}
+
 	/**
 	 * Starts the native process if it is not running and returns its PID, or -1 when it
 	 * cannot be determined. The PID lets the engine watch the process's memory.
@@ -69,6 +127,15 @@ public final class TracingDecompiler extends DecompInterface {
 	public synchronized long processId() {
 		try {
 			verifyProcess();
+			return currentProcessId();
+		}
+		catch (IOException | DecompileException exception) {
+			return -1;
+		}
+	}
+
+	private long currentProcessId() {
+		try {
 			Field field = DecompileProcess.class.getDeclaredField("nativeProcess");
 			field.setAccessible(true);
 			Object nativeProcess = field.get(decompProcess);
@@ -103,7 +170,8 @@ public final class TracingDecompiler extends DecompInterface {
 		encode.clear();
 		getOptions().encode(encode, this);
 		add(digest, "options", encode.toString());
-		add(digest, "actions", getSimplificationStyle() + "|c|tree");
+		add(digest, "actions", getSimplificationStyle() + "|c=" + cCode + "|tree=" + syntaxTree +
+			"|parammeasures=" + paramMeasures + "|jumpload=" + jumpLoads);
 		add(digest, "decompiler", getMajorVersion() + "." + getMinorVersion());
 		add(digest, "ghidra", Application.getApplicationVersion());
 		// Match DecompileProcessFactory's executable resolution. Version strings

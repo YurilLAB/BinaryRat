@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <binaryrat/admission.hpp>
 
+#include "deadline.hpp"
+
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
@@ -90,22 +92,6 @@ struct ExecutionContext {
     ~ExecutionContext() { current_impl = previous; }
     const Impl* previous;
 };
-
-Clock::time_point execution_deadline(std::chrono::milliseconds timeout) {
-    const auto now = Clock::now();
-    // Both supported platforms use steady-clock ticks finer than milliseconds.
-    // Check before converting: a positive millisecond count can otherwise
-    // overflow the clock's duration representation during duration_cast.
-    if (timeout > std::chrono::duration_cast<std::chrono::milliseconds>(Clock::duration::max())) {
-        return Clock::time_point::max();
-    }
-    const auto delay = std::chrono::duration_cast<Clock::duration>(timeout);
-    // max - positive delay is safe even if this clock's epoch makes now negative.
-    if (now.time_since_epoch() > Clock::duration::max() - delay) {
-        return Clock::time_point::max();
-    }
-    return now + delay;
-}
 }
 
 // Lock order: Impl::mutex before TaskState::result_mutex. result_mutex is never
@@ -245,7 +231,7 @@ struct Impl {
                 peak_reserved = std::max(peak_reserved, reserved);
                 peak_running = std::max(peak_running, running);
                 if (task->timeout.count() > 0) {
-                    task->watch_entry = watch.emplace(execution_deadline(task->timeout), task);
+                    task->watch_entry = watch.emplace(deadline_after(task->timeout), task);
                     task->watched = true;
                     watch_cv.notify_one();
                 }

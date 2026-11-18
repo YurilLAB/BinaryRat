@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// Modified by BinaryRat to avoid redundant database reads during no-return discovery.
+// Modified by BinaryRat to avoid redundant reads and bound cyclic fall-through walks.
 package ghidra.app.plugin.core.analysis;
 
 import java.util.*;
@@ -534,6 +534,9 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
 		FunctionManager functionManager = program.getFunctionManager();
 		Address nextFuncAddr = getFunctionAfter(fallThru);
 		Listing listing = program.getListing();
+		Address cycleAnchor = fallThru;
+		long window = 1;
+		long remaining = window;
 
 		while (fallThru != null) {
 			monitor.checkCancelled();
@@ -559,6 +562,16 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
 			}
 
 			fallThru = instr.getFlowType().isFallthrough() ? instr.getFallThrough() : null;
+			// Analyst fall-through overrides can form cycles. Brent's expanding-window
+			// check needs no visited set or extra instruction/database lookups.
+			if (fallThru != null && fallThru.equals(cycleAnchor)) {
+				return false;
+			}
+			if (--remaining == 0) {
+				cycleAnchor = fallThru;
+				window = window <= Long.MAX_VALUE / 2 ? window * 2 : Long.MAX_VALUE;
+				remaining = window;
+			}
 		}
 		return false;
 	}

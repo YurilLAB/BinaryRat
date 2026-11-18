@@ -7,11 +7,12 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+import re
 
 from verify_ghidra import measured_run
 
 
-def run(installation: Path, output: Path, label: str, timeout: int) -> bytes:
+def run(installation: Path, output: Path, label: str, timeout: int) -> tuple[bytes, str]:
     launcher = installation.resolve() / "support" / (
         "analyzeHeadless.bat" if os.name == "nt" else "analyzeHeadless")
     if not launcher.is_file():
@@ -20,20 +21,32 @@ def run(installation: Path, output: Path, label: str, timeout: int) -> bytes:
     project.mkdir()
     log = project / "headless.log"
     report = project / "effects.txt"
+    inventory = project / "inventory.sha256"
     scripts = Path(__file__).resolve().parent / "ghidra_scripts"
+    # Stock cannot terminate on a cycle of fall-through overrides. Run this
+    # bounded candidate-only regression after recording both differential outputs.
+    edits = (["-postScript", "BinaryRatNoReturnParity.java", "check-fall-through-edits"]
+             if label == "candidate" else [])
     run_values = measured_run([
         str(launcher), str(project), "fixture", "-import", str(output / "seed.bin"),
         "-loader", "BinaryLoader", "-processor", "x86:LE:64:default", "-cspec", "gcc",
         "-noanalysis", "-max-cpu", "1", "-scriptPath", str(scripts),
-        "-postScript", "BinaryRatNoReturnParity.java", str(report), "-deleteProject",
+        "-postScript", "BinaryRatNoReturnParity.java", str(report),
+        "-postScript", "BinaryRatInventoryProof.java", str(inventory), *edits, "-deleteProject",
     ], log, timeout, os.environ | {"GHIDRA_HEADLESS_MAXMEM": "512M",
                                   "XDG_CONFIG_HOME": str(project / "settings"),
                                   "XDG_CACHE_HOME": str(project / "cache")})
     messages = log.read_text(encoding="utf-8", errors="replace")
     if (run_values["returncode"] or not report.is_file() or
-            "BINARYRAT_NO_RETURN_PARITY passed" not in messages or "REPORT SCRIPT ERROR" in messages):
+            messages.count("BINARYRAT_NO_RETURN_PARITY passed") != 1 or
+            messages.count("BINARYRAT_INVENTORY_PROOF passed") != 1 or
+            messages.count("BINARYRAT_FALL_THROUGH_EDITS passed") != int(label == "candidate") or
+            "REPORT SCRIPT ERROR" in messages or re.search(r"^(?:ERROR|FATAL) ", messages, re.MULTILINE)):
         raise RuntimeError(f"{label} fixture failed. See {log}")
-    return report.read_bytes()
+    digest = inventory.read_text(encoding="utf-8")
+    if not re.fullmatch("[0-9a-f]{64}", digest):
+        raise ValueError(f"Invalid inventory digest in {inventory}")
+    return report.read_bytes(), digest
 
 
 def main() -> int:
@@ -52,7 +65,8 @@ def main() -> int:
     candidate = run(args.candidate_ghidra, output, "candidate", args.timeout)
     if stock != candidate:
         raise RuntimeError(f"Stock and candidate no-return effects differ. See {output}")
-    print(f"Exact no-return fixture parity, SHA-256 {hashlib.sha256(stock).hexdigest()}")
+    print(f"Exact no-return fixture parity, SHA-256 {hashlib.sha256(stock[0]).hexdigest()}")
+    print(f"Exact whole-Program fixture inventory, SHA-256 {stock[1]}")
     return 0
 
 

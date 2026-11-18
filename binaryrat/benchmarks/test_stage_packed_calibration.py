@@ -49,6 +49,8 @@ class PackedStagingTests(unittest.TestCase):
             evidence_id = f"pc:{index}"
             observed.append({"evidence_id": evidence_id, "object_id": object_id,
                              "object_start_known": True, "operation": "LOAD",
+                             "function_address_space": "ram", "function_address": "1000",
+                             "address_space": "ram", "address": "1000", "pcode_order": index,
                              "offset": offset, "width": width})
             fields.append({"evidence_ids": [evidence_id], "offset": offset, "width": width,
                            "evidence_strength": 0.5})
@@ -102,6 +104,16 @@ class PackedStagingTests(unittest.TestCase):
         self.fixture["evidence"] = "../fixture.layout.json"
         self.write_report()
         with self.assertRaisesRegex(ValueError, "evidence filename"):
+            self.stage()
+
+    def test_distinct_ids_for_one_load_cannot_increase_support(self):
+        field = self.layout["layouts"][0]["fields"][0]
+        duplicate = self.layout["observations"][0] | {"evidence_id": "duplicate-site"}
+        self.layout["observations"].append(duplicate)
+        field["evidence_ids"].append(duplicate["evidence_id"])
+        field["evidence_strength"] = 2 / 3
+        self.write(self.evidence, self.layout)
+        with self.assertRaisesRegex(ValueError, "evidence site"):
             self.stage()
 
 

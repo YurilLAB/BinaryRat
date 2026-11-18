@@ -3,11 +3,13 @@
 package binaryrat;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -143,13 +145,15 @@ public class RecordingCallback extends DecompileCallback {
 		return digest.digest();
 	}
 
-	private static byte[] encoded(Encoder encoder) throws IOException {
+	private static byte[] encodedDigest(Encoder encoder) throws IOException {
 		if (!(encoder instanceof CachedEncoder cached)) {
 			throw new IOException("unexpected decompiler encoder " + encoder.getClass().getName());
 		}
-		java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
-		cached.writeTo(bytes);
-		return bytes.toByteArray();
+		MessageDigest digest = sha256();
+		digest.update("encoded".getBytes(StandardCharsets.UTF_8));
+		digest.update((byte) 0);
+		cached.writeTo(new DigestOutputStream(OutputStream.nullOutputStream(), digest));
+		return digest.digest();
 	}
 
 	private byte[] failed(Throwable thrown) {
@@ -172,7 +176,7 @@ public class RecordingCallback extends DecompileCallback {
 	}
 
 	private void encodedAnswer(String request, Encoder encoder) throws IOException {
-		answer(request, digest("encoded", encoded(encoder)));
+		answer(request, encodedDigest(encoder));
 	}
 
 	private void dependsOnSymbolsAt(Address addr) {

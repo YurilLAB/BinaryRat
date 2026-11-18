@@ -21,6 +21,13 @@ public final class Trace implements RecordingCallback.Sink {
 	/** A read or a change wider than this many lines is not tracked precisely. */
 	public static final long MAX_LINES = 1L << 14;
 
+	// A skipped trace only costs a future decompilation. Keep Java heap bounded
+	// independently of the number and size of queries the native worker makes.
+	static final int MAX_KEY_CHARS = 256;
+	static final int MAX_READS = 65_536;
+	static final int MAX_READ_CHARS = 2 * 1024 * 1024;
+	private int readChars;
+	private boolean abandoned;
 	private final List<String> reads = new ArrayList<>();
 	private final MessageDigest combined = sha256();
 	private final TreeSet<String> dependencies = new TreeSet<>();
@@ -53,27 +60,42 @@ public final class Trace implements RecordingCallback.Sink {
 
 	@Override
 	public void answer(String request, byte[] digest) {
+		if (abandoned) return;
+		// The recorded answer suffix occupies one separator and 16 hex characters.
+		if (reads.size() >= MAX_READS || request.length() > MAX_READ_CHARS - readChars - 17) {
+			abandoned = true;
+			reads.clear();
+			dependencies.clear();
+			unpredictable.clear();
+			return;
+		}
+		readChars += request.length() + 17;
 		reads.add(record(request, digest));
 		fold(combined, request, digest);
 	}
 
 	@Override
 	public void depends(Address start, long length) {
-		if (!addLines(dependencies, start, length)) {
-			unpredictable.add("read wider than " + MAX_LINES + " lines at " + start);
+		if (!abandoned && !addLines(dependencies, start, length)) {
+			unpredictable("address dependencies exceed the tracking budget");
 		}
 	}
 
 	@Override
 	public void dependsOnName(String name) {
-		if (name != null) {
-			dependencies.add(nameKey(name));
+		if (abandoned || name == null) return;
+		if (dependencies.size() >= MAX_LINES || name.length() > MAX_KEY_CHARS) {
+			unpredictable("symbol dependencies exceed the tracking budget");
+			return;
 		}
+		dependencies.add(nameKey(name));
 	}
 
 	@Override
 	public void unpredictable(String why) {
-		unpredictable.add(why);
+		if (!abandoned && unpredictable.isEmpty()) {
+			unpredictable.add(why.length() <= 256 ? why : why.substring(0, 256));
+		}
 	}
 
 	static String nameKey(String name) {
@@ -87,13 +109,14 @@ public final class Trace implements RecordingCallback.Sink {
 	/**
 	 * Adds the line keys covering [start, start + length). Addresses outside memory
 	 * spaces add nothing: changes there are always reported as changes of unknown
-	 * reach. Returns false, adding nothing, for ranges wider than MAX_LINES.
+	 * reach. Returns false when the range or the combined dependency set exceeds MAX_LINES.
 	 */
 	static boolean addLines(Collection<String> keys, Address start, long length) {
 		if (start == null || start == Address.NO_ADDRESS || !start.isMemoryAddress()) {
 			return true;
 		}
 		AddressSpace space = start.getAddressSpace();
+		if (space.getName().length() > MAX_KEY_CHARS) return false;
 		long first = start.getOffset() >>> LINE_SHIFT;
 		long lastOffset = start.getOffset() + Math.max(length, 1) - 1;
 		long maximum = space.getMaxAddress().getOffset();
@@ -106,7 +129,9 @@ public final class Trace implements RecordingCallback.Sink {
 			return false;
 		}
 		for (long line = first;; line++) {
-			keys.add(lineKey(space, line));
+			String key = lineKey(space, line);
+			if (keys.size() >= MAX_LINES && !keys.contains(key)) return false;
+			keys.add(key);
 			if (line == last) {
 				break;
 			}
@@ -138,6 +163,7 @@ public final class Trace implements RecordingCallback.Sink {
 
 	/** True when every read can be replayed against a program later. */
 	public boolean replayable() {
+		if (abandoned) return false;
 		for (String read : reads) {
 			if (read.startsWith("I|") && read.contains("|!|")) {
 				return false;

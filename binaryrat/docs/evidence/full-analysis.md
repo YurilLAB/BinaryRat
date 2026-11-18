@@ -32,7 +32,7 @@ process status `0` despite the analysis deadline and the `Disassemble Entry
 Points` exception, `body must contain the entry point`. The ELF loader reported
 unsupported TLS relocations during import. Treat the task times as observations
 of a partial run. The data-heavy control completed with 12 functions and 66
-instructions. Its inventory SHA-256 is
+instructions. Its version 1 inventory SHA-256 was
 `e06996acf0b658ef7e8787744b8b2acafc52b329b3e4b7fd7cbdf73698bc8c78`.
 The control exercises full import, analysis, and evidence collection on a large
 mapped image with little code.
@@ -76,7 +76,7 @@ work to investigate and leave whole-program LLVM equivalence open. [Focused no-r
 
 Two fresh stock imports and two fresh candidate imports completed with identical
 inventories on the 104,871,768-byte control. Each had 12 functions, 66
-instructions, and the inventory digest recorded above. The runs used a 2 GiB
+instructions, and the version 1 inventory digest recorded above. The runs used a 2 GiB
 heap, a 2-CPU Ghidra limit, and alternating order. The candidate loaded the
 updated analyzer class in an otherwise stock installation.
 
@@ -88,6 +88,19 @@ updated analyzer class in an otherwise stock installation.
 The control validates equivalent completed work on a large mapped image.
 Host contention and the small instruction count make this comparison
 unsuitable for estimating an analysis speedup.
+
+Inventory version 2 includes no-return flags on internal and external functions
+and every bookmark's address, type, category and comment. Stock and the
+candidate with fall-through cycle detection each completed a fresh import of
+the same control with digest `b02bd5acd4e3865856fb11ec88128e35f1510d046f9d21e1cd523e53007ba8c8`.
+During this shared-host run, analysis took 130.11 s for stock and 152.70 s
+for the candidate. Sampled peak process-tree RSS was 1,073,168,384 and
+850,042,880 bytes respectively.
+The focused fixture verifies that each field changes the digest and that
+reinserting identical bookmarks in a different order preserves it.
+The profiler reports the number of completed independent comparisons. A single
+baseline or a comparison interrupted by a timeout leaves parity unverified.
+[Inventory regression](../../benchmarks/ghidra_scripts/BinaryRatInventoryProof.java)
 
 ## Reproduce
 
@@ -140,6 +153,6 @@ python binaryrat/benchmarks/profile_auto_analysis.py \
 
 `--candidate-ghidra` adds a second Ghidra 12.2 installation and
 `--repetitions` enables repeated independent imports with alternating order.
-The selected inventory covers function entries and bodies, signatures,
-instruction boundaries and flow overrides, defined data, and references from
-Program memory. It is a scoped comparison gate for analysis work.
+The selected inventory covers function entries and bodies, signatures, no-return
+flags, bookmarks, instruction boundaries and flow overrides, defined data, and
+references from Program memory.

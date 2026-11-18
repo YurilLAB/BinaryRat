@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -57,7 +58,7 @@ bool eventually(Predicate predicate, std::chrono::milliseconds limit = 10s) {
 }
 
 // Processes the scheduler may watch, with resident sizes the test controls.
-class FakeProbe final : public ProcessProbe {
+class FakeProbe : public ProcessProbe {
 public:
     void set(std::uint64_t pid, std::uint64_t bytes) {
         std::lock_guard lock(mutex_);
@@ -281,6 +282,88 @@ void attached_process_over_its_reservation_is_stopped() {
     scheduler.release("ghost");
 }
 
+void memory_sampling_recovers_after_a_transient_allocation_failure() {
+    class LowMemoryProbe final : public FakeProbe {
+    public:
+        std::atomic<int> reads{0};
+        std::optional<std::uint64_t> resident_bytes(const host::ProcessId&) override {
+            switch (++reads) {
+            case 1: return 50;  // attach
+            case 2: throw std::bad_alloc();
+            default: return 301;
+            }
+        }
+    };
+    auto probe = std::make_shared<LowMemoryProbe>();
+    probe->set(42, 50);
+    Recorder recorder;
+    LeaseScheduler scheduler(options(probe), recorder.events());
+    scheduler.acquire("transient", lease(300), recorder.callbacks());
+    require(eventually([&] { return recorder.was_granted("transient"); }), "granted");
+    require(scheduler.attach("transient", 42).attached, "attached");
+    require(eventually([&] { return !recorder.stops().empty(); }), "watcher retried sampling");
+    require(scheduler.release("transient").status == LeaseStatus::MemoryExceeded,
+            "watcher reports the measured overrun after a failed poll");
+}
+
+void unmeasurable_replacement_preserves_attached_process() {
+    class UnreadableProbe final : public FakeProbe {
+    public:
+        std::optional<std::uint64_t> resident_bytes(const host::ProcessId& process) override {
+            if (process.pid == 44) return std::nullopt;
+            return FakeProbe::resident_bytes(process);
+        }
+    };
+    auto probe = std::make_shared<UnreadableProbe>();
+    probe->set(42, 50);
+    probe->set(44, 10);
+    Recorder recorder;
+    LeaseScheduler scheduler(options(probe), recorder.events());
+    scheduler.acquire("measured", lease(300), recorder.callbacks());
+    require(eventually([&] { return recorder.was_granted("measured"); }), "granted");
+    require(scheduler.attach("measured", 42).attached, "readable process attached");
+    require(!scheduler.attach("measured", 44).attached, "unmeasurable process refused");
+    probe->set(42, 301);
+    require(eventually([&] { return !recorder.stops().empty(); }), "original process still watched");
+    require(scheduler.release("measured").status == LeaseStatus::MemoryExceeded, "original overrun");
+}
+
+void stale_memory_sample_does_not_stop_replacement() {
+    class DelayedProbe final : public FakeProbe {
+    public:
+        std::promise<void> sampling;
+        std::promise<void> resume;
+        std::atomic<unsigned> old_reads{0}, new_reads{0};
+
+        std::optional<std::uint64_t> resident_bytes(const host::ProcessId& process) override {
+            if (process.pid == 42 && ++old_reads == 2) {
+                sampling.set_value();
+                resume.get_future().wait();
+                return 301;
+            }
+            if (process.pid == 43) ++new_reads;
+            return FakeProbe::resident_bytes(process);
+        }
+    };
+    auto probe = std::make_shared<DelayedProbe>();
+    probe->set(42, 50);
+    probe->set(43, 60);
+    Recorder recorder;
+    LeaseScheduler scheduler(options(probe), recorder.events());
+    scheduler.acquire("replace", lease(300), recorder.callbacks());
+    require(eventually([&] { return recorder.was_granted("replace"); }), "granted");
+    require(scheduler.attach("replace", 42).attached, "first process attached");
+    require(probe->sampling.get_future().wait_for(10s) == std::future_status::ready,
+            "watcher is sampling the first process");
+    require(scheduler.attach("replace", 43).attached, "replacement process attached");
+    probe->resume.set_value();
+    require(eventually([&] { return probe->new_reads > 1 || !recorder.stops().empty(); }),
+            "watcher completed the in-flight sample");
+    const auto end = scheduler.release("replace");
+    require(end.status == LeaseStatus::Completed && end.peak_resident_bytes == 60,
+            "a stale memory sample cannot stop or inflate the peak for a replacement");
+}
+
 void holder_that_ignores_a_stop_has_its_process_killed() {
     auto probe = std::make_shared<FakeProbe>();
     probe->set(77, 10);
@@ -370,6 +453,26 @@ void prompt_release_or_zero_grace_kills_nothing() {
         require(!scheduler.release("patient").killed, "zero grace never kills");
     }
     require(probe->terminated().empty(), "nothing was terminated");
+}
+
+void long_watch_intervals_do_not_expire_immediately() {
+    auto probe = std::make_shared<FakeProbe>();
+    probe->set(8, 10);
+    probe->set(9, 10);
+    Recorder recorder;
+    auto config = options(probe, std::chrono::milliseconds::max());
+    config.memory_poll = std::chrono::milliseconds::max();
+    config.max_pending = std::numeric_limits<std::size_t>::max();
+    LeaseScheduler scheduler(config, recorder.events());
+    scheduler.acquire("long", lease(100), recorder.callbacks());
+    require(eventually([&] { return recorder.was_granted("long"); }), "granted");
+    require(scheduler.attach("long", 8).attached, "attached");
+    scheduler.cancel("long");
+    require(eventually([&] { return recorder.stops().size() == 1; }), "cooperative stop delivered");
+    require(!scheduler.attach("long", 9).attached, "a stopped lease refuses a replacement");
+    std::this_thread::sleep_for(30ms);
+    require(!scheduler.release("long").killed, "a large grace period must not expire immediately");
+    require(probe->terminated().empty(), "the attached process was not terminated");
 }
 
 void misuse_is_reported() {
@@ -529,11 +632,15 @@ int main() {
         std::this_thread::sleep_for(120s);
         fail("timed out");
     }).detach();
+    memory_sampling_recovers_after_a_transient_allocation_failure();
+    unmeasurable_replacement_preserves_attached_process();
+    long_watch_intervals_do_not_expire_immediately();
     cpu_limit_and_fifo_grants();
     memory_reservations_limit_admission();
     deadline_stops_the_holder();
     cancelling_running_and_queued_leases();
     attached_process_over_its_reservation_is_stopped();
+    stale_memory_sample_does_not_stop_replacement();
     holder_that_ignores_a_stop_has_its_process_killed();
     release_waits_for_in_flight_process_termination();
     prompt_release_or_zero_grace_kills_nothing();

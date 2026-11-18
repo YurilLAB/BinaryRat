@@ -23,6 +23,7 @@
 #include <sched.h>
 #include <sstream>
 #include <string>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
 #endif
@@ -201,9 +202,19 @@ bool terminate(const ProcessId& process) {
     // termination below refer to the same process.
     if (!handle || !same_process(handle.get(), process)) return false;
     return TerminateProcess(handle.get(), 1) != 0;
-#elif defined(__linux__)
-    if (running_since(process.pid) != process.start_stamp) return false;
-    return kill(static_cast<pid_t>(process.pid), SIGKILL) == 0;
+#elif defined(__linux__) && defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+    if (process.pid == 0 || process.pid > static_cast<std::uint64_t>(std::numeric_limits<pid_t>::max()))
+        return false;
+    // Pin the process before checking its birth time. Exit or PID reuse between
+    // the check and signal cannot redirect the signal to its successor.
+    const auto fd = syscall(SYS_pidfd_open, static_cast<pid_t>(process.pid), 0U);
+    if (fd < 0) return false;
+    struct Close {
+        int fd;
+        ~Close() { close(fd); }
+    } pinned{static_cast<int>(fd)};
+    return running_since(process.pid) == process.start_stamp &&
+           syscall(SYS_pidfd_send_signal, pinned.fd, SIGKILL, nullptr, 0U) == 0;
 #else
     (void)process;
     return false;

@@ -4,8 +4,10 @@ package binaryrat;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -19,9 +21,12 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.TypeAdapter;
+import com.google.gson.stream.JsonWriter;
 
 import ghidra.framework.Application;
 import ghidra.framework.OSFileNotFoundException;
@@ -33,8 +38,14 @@ import ghidra.framework.Platform;
  * events are handed to the listener registered for that lease. Thread safe.
  */
 public final class EngineClient implements AutoCloseable {
+	// Native serve() accepts 16 MiB per UTF-8 frame (excluding its newline).
+	private static final int MAX_FRAME_BYTES = 16 * 1024 * 1024;
+	// Disk records add a SHA-256 checksum and a small envelope around the same fields.
+	private static final int CACHE_ENVELOPE_BYTES = 256;
+	private static final TypeAdapter<JsonElement> JSON = new Gson().getAdapter(JsonElement.class);
+
 	private final Process process;
-	private final BufferedWriter input;
+	private final OutputStream input;
 	private final Map<String, CompletableFuture<JsonObject>> pending = new ConcurrentHashMap<>();
 	private final Map<String, Consumer<JsonObject>> leaseListeners = new ConcurrentHashMap<>();
 	private final AtomicLong ids = new AtomicLong();
@@ -43,8 +54,7 @@ public final class EngineClient implements AutoCloseable {
 
 	private EngineClient(Process process) {
 		this.process = process;
-		this.input = new BufferedWriter(
-			new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
+		this.input = process.getOutputStream();
 		this.reader = new Thread(this::readResponses, "binaryrat-engine-reader");
 		this.reader.setDaemon(true);
 		this.reader.start();
@@ -114,18 +124,25 @@ public final class EngineClient implements AutoCloseable {
 					continue;
 				}
 				JsonElement id = message.get("id");
-				CompletableFuture<JsonObject> waiting =
-					id == null || id.isJsonNull() ? null : pending.remove(id.getAsString());
+				if (id == null || id.isJsonNull()) {
+					throw new IOException("engine response has no request id");
+				}
+				String responseId = id.getAsString();
+				// Keep this owner visible to connection cleanup until the entire reply is parsed.
+				CompletableFuture<JsonObject> waiting = pending.get(responseId);
 				if (waiting == null) {
 					continue;
 				}
 				if (message.get("ok").getAsBoolean()) {
-					waiting.complete(message.getAsJsonObject("result"));
+					JsonObject result = message.getAsJsonObject("result");
+					if (result == null) throw new IOException("engine response has no result");
+					waiting.complete(result);
 				}
 				else {
 					waiting.completeExceptionally(
 						new IOException("engine refused request: " + message.get("error")));
 				}
+				pending.remove(responseId);
 			}
 		}
 		catch (IOException | RuntimeException exception) {
@@ -138,10 +155,42 @@ public final class EngineClient implements AutoCloseable {
 		pending.clear();
 	}
 
+	static final class FrameTooLarge extends IOException {
+		FrameTooLarge(int limit) {
+			super("engine request exceeds " + limit + " UTF-8 bytes");
+		}
+	}
+
+	/** Encode completely before sending, so an oversized frame leaves the pipe usable. */
+	static ByteArrayOutputStream encodeRequest(JsonObject request, int limit) throws IOException {
+		ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+		OutputStream bounded = new OutputStream() {
+			@Override
+			public void write(int value) throws IOException {
+				if (bytes.size() == limit) throw new FrameTooLarge(limit);
+				bytes.write(value);
+			}
+
+			@Override
+			public void write(byte[] data, int start, int length) throws IOException {
+				if (length > limit - bytes.size()) throw new FrameTooLarge(limit);
+				bytes.write(data, start, length);
+			}
+		};
+		// OutputStreamWriter.write(String, ...) copies the entire slice into a char[].
+		// Feed it bounded char buffers even for a single very large C string.
+		try (JsonWriter json = new JsonWriter(new BufferedWriter(
+			new OutputStreamWriter(bounded, StandardCharsets.UTF_8), 1024))) {
+			JSON.write(json, request);
+		}
+		return bytes;
+	}
+
 	/** Sends a request; the future completes with its result. */
 	public CompletableFuture<JsonObject> send(String op, JsonObject fields) {
 		String id = Long.toString(ids.incrementAndGet());
-		JsonObject request = fields.deepCopy();
+		JsonObject request = new JsonObject();
+		fields.entrySet().forEach(entry -> request.add(entry.getKey(), entry.getValue()));
 		request.addProperty("id", id);
 		request.addProperty("op", op);
 		CompletableFuture<JsonObject> result = new CompletableFuture<>();
@@ -153,13 +202,15 @@ public final class EngineClient implements AutoCloseable {
 			return result;
 		}
 		try {
+			int limit = "cache.put".equals(op) ?
+				MAX_FRAME_BYTES - CACHE_ENVELOPE_BYTES : MAX_FRAME_BYTES;
 			synchronized (input) {
-				input.write(request.toString());
+				encodeRequest(request, limit).writeTo(input);
 				input.write('\n');
 				input.flush();
 			}
 		}
-		catch (IOException exception) {
+		catch (IOException | RuntimeException exception) {
 			pending.remove(id);
 			result.completeExceptionally(exception);
 		}

@@ -17,6 +17,7 @@ import re
 from statistics import mean
 import sys
 
+from bounded_io import read_limited
 
 SCHEMA_VERSION = 1
 MAX_INPUT_BYTES = 16 * 1024 * 1024
@@ -173,7 +174,7 @@ def load_json(path: Path) -> object:
     if not path.is_file() or not 0 < path.stat().st_size <= MAX_INPUT_BYTES:
         raise ValueError("input must be a regular JSON file in the supported size range")
     with path.open("rb") as stream:
-        data = stream.read(MAX_INPUT_BYTES + 1)
+        data = read_limited(stream, MAX_INPUT_BYTES + 1)
     if len(data) > MAX_INPUT_BYTES:
         raise ValueError("input exceeded the JSON size limit while reading")
     _check_depth(data)

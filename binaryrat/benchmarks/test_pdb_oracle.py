@@ -80,6 +80,20 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(layout["members"], [{"name": "code", "offset": 0, "width": 2},
                                               {"name": "link", "offset": 8, "width": 8}])
 
+    def test_member_count_includes_nonstorage_and_individual_overloads(self):
+        elements = [field("value", 0, 0x74), {"Kind": "LF_ONEMETHOD"}]
+        for method_kind in ("LF_ONEMETHOD", "LF_STMEMBER", "LF_NESTTYPE"):
+            with self.subTest(method=method_kind), self.assertRaisesRegex(ValueError, "missing declared"):
+                self.read([field_list(elements[0], {"Kind": method_kind}),
+                           aggregate("Record", 0x1000, 3, 8)])
+        methods = {"Kind": "LF_METHODLIST", "MethodOverloadList": {"Methods": [{}, {}]}}
+        overload = {"Kind": "LF_METHOD", "OverloadedMethod": {"NumOverloads": 2, "MethodList": 0x1000}}
+        records = [methods, field_list(*elements, overload), aggregate("Record", 0x1001, 4, 4)]
+        self.assertEqual(self.read(records)["members"], [{"name": "value", "offset": 0, "width": 4}])
+        overload["OverloadedMethod"]["NumOverloads"] = 1
+        with self.assertRaisesRegex(ValueError, "overload count conflicts"):
+            self.read(records)
+
     def test_nested_forward_reference_uses_exact_unique_name(self):
         records = [
             aggregate("Part", 0, 0, 0, options=["ForwardReference", "HasUniqueName"], unique="A"),

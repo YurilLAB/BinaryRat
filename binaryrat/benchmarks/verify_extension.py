@@ -145,6 +145,17 @@ def main() -> None:
                 scripts.extend(["-postScript", "BinaryRatRecoverLayouts.java", str(forwarded),
                                 "name:forward_packed", "0", "60", "1"])
                 proof_args.append(str(forwarded))
+                # Older saved corpora contain the one-hop control. Always require
+                # two hops for the current fixture, and for any build that exported it.
+                source = PROJECT / "binaryrat/corpus/fixtures/types.c"
+                if (artifact["source_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest() or
+                        any("-Wl,--export-dynamic-symbol=forward_packed_twice" in step["argv"]
+                            for step in artifact["commands"])):
+                    two_hops = output / "installed-two-hop-layout.json"
+                    two_hops.unlink(missing_ok=True)
+                    scripts.extend(["-postScript", "BinaryRatRecoverLayouts.java", str(two_hops),
+                                    "name:forward_packed_twice", "0", "60", "2"])
+                    proof_args.append(str(two_hops))
             extraction = measured_run(
                 [str(headless), str(root), "installed-layout", "-import", str(fixture), *scripts],
                 layout_log, 300, environment)
@@ -164,6 +175,7 @@ def main() -> None:
                     writeback_log.read_text(encoding="utf-8", errors="replace")):
                 raise RuntimeError(f"packaged write-back service proof failed (see {writeback_log})")
             writeback_proof = {"passed": True, "log": writeback_log.name,
+                               "two_hop_approval_verified": len(proof_args) == 3,
                                "wall_seconds": writeback["wall_seconds"],
                                "cli": verify_review_cli(project, layout, output, environment)}
         # An explicit typo must be reported even if a bundled engine is available.

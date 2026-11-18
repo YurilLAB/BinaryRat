@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
+from itertools import zip_longest
 import json
 import os
 from pathlib import Path
@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 
-from verify_ghidra import PROJECT, TIMING, load_export, measured_run
+from verify_ghidra import PROJECT, TIMING, first_differing_byte, load_export, measured_run, sha256
 
 
 LLVM19_SHA256 = "3523f50f635d2a1ea47518a392451f2854b92823ceaf1345fb806099dd1a3b8a"
@@ -22,11 +22,6 @@ PREPARED = re.compile(r"BinaryRat selected sample functions=(\d+) base=([a-fA-F0
 BRIDGE = PROJECT / "binaryrat" / "bridge" / "ghidra_scripts"
 FIXTURE_SCRIPTS = Path(__file__).resolve().parent / "ghidra_scripts"
 Sample = tuple[int, int, str]
-
-
-def sha256(path: Path) -> str:
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def select_sample(symbols: str, count: int) -> tuple[list[Sample], int]:
@@ -54,42 +49,46 @@ def select_sample(symbols: str, count: int) -> tuple[list[Sample], int]:
 
 
 def validate_export(path: Path, sample: list[Sample], base: int, identity: str) -> dict:
-    records = list(load_export(path))
-    expected = [(base + offset, name) for offset, _, name in sample]
-    if [(row.function.entry.offset, row.function.name) for row in records] != expected or any(
-            row.function.program_id != f"sha256:{identity}" or row.function.entry.space != "ram"
-            for row in records):
-        raise ValueError(f"export differs from prepared fixture identity, entries or order: {path}")
-    if any(row.timed_out or row.cancelled or row.failed_to_start for row in records):
-        raise ValueError(f"export contains timed-out, cancelled or unstarted work: {path}")
-    if any(row.successful != bool(row.c.strip()) or (not row.successful and not row.error.strip())
-           for row in records):
-        raise ValueError(f"export contains an unexplained missing C body: {path}")
-    failures = [{"name": row.function.name, "address": str(row.function.entry), "error": row.error}
-                for row in records if not row.successful]
-    completed = len(records) - len(failures)
-    if completed * 100 < len(records) * 99:
+    failures = []
+    for row, entry in zip_longest(load_export(path), sample):
+        if row is None or entry is None:
+            raise ValueError(f"export differs from prepared fixture identity, entries or order: {path}")
+        offset, _, name = entry
+        function = row.function
+        if (function.entry.offset != base + offset or function.name != name or
+                function.program_id != f"sha256:{identity}" or function.entry.space != "ram"):
+            raise ValueError(f"export differs from prepared fixture identity, entries or order: {path}")
+        if row.timed_out or row.cancelled or row.failed_to_start:
+            raise ValueError(f"export contains timed-out, cancelled or unstarted work: {path}")
+        if row.successful != bool(row.c.strip()) or (not row.successful and not row.error.strip()):
+            raise ValueError(f"export contains an unexplained missing C body: {path}")
+        if not row.successful:
+            failures.append({"name": function.name, "address": str(function.entry), "error": row.error})
+    completed = len(sample) - len(failures)
+    if not sample or completed * 100 < len(sample) * 99:
         raise ValueError(f"fewer than 99% of sample functions have C output in {path}")
     return {"completed": completed, "incomplete": failures}
 
 
 def compare_exports(stock: Path, candidate: Path) -> dict:
     """Compare whole files first. Parse rows only to locate and explain differences."""
-    stock_bytes, candidate_bytes = stock.read_bytes(), candidate.read_bytes()
-    result = {
-        "exact_bytes": stock_bytes == candidate_bytes,
-        "stock_sha256": hashlib.sha256(stock_bytes).hexdigest(),
-        "candidate_sha256": hashlib.sha256(candidate_bytes).hexdigest(),
-        "differences": [],
-    }
-    if result["exact_bytes"]:
+    difference = first_differing_byte(stock, candidate)
+    result = {"exact_bytes": difference is None, "stock_sha256": sha256(stock),
+              "candidate_sha256": sha256(candidate), "differences": []}
+    if difference is None:
         return result
-    result["first_differing_byte"] = next(
-        (i for i, (left, right) in enumerate(zip(stock_bytes, candidate_bytes)) if left != right),
-        min(len(stock_bytes), len(candidate_bytes)))
-    for stock_row, candidate_row in zip(stock_bytes.splitlines(keepends=True),
-                                        candidate_bytes.splitlines(keepends=True), strict=True):
-        if stock_row != candidate_row:
+    result["first_differing_byte"] = difference
+    with stock.open("rb") as a, candidate.open("rb") as b:
+        for stock_row, candidate_row in zip_longest(a, b):
+            if stock_row == candidate_row:
+                continue
+            if stock_row is None or candidate_row is None:
+                row = json.loads(stock_row or candidate_row)
+                result["differences"].append({
+                    "name": row["name"], "address": row["address"],
+                    "missing_from": "candidate" if candidate_row is None else "stock",
+                })
+                continue
             left, right = json.loads(stock_row), json.loads(candidate_row)
             result["differences"].append({
                 "name": left["name"],

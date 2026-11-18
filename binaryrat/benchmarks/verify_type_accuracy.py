@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import tempfile
 
+from bounded_io import read_limited
 from dwarf_oracle import read_dwarf_layout
 from verify_ghidra import PROJECT, measured_run
 
@@ -34,10 +35,22 @@ def checked_file(root: Path, artifact: dict, path_key: str, digest_key: str) -> 
     return path
 
 
+def checked_artifact_pair(root: Path, artifact: dict) -> tuple[Path, Path]:
+    binary = checked_file(root, artifact, "binary", "binary_sha256")
+    debug = checked_file(root, artifact, "debug_file", "debug_sha256")
+    if binary.parent == debug.parent or artifact["binary_sha256"] == artifact["debug_sha256"]:
+        raise ValueError("analysis input and oracle must be separate artifacts with distinct content")
+    return binary, debug
+
+
 def json_file(path: Path) -> dict:
     if not 0 < path.stat().st_size <= MAX_JSON_BYTES:
         raise ValueError(f"JSON size outside the supported range: {path}")
-    value = json.loads(path.read_text(encoding="utf-8"))
+    with path.open("rb") as stream:
+        data = read_limited(stream, MAX_JSON_BYTES + 1)
+    if len(data) > MAX_JSON_BYTES:
+        raise ValueError(f"JSON size outside the supported range: {path}")
+    value = json.loads(data.decode("utf-8"))
     if not isinstance(value, dict):
         raise ValueError(f"expected a JSON object: {path}")
     return value
@@ -84,6 +97,10 @@ def verified_fields(export: dict, artifact: dict, function: str = FUNCTION) -> l
     observations = {row["evidence_id"]: row for row in export["observations"]}
     if len(observations) != len(export["observations"]):
         raise ValueError("duplicate p-code evidence identity")
+    sites = {(row["function_address_space"], row["function_address"],
+              row["address_space"], row["address"], row["pcode_order"]) for row in observations.values()}
+    if len(sites) != len(observations):
+        raise ValueError("duplicate p-code evidence site")
     layouts = export["layouts"]
     if len(layouts) > 1:
         raise ValueError("multiple object roots reported for a single selected parameter")
@@ -172,20 +189,22 @@ def verify_union_views(export: dict, control: dict, artifact: dict,
         raise RuntimeError("union candidate extent differs from the union oracle")
 
     observations = {row["evidence_id"]: row for row in export["observations"]}
-    used = set()
+    field_evidence = {(field["offset"], field["width"]): set(field["evidence_ids"])
+                      for field in fields}
     for view in views:
-        for identity in view["evidence_ids"]:
+        identities = view["evidence_ids"]
+        if (not identities or len(set(identities)) != len(identities) or
+                not set(identities) <= field_evidence[(candidate["offset"], view["width"])]):
+            raise RuntimeError("union view lacks evidence from its rooted field")
+        for identity in identities:
             row = observations[identity]
             typed_use = row["typed_use"]
             prefix = "FLOAT_" if view["kind"] == "floating_point" else "INT_"
-            if (identity in used or row["operation"] != "LOAD" or row["storage_view"] != view["kind"]
-                    or row["offset"] != candidate["offset"] or row["width"] != view["width"]
+            if (row["operation"] != "LOAD" or row["storage_view"] != view["kind"]
                     or not typed_use["operation"].startswith(prefix)):
                 raise RuntimeError("union view lacks independent typed p-code evidence")
-            used.add(identity)
-    if len(used) < 2 or {row.get("storage_view") for row in control["observations"]} != {
-            "integer", "floating_point"}:
-        raise RuntimeError("union or control evidence is missing an independent typed load")
+    if {row.get("storage_view") for row in control["observations"]} != {"integer", "floating_point"}:
+        raise RuntimeError("control evidence is missing an independent typed load")
     return metrics
 
 
@@ -280,10 +299,7 @@ def evaluate(args: argparse.Namespace, report: dict) -> None:
     groups: dict[str, list[int]] = {}
 
     for artifact in fixtures:
-        binary = checked_file(root, artifact, "binary", "binary_sha256")
-        debug = checked_file(root, artifact, "debug_file", "debug_sha256")
-        if binary.parent == debug.parent or binary == debug:
-            raise ValueError("analysis input and oracle must be separate")
+        binary, debug = checked_artifact_pair(root, artifact)
         prefix = args.output / hashlib.sha256(artifact["id"].encode()).hexdigest()[:12]
         layout, evidence_name, measured = collect_layout(launcher, binary, prefix, args.timeout,
                                                          environment, FUNCTION)

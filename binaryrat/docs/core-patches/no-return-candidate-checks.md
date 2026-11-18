@@ -14,7 +14,9 @@ change keeps the x86 INT3 mnemonic check and the existing two-pass candidate
 order. The stock analyzer still collects and writes no-return flags, flow
 overrides, bookmarks, body fixes, and optional flow repairs on its analysis
 thread. Cancellation checks also cover the fall-through and incoming-reference
-loops. The patch allocates no persistent cache or additional worker.
+loops. A constant-space cycle check handles analyst-edited fall-through paths
+without an additional instruction lookup. An already-visited instruction ends
+the search for new evidence on that path.
 
 The 138,981,968-byte Godot 4.6.3 Linux executable with SHA-256
 `f64d4ed19fc9df9440321653fcc80df8c6e365ba7b6de0a29e2cfa9fa71bfeb3`
@@ -54,6 +56,9 @@ options, including flow repair.
 Official stock and candidate Ghidra 12.2 passed all 12 cases on Linux x86-64
 with Temurin 25.0.5+8. Both reports have SHA-256
 `59ee719a5406fc4723992ad5db1c89c6011be2f0777d38ad308d7d5d8332e59b`.
+The verifier compares the version 2 whole-Program inventory after those cases.
+On the candidate it also checks all 64 ways to direct three NOPs to each other
+or their normal returns, and a backward path that reaches INT3.
 
 ## Focused timing
 
@@ -93,6 +98,11 @@ and 74.1 ms for the candidate. Process wall time and sampled RSS include JVM
 startup, fixture creation, and validation. CPU contention varied on the shared
 host. The measurements establish a speedup for the isolated read path. CI
 checks exact effects and records the timing comparison as an artifact.
+
+A four-JVM run after adding the cycle check preserved the same effects digest.
+On the shared review host the median of the JVM medians was 412.4 ms for stock
+and 293.3 ms for the candidate. Sampled process-tree peak RSS across the four
+runs ranged from 379,420,672 to 395,489,280 bytes.
 
 On upstream release sync, check whether upstream already avoids these reads or
 uses the diagnostic reasons. If upstream supersedes the patch, drop it and run

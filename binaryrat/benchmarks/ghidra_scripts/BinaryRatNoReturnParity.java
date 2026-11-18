@@ -18,6 +18,7 @@ import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.data.ByteDataType;
 import ghidra.program.model.listing.BookmarkType;
 import ghidra.program.model.listing.FlowOverride;
+import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.RefType;
 import ghidra.program.model.symbol.Reference;
@@ -61,6 +62,10 @@ public class BinaryRatNoReturnParity extends GhidraScript {
         }
 
         var base = toAddr(0x100000);
+        if (getScriptArgs()[0].equals("check-fall-through-edits")) {
+            checkFallThroughEdits(base);
+            return;
+        }
         var bytes = ByteBuffer.allocate(Evidence.values().length * CASE_SIZE)
             .order(ByteOrder.LITTLE_ENDIAN);
         for (Evidence evidence : Evidence.values()) {
@@ -153,12 +158,7 @@ public class BinaryRatNoReturnParity extends GhidraScript {
             }
         }
 
-        var analyzer = new FindNoReturnFunctionsAnalyzer();
-        var options = currentProgram.getOptions(Program.ANALYSIS_PROPERTIES)
-            .getOptions(analyzer.getName());
-        analyzer.registerOptions(options, currentProgram);
-        options.setBoolean("Repair Flow Damage", false);
-        analyzer.optionsChanged(options, currentProgram);
+        var analyzer = configuredAnalyzer();
         var cancelled = new TaskMonitorAdapter(true);
         cancelled.cancel();
         try {
@@ -174,6 +174,66 @@ public class BinaryRatNoReturnParity extends GhidraScript {
         Files.writeString(Path.of(getScriptArgs()[0]), String.join("\n", report) + "\n",
             StandardCharsets.UTF_8);
         println("BINARYRAT_NO_RETURN_PARITY passed " + report.size() + " cases");
+    }
+
+    private FindNoReturnFunctionsAnalyzer configuredAnalyzer() {
+        var analyzer = new FindNoReturnFunctionsAnalyzer();
+        var options = currentProgram.getOptions(Program.ANALYSIS_PROPERTIES)
+            .getOptions(analyzer.getName());
+        analyzer.registerOptions(options, currentProgram);
+        options.setBoolean("Repair Flow Damage", false);
+        analyzer.optionsChanged(options, currentProgram);
+        return analyzer;
+    }
+
+    private void checkFallThroughEdits(Address base) throws Exception {
+        var start = base.add(Evidence.NORMAL_CONTINUATION.ordinal() * CASE_SIZE);
+        var call = start.add(CALLER_START + 1);
+        var listing = currentProgram.getListing();
+        var target = currentProgram.getFunctionManager().getFunctionAt(start.add(TARGET_OFFSET));
+        var analyzer = configuredAnalyzer();
+        var calls = new AddressSet();
+        var nodes = new ArrayList<Instruction>();
+        for (int n = 0; n < CALL_COUNT; n++) {
+            var source = call.add(n * CALLER_SIZE);
+            calls.add(source);
+            nodes.add(listing.getInstructionAt(source.add(5)));
+        }
+        // Exhaust every graph on three NOPs. Each can lead to any NOP or its normal RET.
+        int choices = nodes.size() + 1;
+        int graphCount = (int) Math.pow(choices, nodes.size());
+        for (int graph = 0; graph < graphCount; graph++) {
+            int successors = graph;
+            for (var node : nodes) {
+                int next = successors % choices;
+                successors /= choices;
+                node.setFallThrough(next == nodes.size()
+                    ? node.getDefaultFallThrough() : nodes.get(next).getAddress());
+            }
+            require(analyzer.added(currentProgram, calls, boundedMonitor(), new MessageLog()),
+                "Analyzer failed on graph " + graph);
+            require(!target.hasNoReturn(), "Unexpected no-return result for graph " + graph);
+        }
+        // Backward, acyclic edits can still reach genuine no-return evidence.
+        var trap = base.add(Evidence.INT3.ordinal() * CASE_SIZE + CALLER_START + 6);
+        nodes.forEach(node -> node.setFallThrough(trap));
+        require(analyzer.added(currentProgram, calls, boundedMonitor(), new MessageLog()),
+            "Analyzer failed on the backward INT3 control");
+        require(target.hasNoReturn(), "Acyclic backward paths lost their INT3 evidence");
+        println("BINARYRAT_FALL_THROUGH_EDITS passed " + graphCount + " graphs and INT3");
+    }
+
+    private static TaskMonitorAdapter boundedMonitor() {
+        return new TaskMonitorAdapter(true) {
+            private int checks;
+
+            @Override
+            public void checkCancelled() throws CancelledException {
+                if (++checks >= 256) {
+                    throw new CancelledException();
+                }
+            }
+        };
     }
 
     private void decode(Disassembler disassembler, Address address) {

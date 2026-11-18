@@ -11,6 +11,8 @@ import subprocess
 import time
 from typing import Literal, TypedDict
 
+from bounded_io import read_limited
+
 
 class Member(TypedDict):
     name: str
@@ -71,7 +73,7 @@ def _pdb_yaml(debug: Path, tool: Path | str) -> bytes:
             deadline = time.monotonic() + _TOOL_TIMEOUT_SECONDS
             assert child.stdout is not None
             try:
-                data = reader.submit(child.stdout.read, _MAX_YAML_BYTES + 1).result(
+                data = reader.submit(read_limited, child.stdout, _MAX_YAML_BYTES + 1).result(
                     timeout=_TOOL_TIMEOUT_SECONDS)
                 if len(data) > _MAX_YAML_BYTES:
                     raise ValueError("PDB type stream exceeds the output limit")
@@ -220,14 +222,25 @@ class _TypeStream:
         members: list[Member] = []
         names: set[str] = set()
         record_count = 0
-        has_non_storage = False
         for field in self.field_records(fields):
-            record_count += 1
+            field_kind = field["Kind"]
+            if field_kind == "LF_METHOD":
+                # Each overload contributes a member to the aggregate's count.
+                group = _mapping(field.get("OverloadedMethod"), "overloaded method")
+                overloads = _number(group.get("NumOverloads"), "overload count", 1, 0xFFFF)
+                index = _number(group.get("MethodList"), "method list index", _FIRST_RECORD)
+                method_list = self.record(index)
+                if method_list["Kind"] != "LF_METHODLIST":
+                    raise ValueError("CodeView overloaded method does not reference a method list")
+                methods = _mapping(method_list.get("MethodOverloadList"), "method list").get("Methods")
+                if not isinstance(methods, list) or len(methods) != overloads:
+                    raise ValueError("CodeView overload count conflicts with its method list")
+                record_count += overloads
+            else:
+                record_count += 1
             if record_count > count:
                 raise ValueError("CodeView field list exceeds its declared member count")
-            field_kind = field["Kind"]
             if field_kind in _NON_STORAGE_MEMBERS:
-                has_non_storage = True
                 continue
             if field_kind != "LF_MEMBER":
                 raise ValueError(f"Unsupported CodeView instance field {field_kind}")
@@ -241,8 +254,7 @@ class _TypeStream:
                 raise ValueError("CodeView field extent conflicts with the aggregate layout")
             names.add(member_name)
             members.append({"name": member_name, "offset": offset, "width": width})
-        # An overloaded-method record can represent several named methods.
-        if not has_non_storage and record_count != count:
+        if record_count != count:
             raise ValueError("CodeView field list is missing declared members")
         return {"kind": kind, "name": name, "size": size, "members": members}
 

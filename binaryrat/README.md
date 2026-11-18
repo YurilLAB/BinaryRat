@@ -27,8 +27,8 @@ build/native/binaryrat/binaryrat-engine serve --cache build/cache
 
 `serve` reads one JSON request per line and emits one correlated JSON response;
 lease grants may answer out of order, and scheduler events arrive between responses.
-It is a persistent **native process**, not yet a persistent Ghidra JVM daemon.
-See [protocol](protocol/README.md) and [Python client](python/README.md).
+The native engine and the read-only PyGhidra JVM service can each serve multiple requests.
+See the [engine protocol](protocol/README.md) and [Python service](python/README.md).
 
 ## What is implemented
 
@@ -108,15 +108,15 @@ PATH_TO_ENGINE --seed 0 --steps 1000`.
 
 ## Remaining milestones
 
-Read-only layout extraction has an exact offset and width regression for the
-packed fixture. General interprocedural inference, C++ RTTI recovery, calibrated
-confidence, a shared review service, and production write-back are future
-milestones. The transaction regression covers rollback and native undo on a
-disposable Program. [Architecture and milestones](docs/ARCHITECTURE.md)
+The extractor follows bounded direct calls and reports shared-storage candidates
+and Itanium and MSVC RTTI. Analysts can review a proposed layout and create a
+new structure with native undo. General interprocedural inference, calibrated
+confidence, and applying types to existing targets from the GUI and Python remain open.
+[Architecture and milestones](docs/ARCHITECTURE.md)
 
 The whole-program profiler records analyzer timings, completion, wall time,
-and process-tree RSS. The full LLVM pilot reached its analysis deadline, with
-disassembly and entry-point processing accounting for most recorded time.
+and process-tree RSS. The 130 MB LLVM run reached its analysis deadline.
+Whole-program speedup on code-heavy binaries remains unmeasured.
 [Whole-program analysis evidence](docs/evidence/full-analysis.md)
 
 ## Licensing and contributions
