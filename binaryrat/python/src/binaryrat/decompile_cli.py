@@ -27,8 +27,8 @@ def _parse_function(value: str) -> tuple[str, object]:
     """Return ("name", NAME) or ("address", (SPACE | None, OFFSET, BARE_TOKEN | None))."""
     if value.startswith(_NAME_PREFIX):
         name = value[len(_NAME_PREFIX):]
-        if not name:
-            raise argparse.ArgumentTypeError("name: needs a function name")
+        if not name or not name.isprintable():
+            raise argparse.ArgumentTypeError("name: needs a printable function name")
         return "name", name
     # Ghidra symbol names never contain whitespace; use name: for anything unusual.
     if not value or not value.isprintable() or any(character.isspace() for character in value):

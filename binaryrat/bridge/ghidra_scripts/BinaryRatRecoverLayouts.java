@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -27,8 +28,6 @@ import com.google.gson.JsonObject;
 import binaryrat.EngineClient;
 import binaryrat.LayoutEvidence;
 import binaryrat.ScheduledDecompiler;
-import binaryrat.writeback.LayoutEvidenceBrowser;
-import binaryrat.writeback.LayoutEvidenceTable;
 import generic.hash.HashUtilities;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
@@ -38,9 +37,10 @@ import ghidra.app.script.GhidraScript;
 import ghidra.app.services.CodeViewerService;
 import ghidra.app.services.ProgramManager;
 import ghidra.features.base.values.GhidraValuesMap;
-import ghidra.framework.preferences.Preferences;
+import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Program;
 import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.mem.MemoryBlock;
@@ -51,6 +51,7 @@ import ghidra.program.model.symbol.SymbolType;
 import ghidra.util.MessageType;
 import ghidra.util.Swing;
 import ghidra.util.exception.CancelledException;
+import ghidra.util.task.TaskMonitor;
 
 /** CodeBrowser and headless entrypoints for the read-only C++ layout evidence solver. */
 public class BinaryRatRecoverLayouts extends GhidraScript {
@@ -67,6 +68,7 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 	private static final String DEPTH = "Direct-call depth";
 	private static final String OUTPUT = "Output JSON path";
 	private static final int LISTED_PARAMETERS = 8;
+	private static final String EVIDENCE_TABLE = "binaryrat.writeback.LayoutEvidenceTable";
 	private long revision;
 
 	private record Request(Function function, int parameter, int timeout, int depth, Path output) {
@@ -142,27 +144,32 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 		}
 	}
 
-	/** Opens the new report's evidence table, the next step after a desktop recovery. */
+	/**
+	 * Opens the new report's evidence table, the next step after a desktop recovery. The table
+	 * ships in BinaryRat.jar, so it is loaded by name: the headless verifiers compile this script
+	 * from a checkout {@code -scriptPath} with only the helpers in ghidra_scripts/binaryrat.
+	 */
 	private void showReport(Path output) throws CancelledException {
 		var tool = state.getTool();
-		// Browse Layout Evidence starts in the folder that holds the latest report.
-		Preferences.setProperty(LayoutEvidenceTable.DIRECTORY_PREFERENCE, output.getParent().toString());
-		Preferences.store();
-		if (!LayoutEvidenceTable.supported(tool)) {
-			return;
-		}
 		try {
-			var review = LayoutEvidenceBrowser.read(currentProgram, output, monitor);
-			if (review.rows().isEmpty()) {
-				tool.setStatusInfo("BinaryRat found no exact field accesses. The report is at " + output);
-				return;
+			Class<?> table = Class.forName(EVIDENCE_TABLE, true, ClassLoader.getSystemClassLoader());
+			Object status = table.getMethod("openReport", PluginTool.class, Program.class, Path.class,
+				TaskMonitor.class).invoke(null, tool, currentProgram, output, monitor);
+			if (status != null && tool != null) {
+				tool.setStatusInfo(status.toString());
 			}
-			LayoutEvidenceTable.show(tool, currentProgram, review, monitor);
 		}
-		catch (IOException | IllegalArgumentException failure) {
+		catch (InvocationTargetException failure) {
+			if (failure.getCause() instanceof CancelledException cancelled) {
+				throw cancelled;
+			}
 			// The report is already published; reopen it later with Browse Layout Evidence.
 			printerr("The layout report was written, but its evidence table did not open: " +
-				failure.getMessage());
+				failure.getCause().getMessage());
+		}
+		catch (ReflectiveOperationException | LinkageError missing) {
+			printerr("The layout report was written. Install the BinaryRat extension to open its " +
+				"evidence table: " + missing);
 		}
 	}
 

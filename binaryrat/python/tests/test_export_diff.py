@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import random
+import re
 import tempfile
 import unittest
 
@@ -242,3 +243,79 @@ class ExportDiffTests(unittest.TestCase):
         with self.assertRaisesRegex(ExportError, "changed while"):
             from binaryrat.models import Address
             _patches(self.before, self.after, 1 << 20, {Address("ram", 0x99): (old, new)}, 3)
+
+    @staticmethod
+    def apply_patch(before, patch):
+        """Independent unified-diff applier: context and removals must match exactly."""
+        lines = patch.splitlines()
+        result, cursor, index = [], 0, 2
+        while index < len(lines):
+            header = re.fullmatch(r"@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@", lines[index])
+            assert header is not None, lines[index]
+            start = int(header[1]) - (0 if header[2] == "0" else 1)
+            result += before[cursor:start]
+            cursor, index = start, index + 1
+            while index < len(lines) and not lines[index].startswith("@@ "):
+                tag, text = lines[index][:1], lines[index][1:]
+                if tag in " -":
+                    assert before[cursor] == text, (before[cursor], text)
+                    cursor += 1
+                if tag in " +":
+                    result.append(text)
+                index += 1
+        return result + before[cursor:]
+
+    def test_seeded_patch_fuzz_rebuilds_every_changed_text(self):
+        # Random C-like bodies with inserted, deleted, replaced and reordered lines,
+        # unusual characters, empty bodies and error transitions, at varied context sizes.
+        rng = random.Random(20261120)
+        alphabet = ["  x = y;", "{", "}", "return 0;", "", "\t/* tab */", "if (a) {", "  b++;",
+                    "s = \"\x1b[2J\";", "\u00e9t\u00e9 \U0001f400", "--- not a header", "@@ -1 +1 @@ text"]
+        for case in range(120):
+            old, new = [], []
+            for index in range(rng.randrange(1, 12)):
+                lines = [rng.choice(alphabet) for _ in range(rng.randrange(0, 25))]
+                edited = list(lines)
+                for _ in range(rng.randrange(0, 5)):
+                    action = rng.randrange(4)
+                    position = rng.randrange(len(edited) + 1)
+                    if action == 0:
+                        edited.insert(position, rng.choice(alphabet))
+                    elif edited and action == 1:
+                        del edited[min(position, len(edited) - 1)]
+                    elif edited and action == 2:
+                        edited[min(position, len(edited) - 1)] = rng.choice(alphabet) + " changed"
+                    elif len(edited) > 1:
+                        rng.shuffle(edited)
+                base = row(f"{index * 16 + 16:x}", c="\n".join(lines) + ("\n" if lines else ""))
+                after = dict(base, c="\n".join(edited) + ("\n" if edited else ""))
+                if rng.random() < 0.15:
+                    after.update(c="", completed=False, timed_out=True, error="timed out\nsecond line")
+                if rng.random() < 0.15:
+                    after["prototype"] = "int parse(char *text)"
+                old.append(base)
+                new.append(after)
+            self.write(self.before, old)
+            self.write(self.after, new)
+            context = rng.choice((0, 1, 3, 7))
+            report = compare_exports(self.before, self.after, patch_context=context)
+            by_address = {record["address"]: record for record in new}
+            originals = {record["address"]: record for record in old}
+
+            def text(record):
+                lines = [f"/* prototype: {record['prototype']} */"]
+                lines += [f"/* error: {line} */" for line in record["error"].splitlines()]
+                return lines + record["c"].splitlines()
+
+            patched = 0
+            for change in report["changes"]:
+                key = change["address"]
+                self.assertEqual(change["kind"], "changed")
+                self.assertEqual("patch" in change, bool({"prototype", "c", "error"} & set(change["fields"])))
+                if "patch" in change:
+                    patched += 1
+                    with self.subTest(case=case, address=key, context=context):
+                        self.assertEqual(self.apply_patch(text(originals[key]), change["patch"]),
+                                         text(by_address[key]))
+            unchanged = sum(text(a) == text(b) for a, b in zip(old, new))
+            self.assertEqual(patched + unchanged, len(old))

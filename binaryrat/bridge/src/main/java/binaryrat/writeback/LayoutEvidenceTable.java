@@ -3,6 +3,7 @@
 package binaryrat.writeback;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -21,6 +22,7 @@ import ghidra.app.tablechooser.TableChooserDialog;
 import ghidra.app.util.query.TableService;
 import ghidra.framework.model.DomainObjectListener;
 import ghidra.framework.plugintool.PluginTool;
+import ghidra.framework.preferences.Preferences;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Swing;
@@ -50,6 +52,31 @@ public final class LayoutEvidenceTable {
 		public String toString() {
 			return "+0x" + Integer.toHexString(value);
 		}
+	}
+
+	/**
+	 * Opens a report that was just published for the active Program and remembers its folder for
+	 * Browse Layout Evidence. Recover Layout at Cursor calls this by name: a checkout
+	 * {@code -scriptPath} compiles that script without BinaryRat.jar.
+	 *
+	 * @return a status message when there is nothing to show, or null when the table opened
+	 */
+	public static String openReport(PluginTool tool, Program program, Path report, TaskMonitor monitor)
+			throws IOException, CancelledException {
+		Path folder = report.toAbsolutePath().getParent();
+		if (folder != null) {
+			Preferences.setProperty(DIRECTORY_PREFERENCE, folder.toString());
+			Preferences.store();
+		}
+		if (!supported(tool)) {
+			return "The layout report is at " + report + ". Open it with Browse Layout Evidence.";
+		}
+		Review review = LayoutEvidenceBrowser.read(program, report, monitor);
+		if (review.rows().isEmpty()) {
+			return "BinaryRat found no exact field accesses. The report is at " + report;
+		}
+		show(tool, program, review, monitor);
+		return null;
 	}
 
 	/** Whether a tool has the services the table needs to show rows and navigate. */

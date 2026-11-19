@@ -59,6 +59,34 @@ class LiveProgramInputTests(unittest.TestCase):
             with self.subTest(entry=bad), self.assertRaises(ArgumentTypeError):
                 _parse_function(bad)
 
+    def test_cli_function_parser_fuzz(self):
+        from argparse import ArgumentTypeError
+        import random
+
+        rng = random.Random(20261120)
+        pieces = ["0", "1", "9", "a", "F", "x", "X", "0x", ":", "::", "ram", "name:", "_", ".", "-",
+                  " ", "\t", "\x1b", "\u00e9", "\U0001f400", "main", "ns", "f" * 17, "<", ">"]
+        for _ in range(20000):
+            value = "".join(rng.choice(pieces) for _ in range(rng.randrange(0, 7)))
+            try:
+                kind, parsed = _parse_function(value)
+            except ArgumentTypeError:
+                continue
+            if kind == "name":
+                self.assertTrue(parsed and parsed.isprintable(), value)
+                if not value.startswith("name:"):
+                    self.assertFalse(parsed[0].isdigit() or any(c.isspace() for c in parsed), value)
+            else:
+                space, offset, bare = parsed
+                self.assertEqual(kind, "address")
+                self.assertTrue(0 <= offset < 1 << 64, value)
+                self.assertEqual(bare is not None, space is None and not value[:2].lower() == "0x", value)
+        for _ in range(2000):
+            offset = rng.randrange(1 << 64)
+            space = rng.choice((None, "ram", "overlay_1", "OTHER"))
+            text = (f"{space}:" if space else "") + rng.choice(("0x", "0X", "")) + f"{offset:x}"
+            self.assertEqual(_parse_function(text)[1][:2], (space, offset), text)
+
     def test_missing_project_and_invalid_domain_path(self):
         with TemporaryDirectory() as tmp:
             marker = Path(tmp) / "unknown.gpr"
