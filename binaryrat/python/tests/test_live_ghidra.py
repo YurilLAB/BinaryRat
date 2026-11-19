@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 from queue import Queue
+from random import Random
 import secrets
 import shutil
 import socket
@@ -432,6 +433,101 @@ class LiveGhidraTests(unittest.TestCase):
             self.assertIn("BinaryRat scheduled decompilation failed", failed.stderr)
             self.assertFalse(failed.stdout.strip(), "scheduled failure produced an apparent stock result")
         self.assertEqual(before, self.snapshot())
+
+    def test_instruction_pcode_is_scoped_read_only_and_cancellable(self):
+        import pyghidra
+        from ghidra.framework import Application
+        from ghidra.program.model.listing import FlowOverride
+        from ghidra.program.model.pcode import PcodeOp
+        from ghidra.util.exception import CancelledException
+        from ghidra.util.task import TaskMonitor, TaskMonitorAdapter
+        from java.io import IOException
+        from jpype import JClass
+
+        if Application.getModuleRootDir("BinaryRat") is None:
+            self.skipTest("instruction p-code checks require the BinaryRat extension")
+        read = JClass("binaryrat.desktop.InstructionPcode").read
+        before = self.snapshot()
+        with open_program(self.marker, self.program_path, backend="stock") as view:
+            program = view._program
+            entry = view._native_address(program, self.entry)
+            target = view._native_address(program, self.target)
+            revision = program.getModificationNumber()
+            snapshot = read(program, entry, entry.add(2), revision, TaskMonitor.DUMMY)
+            self.assertEqual(snapshot.instructionAddress(), entry)
+            self.assertIn("CALL", str(snapshot.instruction()).upper())
+            operations = list(map(str, snapshot.operations()))
+            self.assertTrue(any(line.startswith("CALL ") for line in operations), operations)
+            self.assertFalse(snapshot.truncated())
+            self.assertEqual(read(program, entry, entry, revision, TaskMonitor.DUMMY), snapshot)
+            for offset in Random(0xB17).sample(range(6, 1024), 64):
+                with self.subTest(offset=offset), self.assertRaisesRegex(IOException, "outside"):
+                    read(program, entry, entry.add(offset), revision, TaskMonitor.DUMMY)
+            with self.assertRaisesRegex(IOException, "outside"):
+                read(program, target, entry, revision, TaskMonitor.DUMMY)
+            constant = program.getAddressFactory().getConstantSpace().getAddress(1)
+            with self.assertRaisesRegex(IOException, "memory"):
+                read(program, entry, constant, revision, TaskMonitor.DUMMY)
+            with self.assertRaisesRegex(IOException, "changed"):
+                read(program, entry, entry, revision - 1, TaskMonitor.DUMMY)
+            with pyghidra.transaction(program, "Busy Program test"):
+                with self.assertRaisesRegex(IOException, "finish"):
+                    read(program, entry, entry, revision, TaskMonitor.DUMMY)
+            cancelled = TaskMonitorAdapter(True)
+            cancelled.cancel()
+            with self.assertRaises(CancelledException):
+                read(program, entry, entry, program.getModificationNumber(), cancelled)
+            with pyghidra.transaction(program, "Set a temporary branch override"):
+                instruction = program.getListing().getInstructionAt(entry)
+                instruction.setFlowOverride(FlowOverride.BRANCH)
+            self.assertNotIn(PcodeOp.CALL, [op.getOpcode() for op in instruction.getPcode(True)])
+            raw = read(program, entry, entry, program.getModificationNumber(), TaskMonitor.DUMMY)
+            self.assertEqual(raw, snapshot)
+        self.assertEqual(before, self.snapshot())
+
+    def test_instruction_pcode_preserves_the_program_overlay(self):
+        import pyghidra
+        from ghidra.framework import Application
+        from ghidra.program.database import ProgramDB
+        from ghidra.program.flatapi import FlatProgramAPI
+        from ghidra.util.task import TaskMonitor
+        from java.io import IOException
+        from java.lang import Object
+        from jpype import JArray, JByte, JClass
+
+        if Application.getModuleRootDir("BinaryRat") is None:
+            self.skipTest("instruction p-code checks require the BinaryRat extension")
+        read = JClass("binaryrat.desktop.InstructionPcode").read
+        with open_program(self.marker, self.program_path, backend="stock") as template:
+            language = template._program.getLanguage()
+            spec_id = template._program.getCompilerSpec().getCompilerSpecID()
+        spec = language.getCompilerSpecByID(spec_id)
+        consumer = Object()
+        with ExitStack() as cleanup:
+            overlays = []
+            for label in ("local", "foreign"):
+                program = ProgramDB(label, language, spec, consumer)
+                cleanup.callback(program.release, consumer)
+                flat = FlatProgramAPI(program)
+                with pyghidra.transaction(program, "Create overlay fixture"):
+                    start = program.getAddressFactory().getDefaultAddressSpace().getAddress(0x1000)
+                    block = flat.createMemoryBlock("mirror", start, JArray(JByte)([-61]), True)
+                    overlay = block.getStart()
+                    self.assertTrue(flat.disassemble(overlay))
+                    self.assertIsNotNone(flat.createFunction(overlay, "overlay_return"))
+                overlays.append((program, overlay))
+            local, local_entry = overlays[0]
+            foreign_entry = overlays[1][1]
+            self.assertEqual(local_entry, foreign_entry)
+            snapshot = read(local, local_entry, local_entry, local.getModificationNumber(),
+                            TaskMonitor.DUMMY)
+            self.assertTrue(snapshot.instructionAddress().getAddressSpace().isOverlaySpace())
+            self.assertEqual(snapshot.instructionAddress(), local_entry)
+            self.assertTrue(any(str(operation).startswith("RETURN ")
+                                for operation in snapshot.operations()))
+            with self.assertRaisesRegex(IOException, "memory"):
+                read(local, local_entry, foreign_entry, local.getModificationNumber(),
+                     TaskMonitor.DUMMY)
 
     def test_foreground_adapter_reads_a_live_program_with_unsaved_metadata(self):
         import pyghidra

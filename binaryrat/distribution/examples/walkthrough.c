@@ -15,15 +15,21 @@ struct Measurement {
 #define RETAIN_FUNCTION __attribute__((visibility("default"), noinline))
 #endif
 
+RETAIN_FUNCTION int measurement_bias(int value)
+{
+    return value;
+}
+
 RETAIN_FUNCTION int measurement_area(const struct Measurement *measurement)
 {
-    return measurement->count * measurement->width * measurement->height;
+    int area = measurement->count * measurement->width * measurement->height;
+    return measurement_bias(area);
 }
 
 int main(void)
 {
     const struct Measurement readings[] = {{2, 10, 4}, {1, 5, 3}, {3, 7, 2}};
-    int total = 0;
+    int total = measurement_bias(0);
     for (size_t i = 0; i < sizeof(readings) / sizeof(readings[0]); ++i) {
         total += measurement_area(&readings[i]);
     }

@@ -31,6 +31,13 @@
   <li>Under <b>Browse Layout Evidence</b>, open the report and double-click an evidence row to jump to its instruction.</li>
 </ol>
 <p>The sample contains a structure with count, width and height fields. Its <a href="examples/walkthrough.c">source</a> is provided for reference.</p>
+<h2>Correct a call prototype</h2>
+<ol>
+  <li>With <b>Inspect Selected Function</b> open, select the call to <code>measurement_bias</code> inside <code>measurement_area</code> in the Listing.</li>
+  <li>Choose <b>Inspect Instruction P-code</b> to see the raw operations for that instruction.</li>
+  <li>Choose <b>Override Call Prototype</b>, review the signature and calling convention, and select <b>Apply</b>. The change applies to that call site. Use CodeBrowser’s <b>Undo</b> to revert it.</li>
+  <li>Use <b>Open Interactive Decompiler</b> to open the selected function and address for token-level actions such as renaming, retyping, or splitting a variable.</li>
+</ol>
 <h2>Choose analysis depth</h2>
 <ul>
   <li><b>Quick triage</b> defers debug information import, Function ID, signature inference, and PE RTTI where present.</li>

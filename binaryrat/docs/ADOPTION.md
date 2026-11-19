@@ -22,6 +22,8 @@ BinaryRat restores the project's analyzer settings when the pass finishes. Ghidr
 
 Open **Tools → BinaryRat → Inspect Selected Function**. The panel follows the Listing and cancels obsolete requests when you move to another function. For an open Program using the same execution settings, selected functions enter ahead of queued batch work. Running decompilations retain their leases. Requests wait while Program access is busy. The panel shows the current status, a request time limit, and a Cancel control. The engine also limits concurrency based on available CPU and memory.
 
+Select an instruction in the Listing and use **Inspect Instruction P-code** to see its raw operations before flow overrides. **Override Call Prototype** reviews the selected call, then writes a single call-site override after you approve the C signature. BinaryRat preserves existing overrides and uses CodeBrowser’s native undo. **Open Interactive Decompiler** takes the same Listing address into the interactive view so you can select a variable or field token to edit.
+
 Scheduled headless exports, the desktop function panel, and the scheduled Python and CLI backends use the Java decompilation service. Set `BINARYRAT_CACHE_DIR` to enable persistent decompilation caching and let the native engine own that directory. Separate processes that need concurrent access can use separate cache directories. The Python service opens saved projects read-only. A Python script already running with a live Ghidra Program can use `decompile_program` with that Program. [Python and CLI guide](../python/README.md)
 
 ## Keep the workflows your analysts know

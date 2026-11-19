@@ -15,6 +15,7 @@ BinaryRat is an open-source reverse-engineering project for Linux and Windows, b
 - **Layout recovery in CodeBrowser** examines a function parameter at the cursor and lets you jump from a proposed field to the load or store that supports it.
 - **C++ recovery** reports Itanium and MSVC class relationships and vtables.
 - **Reviewed type creation** lets an analyst approve a new structure with provenance and native Ghidra undo.
+- **Call-site corrections** let you inspect raw instruction p-code and apply a reviewed prototype to one call with native undo.
 - **Desktop and scripting access** provides BinaryRat actions in CodeBrowser, headless exports, and typed Python access through PyGhidra.
 - **BinaryRat analyst tools** compare two decompiler exports with `binaryrat-diff` and show which instructions support a proposed field with `binaryrat-explain`. Both work offline on saved reports.
 

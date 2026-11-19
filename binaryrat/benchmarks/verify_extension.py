@@ -120,6 +120,7 @@ def main() -> None:
         with ZipFile(io.BytesIO(package.read("BinaryRat/lib/BinaryRat.jar"))) as library:
             if not {"binaryrat/writeback/ProtectedLayoutWriteBack.class",
                     "binaryrat/writeback/LayoutEvidenceBrowser.class",
+                    "binaryrat/writeback/CallPrototypeOverride.class",
                     "binaryrat/analysis/AnalysisProfiles.class",
                     "binaryrat/DecompilationSession.class",
                     "binaryrat/RttiEvidence.class",
@@ -173,6 +174,17 @@ def main() -> None:
             raise RuntimeError("installed native engine is missing or differs from the archive")
         admission_proof = verify_admission_queue(args.ghidra.resolve(),
                                                  installed[0].parents[2] / "lib/BinaryRat.jar", output)
+        correction_log = output / "call-prototype-override.log"
+        correction = measured_run(
+            [str(headless), str(root), "call-correction", "-scriptPath", str(writeback_scripts),
+             "-preScript", "BinaryRatCallOverrideProof.java", "-deleteProject"],
+            correction_log, 120, environment)
+        correction_text = correction_log.read_text(encoding="utf-8", errors="replace")
+        correction_cases = re.findall(r"BINARYRAT_CALL_OVERRIDE_OK malformed_cases=(\d+)", correction_text)
+        if correction["returncode"] or len(correction_cases) != 1 or "REPORT SCRIPT ERROR" in correction_text:
+            raise RuntimeError(f"packaged call-site correction proof failed (see {correction_log})")
+        correction_proof = {"passed": True, "malformed_signature_cases": int(correction_cases[0]),
+                            "log": correction_log.name, "wall_seconds": correction["wall_seconds"]}
 
         proof = check_persistent_cache(headless, fixture, None, "installed", output, 2, 300,
                                        environment)
@@ -281,7 +293,8 @@ def main() -> None:
               "stock_parity_and_persistence": proof, "packaged_layout_evidence": layout_proof,
               "packaged_layout_browser": browse_proof, "layout_parser": parser_proof,
               "protected_layout_writeback": writeback_proof, "shared_decompilation": service_proof,
-              "interactive_admission": admission_proof, "analysis_profiles": profiles_proof}
+              "interactive_admission": admission_proof, "analysis_profiles": profiles_proof,
+              "call_site_correction": correction_proof}
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Installed BinaryRat extension passed stock parity and persistence: {report_path}")
 

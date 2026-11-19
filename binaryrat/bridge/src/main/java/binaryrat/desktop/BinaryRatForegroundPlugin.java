@@ -45,7 +45,7 @@ import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitorAdapter;
 
-/** A read-only view of the selected function, backed by the shared decompilation service. */
+/** Inspect the selected function and review corrections from its Listing context. */
 @PluginInfo(
     status = PluginStatus.RELEASED,
     packageName = "BinaryRat",
@@ -72,6 +72,7 @@ public class BinaryRatForegroundPlugin extends ProgramPlugin {
         DecompilationSession.DEFAULT_TIMEOUT_SECONDS, 1));
     private final JButton cancel = new JButton("Cancel");
     private final Provider provider;
+    private final AnalystCorrections corrections;
     private final DomainObjectListener changed = event -> SwingUtilities.invokeLater(
         () -> refreshIfChanged());
 
@@ -110,7 +111,11 @@ public class BinaryRatForegroundPlugin extends ProgramPlugin {
         controls.add(progress);
         panel.add(controls, BorderLayout.NORTH);
         panel.add(new JScrollPane(output), BorderLayout.CENTER);
-        panel.add(status, BorderLayout.SOUTH);
+        corrections = new AnalystCorrections(tool, this::correctionSelection);
+        var information = new JPanel(new BorderLayout());
+        information.add(status, BorderLayout.NORTH);
+        information.add(corrections, BorderLayout.SOUTH);
+        panel.add(information, BorderLayout.SOUTH);
         display("Open a program and select a function.", "", false);
         provider = new Provider();
         provider.addToTool();
@@ -181,6 +186,7 @@ public class BinaryRatForegroundPlugin extends ProgramPlugin {
     protected void locationChanged(ProgramLocation location) {
         if (watching != null) {
             select(location, false);
+            corrections.updateActions();
         }
     }
 
@@ -191,6 +197,7 @@ public class BinaryRatForegroundPlugin extends ProgramPlugin {
         if (watching != null) {
             watching.removeListener(changed);
         }
+        corrections.clearStatus();
         stop("Select a function in the listing.");
         replaceWork(this::closeSession);
         watching = program;
@@ -214,6 +221,20 @@ public class BinaryRatForegroundPlugin extends ProgramPlugin {
         if (watching != null) {
             select(tool.getService(CodeViewerService.class).getCurrentLocation(), force);
         }
+    }
+
+    private AnalystCorrections.Selection correctionSelection() {
+        if (disposed || watching == null || scope == null || pending != null ||
+            watching.isClosed() || scope.revision() != watching.getModificationNumber()) {
+            return null;
+        }
+        var location = tool.getService(CodeViewerService.class).getCurrentLocation();
+        if (location == null || location.getProgram() != watching || location.getAddress() == null ||
+            !scope.body().contains(location.getAddress())) {
+            return null;
+        }
+        return new AnalystCorrections.Selection(watching, scope.entry(), location.getAddress(),
+            scope.revision());
     }
 
     private void select(ProgramLocation location, boolean force) {
@@ -266,6 +287,7 @@ public class BinaryRatForegroundPlugin extends ProgramPlugin {
         output.setCaretPosition(0);
         cancel.setEnabled(busy);
         progress.setVisible(busy);
+        corrections.updateActions();
     }
 
     private boolean accepts(Request request) {
@@ -297,6 +319,7 @@ public class BinaryRatForegroundPlugin extends ProgramPlugin {
             return;
         }
         Program program = request.program;
+        Scope resolvedScope = null;
         try {
             if (sessionProgram != program || sessionRevision != request.revision) {
                 closeSession();
@@ -324,8 +347,10 @@ public class BinaryRatForegroundPlugin extends ProgramPlugin {
             var body = function.getBody();
             // Bound the navigation snapshot for highly fragmented functions. It must be
             // safe to test membership on the EDT without reading the Program database.
-            var resolved = new Scope(request.revision, body.getNumAddressRanges() <= 4096 ?
+            var resolved = new Scope(request.revision, function.getEntryPoint(),
+                body.getNumAddressRanges() <= 4096 ?
                 new AddressSet(body) : new AddressSet(request.address));
+            resolvedScope = resolved;
             String label = function.getName() + " at " + function.getEntryPoint();
             SwingUtilities.invokeLater(() -> {
                 if (accepts(request)) {
@@ -364,7 +389,7 @@ public class BinaryRatForegroundPlugin extends ProgramPlugin {
             closeSession();
             if (!request.obsolete && !(failure instanceof CancelledException)) {
                 String detail = failure.getMessage();
-                publish(request, null, "Foreground decompilation failed. " +
+                publish(request, resolvedScope, "Foreground decompilation failed. " +
                     (detail == null ? failure.getClass().getSimpleName() : compact(detail, 240)), "");
             }
         }
@@ -403,7 +428,7 @@ public class BinaryRatForegroundPlugin extends ProgramPlugin {
         super.dispose();
     }
 
-    private record Scope(long revision, AddressSetView body) {
+    private record Scope(long revision, Address entry, AddressSetView body) {
     }
 
     private static final class Request {

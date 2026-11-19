@@ -59,7 +59,8 @@ def verify(bundle: Path, output: Path) -> None:
         classes = work / "classes"
         classes.mkdir()
         classpath = os.pathsep.join(str(path / "*") for path in [
-            *sorted((libraries / "Framework").glob("*/lib")), libraries / "Features/Base/lib"])
+            *sorted((libraries / "Framework").glob("*/lib")), libraries / "Features/Base/lib",
+            libraries / "Features/Decompiler/lib"])
         run([str(jdk / f"javac{suffix}"), "-proc:none", "-classpath", classpath, "-d",
              str(classes), str(HERE / "tests/WorkspaceProbe.java")], output / "javac.log", env, 60)
         run([str(jdk / f"jar{suffix}"), "--create", "--file", str(jar), "-C", str(classes), "."],
@@ -75,9 +76,10 @@ def verify(bundle: Path, output: Path) -> None:
             "distributionfixture.WorkspaceProbe", str(work), example.name, str(report)],
             output / "desktop.log", env, 240)
         if (result.count("BINARYRAT_WORKSPACE_OK") != 1 or
+                result.count("BINARYRAT_WORKSPACE_CORRECTIONS_OK") != 1 or
                 'Exception in thread "AWT-EventQueue' in result):
             raise RuntimeError(f"Invalid bundled workspace evidence. See {output / 'desktop.log'}")
-    print(f"Bundled CodeBrowser and native layout recovery passed. Evidence in {report}")
+    print(f"Bundled CodeBrowser, layout recovery, and analyst corrections passed. Evidence in {report}")
 
 
 def main() -> None:
