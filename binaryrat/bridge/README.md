@@ -189,6 +189,10 @@ reason, and calls redirected only in p-code are not followed. The report's
 `analysis_mode` is `read_only_summary_layout_evidence`; the evidence table and
 reviewed structure creation read depth-mode reports only. Headless only; the
 summary, decompile, p-code, edge and evidence limits fail closed.
+A call is followed only when the decompiler shows its argument; a register
+passed through unchanged in hand-written or optimized code can hide it.
+The script, PyGhidra (`ProgramView.solve_layout`) and the `binaryrat-live`
+service share one Java service, `binaryrat.SummaryLayouts`.
 [Summary verification](../benchmarks/verify_summary_layout.py)
 
 `union_candidates` highlights exact loads at the same offset whose independently

@@ -122,7 +122,8 @@ def main() -> None:
                     "binaryrat/writeback/LayoutEvidenceBrowser.class",
                     "binaryrat/analysis/AnalysisProfiles.class",
                     "binaryrat/DecompilationSession.class",
-                    "binaryrat/RttiEvidence.class"} <= set(library.namelist()):
+                    "binaryrat/RttiEvidence.class",
+                    "binaryrat/SummaryLayouts.class"} <= set(library.namelist()):
                 raise RuntimeError("extension is missing a shared Java service")
         for name in ("LICENSE", "NOTICE"):
             if package.read(f"BinaryRat/{name}") != (PROJECT / name).read_bytes():

@@ -14,6 +14,7 @@ from threading import Event, Lock, Thread
 from typing import Any, Generic, Literal, TypeVar
 
 from .models import Address
+from .summary_layout import SummaryLayoutReport, decode_summary_report
 
 _T = TypeVar("_T")
 _MAX_PAGE_SIZE = 1000
@@ -24,12 +25,19 @@ _DECOMPILER_PAYLOAD_MB = 4
 _OFFSET_MASK = (1 << 64) - 1
 _STARTUP_LOCK = Lock()
 _SCHEDULED_TIMEOUT_SECONDS = 86_400
+# binaryrat.SummaryLayouts limits: summaries per run and seconds per decompile.
+_MAX_SUMMARIES = 256
+_MAX_SUMMARY_TIMEOUT_SECONDS = 600
 
 DecompilationBackend = Literal["auto", "scheduled", "stock"]
 
 
 class LiveProgramError(RuntimeError):
     """A live Program view cannot satisfy a read."""
+
+
+class LayoutRecoveryError(LiveProgramError):
+    """The Java summary layout service refused or failed a recovery."""
 
 
 class StaleProgramError(LiveProgramError):
@@ -464,6 +472,52 @@ class ProgramView:
                 str(result.getErrorMessage() or ""),
             )
             return ProgramDecompilationRun(output, "stock", None)
+
+
+    def solve_layout(
+        self, entry: Address, parameter_index: int = 0, *, max_summaries: int = 32,
+        timeout_seconds: int = 30,
+    ) -> SummaryLayoutReport:
+        """Recover summary layout evidence for one pointer parameter, read-only.
+
+        Runs the extension's Java ``binaryrat.SummaryLayouts`` service in this JVM, the
+        same code as ``BinaryRatSolveLayouts.java``: each reached function parameter is
+        decompiled once under a memory-watched lease and the engine's summary solver
+        follows calls through recursive cycles. The selected parameter is asserted to
+        point at the object's start. Requires the BinaryRat extension.
+        """
+        for name, value, low, high in (("parameter_index", parameter_index, 0, 65_535),
+                                       ("max_summaries", max_summaries, 1, _MAX_SUMMARIES),
+                                       ("timeout_seconds", timeout_seconds, 1, _MAX_SUMMARY_TIMEOUT_SECONDS)):
+            if type(value) is not int or not low <= value <= high:
+                raise ValueError(f"{name} must be an integer from {low} to {high}")
+        if self._scheduled_service is None:
+            raise LiveProgramError("Summary layouts require the BinaryRat extension")
+        from ghidra.util.exception import CancelledException
+        from jpype import JClass, JException
+
+        with self._read() as program:
+            function = program.getFunctionManager().getFunctionAt(
+                self._native_address(program, entry)
+            )
+            if function is None:
+                raise LookupError(f"no function at {entry}")
+            with _monitor(self._cancel) as monitor:
+                try:
+                    text = str(JClass("binaryrat.SummaryLayouts").recoverJson(
+                        program, function, parameter_index, timeout_seconds, max_summaries, monitor))
+                except CancelledException as cause:
+                    raise CancelledError("BinaryRat summary layout cancelled") from cause
+                except JException as cause:
+                    if program.isClosed() or int(program.getModificationNumber()) != self._info.revision:
+                        raise StaleProgramError("Ghidra Program changed during layout recovery") from cause
+                    raise LayoutRecoveryError(f"BinaryRat summary layout failed: {cause}") from cause
+        report = decode_summary_report(text)
+        digest = self._info.executable_sha256
+        if report.revision != self._info.revision or (
+                digest is not None and report.program_id != "sha256:" + digest.lower()):
+            raise StaleProgramError("summary layout report does not describe this Program revision")
+        return report
 
 
 def _start(install_dir: Path | None, max_heap_mb: int | None) -> None:

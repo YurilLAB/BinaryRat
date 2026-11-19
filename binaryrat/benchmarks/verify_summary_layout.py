@@ -15,9 +15,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 from verify_ghidra import PROJECT, measured_run
+
+sys.path.insert(0, str(PROJECT / "binaryrat/python/src"))
+from binaryrat.summary_layout import explain_summary, parse_summary_report  # noqa: E402
 
 LANGUAGES = {62: "x86:LE:64:default", 183: "AARCH64:LE:64:v8A"}
 MODE = "read_only_summary_layout_evidence"
@@ -114,6 +118,10 @@ def check_results(directory: Path, language: str, truth: dict) -> dict:
     reports["redirected"] = json.loads((directory / "redirected.json").read_text(encoding="utf-8"))
     for name, report in reports.items():
         check_report(report, name, language)
+        # The Python DTOs re-check every path step of the Java output independently.
+        typed = parse_summary_report(report)
+        if [(f.offset, f.width) for f in typed.fields] != sorted(fields(report)):
+            raise RuntimeError(f"{name}: typed report disagrees with the raw fields")
     width = truth["width"]
     payload = (truth["payload"], width)
 
@@ -152,12 +160,16 @@ def check_results(directory: Path, language: str, truth: dict) -> dict:
         if fields(report) != {(truth["tag"], width), payload}:
             raise RuntimeError(f"{name}: cycle evidence lost or invented: {fields(report)}")
 
+    explained = " | ".join(explain_summary(parse_summary_report(shifted)))
+    if f"+{element}" not in explained or "layout_shift_middle" not in explained:
+        raise RuntimeError("the explained shifted path does not show the shifted call")
+
     redirected = reports["redirected"]
     names = set(named_states(redirected))
     if "layout_leaf" in names or "layout_alternate" in names or fields(redirected):
         raise RuntimeError("a call redirected only in p-code was followed")
     return {"language_id": language, "cases": sorted(reports), "shifted_offset": element,
-            "consistent_cycles": 3, "fixture": truth}
+            "consistent_cycles": 3, "fixture": truth, "typed_reports_validated": len(reports)}
 
 
 def verify(args: argparse.Namespace) -> dict:

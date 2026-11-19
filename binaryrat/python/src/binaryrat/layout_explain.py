@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .summary_layout import ANALYSIS_MODE, explain_summary, parse_summary_report
+
 # Layout extraction bounds a report to 4,096 memory accesses. Also bound the
 # serialized input before decoding strings and building the evidence index.
 _MAX_BYTES = 8 * 1024 * 1024
@@ -256,7 +258,8 @@ def explain(report: dict, offset: int | None = None) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="binaryrat-explain",
                                      description="Inspect the recorded p-code behind a layout proposal.")
-    parser.add_argument("report", type=Path, help="JSON report from BinaryRatRecoverLayouts.java")
+    parser.add_argument("report", type=Path,
+                        help="JSON report from BinaryRatRecoverLayouts.java or BinaryRatSolveLayouts.java")
     parser.add_argument("--offset", type=lambda value: int(value, 0),
                         help="show proposals and possible accesses starting at this byte offset (decimal or 0x hex)")
     args = parser.parse_args(argv)
@@ -269,7 +272,11 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("layout report exceeds 8 MiB")
         report = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object,
                             parse_constant=_invalid_constant, parse_int=_parse_integer)
-        for line in explain(report, args.offset):
+        if isinstance(report, dict) and report.get("analysis_mode") == ANALYSIS_MODE:
+            lines = explain_summary(parse_summary_report(report), args.offset)
+        else:
+            lines = explain(report, args.offset)
+        for line in lines:
             print(line)
     except (ValueError, OSError, RecursionError) as error:
         print(f"binaryrat-explain: {error}", file=sys.stderr)

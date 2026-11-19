@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 import json
 from itertools import chain
 import math
@@ -22,6 +22,7 @@ from .live import (
     _MAX_PAGE_OFFSET,
     CrossReference,
     DataTypeInfo,
+    LayoutRecoveryError,
     LiveProgramError,
     Page,
     ProgramDecompilation,
@@ -32,6 +33,7 @@ from .live import (
     open_program,
 )
 from .models import Address
+from .summary_layout import SummaryLayoutReport, parse_summary_report
 
 LIVE_PROTOCOL_VERSION = 1
 READY_PREFIX = "binaryrat-live "
@@ -41,6 +43,8 @@ _MAX_REQUEST = 16 * 1024
 _MAX_RESPONSE = 1024 * 1024
 _IO_TIMEOUT = 5.0
 _MAX_DECOMPILE_SECONDS = 60
+# A service request decompiles at most this many function parameters.
+_MAX_SERVICE_SUMMARIES = 64
 _T = TypeVar("_T")
 
 
@@ -253,6 +257,19 @@ class LiveClient:
         item = self._request("decompile", entry=asdict(entry), timeout_seconds=timeout_seconds)
         return ProgramDecompilation(**(item | {"function": _function(item["function"])}))
 
+    def solve_layout(
+        self, entry: Address, parameter_index: int = 0, *, max_summaries: int = 32,
+        timeout_seconds: int = 30,
+    ) -> SummaryLayoutReport:
+        """Summary layout evidence from the served Program, validated before it is returned.
+
+        The whole recovery must finish within this client's timeout.
+        """
+        return parse_summary_report(self._request(
+            "solve_layout", entry=asdict(entry), parameter_index=parameter_index,
+            max_summaries=max_summaries, timeout_seconds=timeout_seconds,
+        ))
+
 
 class _Service(TCPServer):
     """Serial, bounded requests over IPv4 loopback."""
@@ -271,6 +288,8 @@ class _Service(TCPServer):
             "data_types": (view.data_types, None),
             "data_type": (view.data_type, None),
             "decompile": (view.decompile, "entry"),
+            # The validated report document is sent unchanged.
+            "solve_layout": (lambda **arguments: view.solve_layout(**arguments).document, "entry"),
         }
         super().__init__((_HOST, 0), _Connection)
 
@@ -305,9 +324,14 @@ class _Service(TCPServer):
             if not isinstance(address, dict) or set(address) != {"space", "offset"}:
                 raise LiveRequestError("bad_request")
             arguments = arguments | {address_key: Address(**address)}
-        if method == "decompile":
+        if method in ("decompile", "solve_layout"):
             timeout = arguments.get("timeout_seconds", 30)
             if type(timeout) is not int or not 1 <= timeout <= _MAX_DECOMPILE_SECONDS:
+                raise LiveRequestError("bad_request")
+        if method == "solve_layout":
+            summaries = arguments.get("max_summaries", 32)
+            if (type(summaries) is not int or not 1 <= summaries <= _MAX_SERVICE_SUMMARIES or
+                    not set(arguments) <= {"entry", "parameter_index", "max_summaries", "timeout_seconds"}):
                 raise LiveRequestError("bad_request")
         result = operation(**arguments)
         if isinstance(result, ProgramDecompilation) and len(result.c) >= _MAX_RESPONSE:
@@ -333,7 +357,7 @@ class _Connection(BaseRequestHandler):
             result = self.server.reply(request)
             try:
                 response = _encode(version | {
-                    "result": asdict(result) if result is not None else None
+                    "result": asdict(result) if is_dataclass(result) else result
                 }, _MAX_RESPONSE)
             except LiveProtocolError:
                 raise LiveRequestError("response_too_large") from None
@@ -341,6 +365,8 @@ class _Connection(BaseRequestHandler):
             response = _encode(version | {"error": cause.code}, _MAX_RESPONSE)
         except StaleProgramError:
             response = _encode(version | {"error": "stale_program"}, _MAX_RESPONSE)
+        except LayoutRecoveryError:
+            response = _encode(version | {"error": "layout_failed"}, _MAX_RESPONSE)
         except LiveProgramError:
             response = _encode(version | {"error": "program_unavailable"}, _MAX_RESPONSE)
         except LookupError:

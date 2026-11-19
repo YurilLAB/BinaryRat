@@ -65,7 +65,8 @@ integration harness compares cold, warm, and reopened exports against fresh
 decompilation. A native summary solver propagates per-parameter layout evidence
 over direct calls through strongly connected components, and withholds cycles
 whose pointer offsets drift. A local PyGhidra service keeps a read-only JVM open
-for scripts.
+for scripts; it and the headless script recover summary layouts through one Java
+service and return a validated, versioned report.
 The headless review service can create a new structure after approval through
 a coordinated native transaction. Shared GUI and Python review, applying
 types to existing targets, and per-function memory estimates remain open.

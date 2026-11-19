@@ -32,6 +32,11 @@ report’s root function and parameter. A report can include overlapping fields
 and bounded indexed accesses. Field support counts measure observed evidence.
 [Generate the input reports](../bridge/README.md#read-only-layout-evidence)
 
+It also reads summary reports from `BinaryRatSolveLayouts.java` or
+`solve_layout` (below) and prints the call path behind each field, for example
+`layout_shift -> layout_shift_middle (ram:10113d, +0) -> layout_leaf (ram:10111c, +24)`,
+with recursive call cycles and refused calls.
+
 ## Python API
 
 ```python
@@ -123,6 +128,19 @@ status. Set `BINARYRAT_CACHE_DIR` before launching Python to persist scheduled
 results. Use a directory dedicated to one running engine. Reopening a saved
 Program can reuse persisted results after replay checks.
 
+`view.solve_layout(entry, parameter_index=0, max_summaries=32, timeout_seconds=30)`
+recovers summary layout evidence through the extension's Java
+`binaryrat.SummaryLayouts` service, the same code as `BinaryRatSolveLayouts.java`.
+It asserts that the parameter points at an object's start, decompiles each
+reached function parameter once and lets the engine follow calls through
+recursion. The result is a `SummaryLayoutReport`: fields, union candidates,
+call components, refused calls, and `call_path(state)` or
+`evidence_for(offset, width)` for provenance. Every report is validated before
+it is returned, and `load_summary_report(path)` applies the same checks to a
+saved file. A report changed after recovery, a missing extension, or a
+recovery the service refuses raises `StaleProgramError`, `LiveProgramError` or
+`LayoutRecoveryError`.
+
 ## Decompile from the CLI
 
 `binaryrat-decompile` is available after installing the wheel. With PyGhidra
@@ -181,7 +199,9 @@ Program context. The ready line identifies the backend. Set `--backend scheduled
 to require the BinaryRat extension. The service processes requests serially, limits request
 packets to 16 KiB and responses to 1 MiB, caps listing offsets at 100,000,
 and passes a maximum 60-second function timeout to Ghidra. Exact-address and type lookups are
-available independently of the listing offset.
+available independently of the listing offset. `client.solve_layout(entry)` returns the same
+validated report as `view.solve_layout`, at most 64 summaries per request; give the client a
+timeout that covers the whole recovery. A refused recovery is the error `layout_failed`.
 The daemon starts with a 1,024 MiB JVM heap ceiling. Use `--max-heap-mb`
 to configure it.
 It closes its Program and listener after the idle interval or on Ctrl+C.

@@ -19,7 +19,10 @@ import tracemalloc
 import unittest
 from unittest.mock import patch
 
-from binaryrat import Address, LiveProgramError, Page, StaleProgramError, decompile_program, open_program
+from binaryrat import (
+    Address, LayoutRecoveryError, LiveProgramError, Page, StaleProgramError, decompile_program,
+    open_program,
+)
 from binaryrat.decompile_cli import _parse_entry
 from binaryrat.live import ProgramView, _monitor
 from binaryrat.live_service import (
@@ -184,6 +187,43 @@ class LiveGhidraTests(unittest.TestCase):
                 program.getDataTypeManager().addDataType(
                     structure, DataTypeConflictHandler.DEFAULT_HANDLER
                 )
+            results.save(pyghidra.task_monitor())
+
+        # reader: mov eax,[rdi+4]; ret
+        # holder: sub rsp,8; add rdi,16; call reader; add rsp,8; ret
+        # walker, as gcc -O0 emits it: the argument is reloaded into RDI before the self call,
+        # so the decompiler shows walker(param_1). (A pass-through RDI shows walker().)
+        cls.layout_path = "/layout"
+        layout_image = bytes.fromhex(
+            "8b4704 c3"
+            "4883ec08 4883c710 e8efffffff 4883c408 c3"
+            "55 4889e5 4883ec10 48897df8 488b45f8 8b4008 85c0 740d 488b45f8 4889c7 e8ddffffff 90 c9 c3"
+        )
+        layout_file = cls.marker.with_name("layout.raw")
+        layout_file.write_bytes(layout_image)
+        with ExitStack() as cleanup:
+            project = pyghidra.open_project(cls.marker.parent, cls.marker.stem)
+            cleanup.callback(project.close)
+            # gcc (SysV): the first pointer argument is RDI, as the bytes above assume.
+            results = (pyghidra.program_loader().source(str(layout_file)).name("layout")
+                       .loaders(BinaryLoader.class_).language("x86:LE:64:default").compiler("gcc")
+                       .project(project).projectFolderPath("/").load())
+            cleanup.callback(results.close)
+            consumer = Object()
+            program = results.getPrimaryDomainObject(consumer)
+            cleanup.callback(program.release, consumer)
+            flat = FlatProgramAPI(program)
+            base = program.getMinAddress()
+            entries = {"reader": base, "holder": base.add(4), "walker": base.add(22)}
+            cls.reader, cls.holder, cls.walker = (
+                Address("ram", int(entries[name].getOffset())) for name in ("reader", "holder", "walker"))
+            cls.holder_call = Address("ram", cls.holder.offset + 8)
+            with pyghidra.transaction(program, "Create summary layout fixture"):
+                for name, entry in entries.items():
+                    if flat.getInstructionAt(entry) is None and not flat.disassemble(entry):
+                        raise AssertionError(f"layout fixture {name} did not disassemble")
+                    if not flat.createFunction(entry, name):
+                        raise AssertionError(f"layout fixture {name} was not created")
             results.save(pyghidra.task_monitor())
 
     def snapshot(self):
@@ -430,6 +470,72 @@ class LiveGhidraTests(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
         with open_program(self.marker, self.program_path, backend="stock") as view:
             self.assertEqual(view.function_at(self.target).name, "answer")
+
+    def test_summary_layouts_through_the_shared_service(self):
+        from ghidra.framework import Application
+
+        before = self.snapshot()
+        if Application.getModuleRootDir("BinaryRat") is None:
+            with open_program(self.marker, self.layout_path) as view:
+                with self.assertRaisesRegex(LiveProgramError, "require the BinaryRat extension"):
+                    view.solve_layout(self.holder)
+            self.skipTest("summary layouts require the BinaryRat extension")
+        with open_program(self.marker, self.layout_path) as view:
+            report = view.solve_layout(self.holder)
+            self.assertEqual((report.function, report.revision), (self.holder, view.info.revision))
+            self.assertEqual([(item.offset, item.width) for item in report.fields], [(20, 4)])
+            self.assertTrue(report.complete)
+            reached = next(index for index, state in enumerate(report.states)
+                           if report.summary(state.summary).function == self.reader)
+            self.assertEqual([(edge.offset, edge.site) for edge in report.call_path(reached)],
+                             [(16, self.holder_call)])
+            walk = view.solve_layout(self.walker)
+            self.assertEqual([(item.consistent, len(item.summaries)) for item in walk.components], [(True, 1)])
+            self.assertEqual([(item.offset, item.width) for item in walk.fields], [(8, 4)])
+            self.assertTrue(walk.complete)
+            with self.assertRaisesRegex(LayoutRecoveryError, "summary layout failed"):
+                view.solve_layout(self.holder, 5)
+            for bad in (dict(max_summaries=0), dict(max_summaries=257), dict(timeout_seconds=601),
+                        dict(parameter_index=-1), dict(parameter_index=True)):
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
+                    view.solve_layout(self.holder, **bad)
+            with self.assertRaises(LookupError):
+                view.solve_layout(Address("ram", self.holder.offset + 1))
+        self.assertEqual(before, self.snapshot())
+
+        executable = shutil.which("binaryrat-live")
+        runner = [executable] if executable is not None else [sys.executable, "-m", "binaryrat.live_service"]
+        process = subprocess.Popen(
+            [*runner, str(self.marker), self.layout_path, "--install-dir", str(self.install),
+             "--idle-timeout", "30", "--max-heap-mb", "512"],
+            stdout=subprocess.PIPE, text=True, encoding="utf-8",
+        )
+        try:
+            line = process.stdout.readline()
+            while line and not line.startswith(READY_PREFIX):
+                line = process.stdout.readline()
+            client = LiveClient(LiveEndpoint.from_ready_line(line), timeout=300)
+            self.assertEqual(client.solve_layout(self.holder), report)
+            self.assertEqual(client.solve_layout(self.walker, max_summaries=4), walk)
+            with self.assertRaisesRegex(LiveRequestError, "layout_failed"):
+                client.solve_layout(self.holder, 5)
+            for bad in (dict(max_summaries=65), dict(timeout_seconds=61), dict(max_summaries="8")):
+                with self.subTest(bad=bad), self.assertRaisesRegex(LiveRequestError, "bad_request"):
+                    client.solve_layout(self.holder, **bad)
+            with self.assertRaisesRegex(LiveRequestError, "bad_request"):
+                client._request("solve_layout", entry=dict(space="ram", offset=self.holder.offset),
+                                follow_depth=4)
+            with self.assertRaisesRegex(LiveRequestError, "not_found"):
+                client.solve_layout(Address("ram", self.holder.offset + 1))
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            process.stdout.close()
+        self.assertEqual(before, self.snapshot())
 
     def test_live_service_reuses_jvm_across_independent_clients(self):
         from ghidra.framework import Application
