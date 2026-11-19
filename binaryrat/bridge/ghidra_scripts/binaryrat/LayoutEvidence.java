@@ -28,6 +28,7 @@ public final class LayoutEvidence {
 	public static final int MAXIMUM_ACCESSES = 4_096;
 	public static final int MAXIMUM_OPS = 32_768;
 	private static final int MAXIMUM_FORWARDING_CALLS = 32;
+	public static final int MAXIMUM_SUMMARY_CALLS = 64;
 	private static final int MAXIMUM_DEFINITION_DEPTH = 32;
 
 	public record Access(Address address, long pcodeOrder, String operation, long offset,
@@ -40,6 +41,20 @@ public final class LayoutEvidence {
 
 	public record Capture(List<Access> accesses, List<ForwardedCall> calls, int unresolvedAccesses,
 			int pcodeOps) {
+	}
+
+	/**
+	 * A direct call whose argument is the root parameter plus an exact constant: the callee's
+	 * parameter then equals the caller's parameter plus {@code offset}. {@code argumentStorage}
+	 * is where the high p-code value lives, which need not be the passing register (copy
+	 * propagation can leave it in the register that computed it).
+	 */
+	public record SummaryCall(Address address, long pcodeOrder, Address callee, int argumentIndex,
+			long offset, Address argumentStorage) {
+	}
+
+	/** Summary calls, or why this function's calls cannot be followed. */
+	public record SummaryCalls(List<SummaryCall> calls, String refusal) {
 	}
 
 	// Zero stride means the offset is constant. A nonzero stride describes a bounded
@@ -137,6 +152,96 @@ public final class LayoutEvidence {
 		}
 		Varnode input = entryInput(program, symbols, 0);
 		return input == null || !input.getAddress().isRegisterAddress() ? null : input.getAddress();
+	}
+
+	/**
+	 * Returns the register holding a default-prototype parameter on entry, or null when the
+	 * parameter is missing, not pointer-sized, not a register input, or the prototype is custom.
+	 */
+	public static Address parameterStorage(Program program, HighFunction high, int parameterIndex) {
+		LocalSymbolMap symbols = high.getLocalSymbolMap();
+		if (parameterIndex < 0 || parameterIndex >= symbols.getNumParams() ||
+				!hasDefaultPrototype(program, high)) {
+			return null;
+		}
+		Varnode input = entryInput(program, symbols, parameterIndex);
+		return input == null || !input.getAddress().isRegisterAddress() ? null : input.getAddress();
+	}
+
+	/**
+	 * Lists direct calls that pass the selected parameter plus an exact constant. Every argument
+	 * position is considered, so one call can contribute several edges; a CALL input's position
+	 * names the callee parameter, as in Ghidra's FillOutStructureHelper. The caller must use the
+	 * default prototype and each call's decoded flow must match its p-code target.
+	 */
+	public static SummaryCalls summaryCalls(Program program, HighFunction high, int parameterIndex,
+			TaskMonitor monitor) throws IOException, CancelledException {
+		LocalSymbolMap symbols = high.getLocalSymbolMap();
+		Varnode root = parameterIndex >= 0 && parameterIndex < symbols.getNumParams() ?
+			entryInput(program, symbols, parameterIndex) : null;
+		if (root == null) {
+			throw new IOException("selected parameter is not a pointer-sized entry input");
+		}
+		if (!hasDefaultPrototype(program, high)) {
+			return new SummaryCalls(List.of(), "caller does not use the default prototype");
+		}
+		AddressSpace space = program.getAddressFactory().getDefaultAddressSpace();
+		Function function = high.getFunction();
+		List<SummaryCall> calls = new ArrayList<>();
+		for (PcodeBlockBasic block : high.getBasicBlocks()) {
+			monitor.checkCancelled();
+			if (block == null) {
+				continue;
+			}
+			Iterator<PcodeOp> iterator = block.getIterator();
+			while (iterator.hasNext()) {
+				PcodeOp operation = iterator.next();
+				if (operation.getOpcode() != PcodeOp.CALL) {
+					continue;
+				}
+				for (SummaryCall call : observeSummaryCall(program, operation, function, space, root)) {
+					if (calls.size() >= MAXIMUM_SUMMARY_CALLS) {
+						throw new IOException("function exceeds the summary call limit");
+					}
+					calls.add(call);
+				}
+			}
+		}
+		calls.sort(Comparator.comparing(SummaryCall::address)
+			.thenComparingLong(SummaryCall::pcodeOrder)
+			.thenComparingInt(SummaryCall::argumentIndex));
+		return new SummaryCalls(List.copyOf(calls), null);
+	}
+
+	private static List<SummaryCall> observeSummaryCall(Program program, PcodeOp op,
+			Function function, AddressSpace space, Varnode root) {
+		Varnode target = op.getInput(0);
+		Address site = op.getSeqnum().getTarget();
+		if (op.getNumInputs() < 2 || target == null || !target.isAddress() ||
+				!target.getAddress().getAddressSpace().equals(space) ||
+				!function.getBody().contains(site) ||
+				!matchesDecodedCall(program, site, target.getAddress())) {
+			return List.of();
+		}
+		List<SummaryCall> calls = new ArrayList<>();
+		for (int input = 1; input < op.getNumInputs(); input++) {
+			Varnode argument = op.getInput(input);
+			if (argument == null) {
+				continue;
+			}
+			try {
+				Relative relative = offset(argument, root, 0);
+				if (relative != null && relative.stride() == 0 &&
+						relative.minimum() == relative.maximum()) {
+					calls.add(new SummaryCall(site, Integer.toUnsignedLong(op.getSeqnum().getTime()),
+						target.getAddress(), input - 1, relative.minimum(), argument.getAddress()));
+				}
+			}
+			catch (ArithmeticException overflow) {
+				// Overflow cannot establish an exact offset across the call.
+			}
+		}
+		return calls;
 	}
 
 	static Varnode entryInput(Program program, LocalSymbolMap symbols, int parameterIndex) {

@@ -5,6 +5,7 @@
 #include <binaryrat/live_cache.hpp>
 #include <binaryrat/ownership.hpp>
 #include <binaryrat/scheduler.hpp>
+#include <binaryrat/summaries.hpp>
 #include <binaryrat/types.hpp>
 #include <nlohmann/json.hpp>
 
@@ -12,6 +13,7 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -118,18 +120,61 @@ const json& cache_key(const json& request) {
     throw std::invalid_argument("unsupported cache schema or Ghidra version");
 }
 
+std::int64_t signed_value(const json& value, const char* name) {
+    if (!value.is_number_integer() || (value.is_number_unsigned() &&
+        value.get<std::uint64_t>() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())))
+        throw std::invalid_argument(std::string(name) + " must fit a signed 64-bit integer");
+    return value.get<std::int64_t>();
+}
+
+std::optional<binaryrat::types::StorageView> storage_view(const json& item) {
+    if (!item.contains("storage_view")) return std::nullopt;
+    const auto view = string_field(item, "storage_view");
+    using binaryrat::types::StorageView;
+    if (view == "integer") return StorageView::integer;
+    if (view == "floating_point") return StorageView::floating_point;
+    throw std::invalid_argument("unsupported storage_view");
+}
+
+const json& array_field(const json& object, const char* name) {
+    if (!object.contains(name) || !object.at(name).is_array())
+        throw std::invalid_argument(std::string(name) + " must be an array");
+    return object.at(name);
+}
+
+json layout_json(const binaryrat::types::RecoveredLayout& layout) {
+    json fields = json::array();
+    json union_candidates = json::array();
+    for (const auto& field : layout.fields) {
+        fields.push_back({{"offset", field.offset}, {"width", field.width},
+            {"stride", field.stride ? json(*field.stride) : json(nullptr)},
+            {"evidence_ids", field.evidence_ids}, {"evidence_strength", field.evidence_strength},
+            {"overlaps_other_fields", field.overlaps_other_fields},
+            {"stride_conflict", field.stride_conflict},
+            {"stride_overlaps_access", field.stride_overlaps_access}});
+    }
+    for (const auto& candidate : layout.union_candidates) {
+        json views = json::array();
+        for (const auto& view : candidate.views) {
+            views.push_back({{"kind", binaryrat::types::to_string(view.kind)},
+                {"width", view.width}, {"evidence_ids", view.evidence_ids}});
+        }
+        union_candidates.push_back({{"offset", candidate.offset},
+            {"views", std::move(views)}, {"evidence_strength", candidate.evidence_strength}});
+    }
+    return {{"object_id", layout.object_id}, {"fields", std::move(fields)},
+        {"union_candidates", std::move(union_candidates)},
+        {"minimum_extent", layout.minimum_extent}, {"has_overlaps", layout.has_overlaps},
+        {"has_stride_conflicts", layout.has_stride_conflicts},
+        {"has_overlapping_stride", layout.has_overlapping_stride}};
+}
+
 json recover_types(const json& request) {
-    if (!request.at("observations").is_array())
-        throw std::invalid_argument("observations must be an array");
     std::vector<binaryrat::types::AccessObservation> observations;
-    for (const auto& item : request.at("observations")) {
-        const auto& offset = item.at("offset");
-        if (!offset.is_number_integer() || (offset.is_number_unsigned() &&
-            offset.get<std::uint64_t>() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())))
-            throw std::invalid_argument("offset must fit a signed 64-bit integer");
+    for (const auto& item : array_field(request, "observations")) {
         binaryrat::types::AccessObservation observation;
         observation.object_id = string_field(item, "object_id");
-        observation.offset = offset.get<std::int64_t>();
+        observation.offset = signed_value(item.at("offset"), "offset");
         observation.width = unsigned_value(item.at("width"), "width");
         observation.evidence_id = string_field(item, "evidence_id");
         if (!item.at("object_start_known").is_boolean())
@@ -137,13 +182,7 @@ json recover_types(const json& request) {
         observation.object_start_known = item.at("object_start_known").get<bool>();
         if (item.contains("stride") && !item.at("stride").is_null())
             observation.stride = unsigned_value(item.at("stride"), "stride");
-        if (item.contains("storage_view")) {
-            const auto view = string_field(item, "storage_view");
-            using binaryrat::types::StorageView;
-            if (view == "integer") observation.storage_view = StorageView::integer;
-            else if (view == "floating_point") observation.storage_view = StorageView::floating_point;
-            else throw std::invalid_argument("unsupported storage_view");
-        }
+        observation.storage_view = storage_view(item);
         observations.push_back(std::move(observation));
     }
     binaryrat::types::LayoutRecoveryOptions options;
@@ -152,35 +191,104 @@ json recover_types(const json& request) {
     const auto recovered = binaryrat::types::recover_layouts(observations, options);
     json result = {{"layouts", json::array()}, {"rejected", json::array()},
                    {"score_kind", "uncalibrated_evidence_strength"}};
-    for (const auto& layout : recovered.layouts) {
-        json fields = json::array();
-        json union_candidates = json::array();
-        for (const auto& field : layout.fields) {
-            fields.push_back({{"offset", field.offset}, {"width", field.width},
-                {"stride", field.stride ? json(*field.stride) : json(nullptr)},
-                {"evidence_ids", field.evidence_ids}, {"evidence_strength", field.evidence_strength},
-                {"overlaps_other_fields", field.overlaps_other_fields},
-                {"stride_conflict", field.stride_conflict},
-                {"stride_overlaps_access", field.stride_overlaps_access}});
-        }
-        for (const auto& candidate : layout.union_candidates) {
-            json views = json::array();
-            for (const auto& view : candidate.views) {
-                views.push_back({{"kind", binaryrat::types::to_string(view.kind)},
-                    {"width", view.width}, {"evidence_ids", view.evidence_ids}});
-            }
-            union_candidates.push_back({{"offset", candidate.offset},
-                {"views", std::move(views)}, {"evidence_strength", candidate.evidence_strength}});
-        }
-        result["layouts"].push_back({{"object_id", layout.object_id}, {"fields", fields},
-            {"union_candidates", std::move(union_candidates)},
-            {"minimum_extent", layout.minimum_extent}, {"has_overlaps", layout.has_overlaps},
-            {"has_stride_conflicts", layout.has_stride_conflicts},
-            {"has_overlapping_stride", layout.has_overlapping_stride}});
-    }
+    for (const auto& layout : recovered.layouts) result["layouts"].push_back(layout_json(layout));
     for (const auto& rejection : recovered.rejected)
         result["rejected"].push_back({{"observation_index", rejection.observation_index},
                                       {"reason", binaryrat::types::to_string(rejection.reason)}});
+    return result;
+}
+
+constexpr std::size_t maximum_solve_roots = 16;
+constexpr std::uint64_t maximum_solve_limit = 65'536;
+
+std::size_t bounded_limit(const json& request, const char* name, std::size_t fallback) {
+    const auto value = optional_unsigned(request, name).value_or(fallback);
+    if (value > maximum_solve_limit)
+        throw std::invalid_argument(std::string(name) + " must not exceed 65536");
+    return static_cast<std::size_t>(value);
+}
+
+// Interprocedural propagation of per-parameter summaries (see summaries.hpp).
+json solve_types(const json& request) {
+    namespace types = binaryrat::types;
+    std::vector<types::ParameterSummary> summaries;
+    std::map<std::string, std::size_t> index;
+    for (const auto& item : array_field(request, "summaries")) {
+        types::ParameterSummary summary;
+        summary.id = string_field(item, "id");
+        for (const auto& entry : array_field(item, "accesses")) {
+            types::SummaryAccess access;
+            access.offset = signed_value(entry.at("offset"), "offset");
+            access.width = unsigned_value(entry.at("width"), "width");
+            access.evidence_id = string_field(entry, "evidence_id");
+            access.storage_view = storage_view(entry);
+            summary.accesses.push_back(std::move(access));
+        }
+        if (!index.emplace(summary.id, summaries.size()).second)
+            throw std::invalid_argument("duplicate summary ID: " + summary.id);
+        summaries.push_back(std::move(summary));
+    }
+    const auto lookup = [&](const json& object, const char* name) {
+        const auto found = index.find(string_field(object, name));
+        if (found == index.end()) throw std::invalid_argument(std::string(name) + " names an unknown summary");
+        return found->second;
+    };
+    std::vector<types::ForwardingEdge> edges;
+    for (const auto& item : array_field(request, "edges")) {
+        edges.push_back({lookup(item, "caller"), lookup(item, "callee"),
+                         signed_value(item.at("offset"), "offset"), string_field(item, "evidence_id")});
+    }
+    std::vector<types::SolveRoot> roots;
+    for (const auto& item : array_field(request, "roots"))
+        roots.push_back({lookup(item, "summary"), string_field(item, "object_id")});
+    if (roots.empty() || roots.size() > maximum_solve_roots)
+        throw std::invalid_argument("roots must name 1 to 16 summaries");
+    types::SummarySolveOptions options;
+    if (request.contains("maximum_extent"))
+        options.maximum_extent = unsigned_value(request.at("maximum_extent"), "maximum_extent");
+    options.maximum_states = bounded_limit(request, "maximum_states", options.maximum_states);
+    options.maximum_derived = bounded_limit(request, "maximum_derived", options.maximum_derived);
+
+    const auto solved = types::solve_summaries(summaries, edges, roots, options);
+    const auto optional_index = [](const std::optional<std::size_t>& value) {
+        return value ? json(*value) : json(nullptr);
+    };
+    json result = {{"components", json::array()}, {"roots", json::array()},
+                   {"score_kind", "uncalibrated_evidence_strength"}};
+    for (const auto& component : solved.components) {
+        json members = json::array();
+        for (const auto member : component.summaries) members.push_back(summaries[member].id);
+        result["components"].push_back({{"summaries", std::move(members)},
+            {"consistent", component.consistent}, {"withheld_edges", component.withheld_edges}});
+    }
+    for (std::size_t root_index = 0; root_index < roots.size(); ++root_index) {
+        const auto& root = solved.roots[root_index];
+        json states = json::array();
+        for (const auto& state : root.states) {
+            states.push_back({{"summary", summaries[state.summary].id}, {"offset", state.offset},
+                {"hops", state.hops}, {"edge", optional_index(state.edge)},
+                {"parent", optional_index(state.parent)}});
+        }
+        json derived = json::array();
+        for (const auto& item : root.derived) {
+            const auto& access = summaries[root.states[item.state].summary].accesses[item.access];
+            json row = {{"state", item.state}, {"access", item.access}, {"offset", item.offset},
+                        {"width", access.width}, {"evidence_id", access.evidence_id}};
+            if (access.storage_view) row["storage_view"] = types::to_string(*access.storage_view);
+            derived.push_back(std::move(row));
+        }
+        json rejected = json::array();
+        for (const auto& rejection : root.rejected)
+            rejected.push_back({{"derived_index", rejection.observation_index},
+                                {"reason", types::to_string(rejection.reason)}});
+        result["roots"].push_back({{"summary", summaries[roots[root_index].summary].id},
+            {"object_id", roots[root_index].object_id},
+            {"status", types::to_string(root.status)}, {"complete", root.complete()},
+            {"withheld_components", root.withheld_components}, {"overflowed", root.overflowed},
+            {"states", std::move(states)}, {"derived", std::move(derived)},
+            {"layout", root.layout ? layout_json(*root.layout) : json(nullptr)},
+            {"rejected", std::move(rejected)}});
+    }
     return result;
 }
 
@@ -203,10 +311,12 @@ public:
             throw std::invalid_argument("protocol_version must be integer 1");
         if (op == "ping") return json{{"name", "BinaryRat"}, {"version", "0.1.0"},
             {"ghidra_version", "12.2"},
-            {"capabilities", {"artifact-cache", "layout-proposals", "lease-scheduler", "live-cache"}}};
+            {"capabilities", {"artifact-cache", "layout-proposals", "lease-scheduler", "live-cache",
+                              "summary-solver"}}};
         if (op.starts_with("cache.")) return cache(op, request);
         if (op.starts_with("sched.")) return sched(op, request, id);
         if (op == "types.recover") return recover_types(request);
+        if (op == "types.solve") return solve_types(request);
         throw std::invalid_argument("unknown operation: " + op);
     }
 

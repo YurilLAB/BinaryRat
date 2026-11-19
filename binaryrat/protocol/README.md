@@ -45,6 +45,7 @@ Operations:
 | `sched.cancel` | `lease` | `cancelled` |
 | `sched.stats` | none | workers, queued, running, peaks, per-status counts |
 | `types.recover` | `observations` (see below), optional `maximum_extent` | `layouts` (fields and `union_candidates`), `rejected`, `score_kind` |
+| `types.solve` | `summaries`, `edges`, `roots` (1 to 16), optional `maximum_extent`, `maximum_states`, `maximum_derived` (each at most 65536) | `components`, `roots` (`states`, `derived`, `layout`, `rejected`, completeness), `score_kind` |
 
 ## Scheduler
 
@@ -115,3 +116,27 @@ floating-point view (width 4 or 8) by distinct evidence; each entry has
 `offset`, `views` (`kind`, `width`, `evidence_ids`) and `evidence_strength`.
 Strided observations and evidence labelled with both views do not count.
 `evidence_strength` is explicitly uncalibrated, not a probability.
+
+## Summary propagation
+
+`types.solve` propagates per-parameter access summaries over calls. A summary
+is an `id` and `accesses` (signed `offset`, `width`, `evidence_id`, optional
+`storage_view`); offsets may be negative because a callee can receive an
+interior pointer. An edge (`caller`, `callee`, signed `offset`, `evidence_id`)
+states that the callee's pointer equals the caller's plus `offset`. Each root
+names a summary and the `object_id` whose start its parameter is asserted to be.
+
+Strongly connected summaries form a `component`. It is `consistent` when every
+cycle sums to offset zero and the members' positions fit a signed 64-bit value;
+then all paths between two members agree. Otherwise its internal edges are
+listed in `withheld_edges` and never followed. Each root searches
+(summary, offset) states breadth-first. `states` record `summary`, `offset`,
+`hops`, and the `edge` and `parent` of one shortest path. `derived` rows give
+each reached access at its object offset (`state`, `access` index, `offset`,
+`width`, `evidence_id`, `storage_view`) and are aggregated as in
+`types.recover` into `layout` (null when nothing is accepted) and `rejected`
+(by `derived_index`). A root is `complete` unless it reached a withheld edge
+(`withheld_components`) or an offset sum overflowed (`overflowed`). More than
+`maximum_states` (default 4096) or `maximum_derived` (default 16384) gives
+status `state_limit` or `derived_limit` and no partial output. Results do not
+depend on input order; duplicate edges collapse onto the lowest index.

@@ -182,6 +182,34 @@ class EngineClient:
     def recover_types(self, observations: Iterable[Mapping[str, Any]]) -> Mapping[str, Any]:
         return self._object_request("types.recover", observations=[dict(item) for item in observations])
 
+    def solve_types(
+        self,
+        summaries: Iterable[Mapping[str, Any]],
+        edges: Iterable[Mapping[str, Any]],
+        roots: Iterable[Mapping[str, Any]],
+        *,
+        maximum_extent: int | None = None,
+        maximum_states: int | None = None,
+        maximum_derived: int | None = None,
+    ) -> Mapping[str, Any]:
+        """Propagate per-parameter access summaries along forwarding calls (op ``types.solve``).
+
+        ``summaries`` are ``{"id", "accesses": [{"offset", "width", "evidence_id",
+        "storage_view"?}]}``; ``edges`` are ``{"caller", "callee", "offset", "evidence_id"}``
+        meaning callee pointer == caller pointer + offset; ``roots`` are ``{"summary",
+        "object_id"}`` (1 to 16). Limits are per root and at most 65536.
+        """
+        fields: dict[str, Any] = dict(
+            summaries=[dict(item) for item in summaries],
+            edges=[dict(item) for item in edges],
+            roots=[dict(item) for item in roots],
+        )
+        for name, value in (("maximum_extent", maximum_extent), ("maximum_states", maximum_states),
+                            ("maximum_derived", maximum_derived)):
+            if value is not None:
+                fields[name] = value
+        return self._object_request("types.solve", **fields)
+
     def close(self) -> None:
         with self._lock:
             if not self._stop.is_set():

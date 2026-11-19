@@ -50,7 +50,7 @@ tasks.named('buildExtension', Zip) {
     def installedScripts = ['BinaryRatReviewLayout.java', 'BinaryRatBrowseLayout.java',
         'BinaryRatProfile.java']
     def shippedScripts = ['BinaryRatExport.java', 'BinaryRatRecoverLayouts.java',
-        'BinaryRatRecoverRtti.java'] + installedScripts
+        'BinaryRatRecoverRtti.java', 'BinaryRatSolveLayouts.java'] + installedScripts
     eachFile { entry ->
         if (entry.path.startsWith('BinaryRat/installed_scripts/')) {
             entry.exclude()

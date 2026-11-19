@@ -140,6 +140,12 @@ jobs:
         run: |
           python binaryrat/benchmarks/verify_interprocedural_layout.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --engine build/binaryrat/binaryrat-engine --output build/ghidra-report/interprocedural-x86-64
           python binaryrat/benchmarks/verify_interprocedural_layout.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --engine build/binaryrat/binaryrat-engine --output build/ghidra-report/interprocedural-aarch64 --cc aarch64-linux-gnu-gcc --strip aarch64-linux-gnu-strip
+      - if: runner.os == 'Linux'
+        name: Verify summary-based layout recovery through call cycles on x86-64 and AArch64
+        shell: bash
+        run: |
+          python binaryrat/benchmarks/verify_summary_layout.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --engine build/binaryrat/binaryrat-engine --output build/ghidra-report/summary-x86-64
+          python binaryrat/benchmarks/verify_summary_layout.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --engine build/binaryrat/binaryrat-engine --output build/ghidra-report/summary-aarch64 --cc aarch64-linux-gnu-gcc --strip aarch64-linux-gnu-strip
       - name: Build and verify the installable BinaryRat extension
         env:
           GHIDRA_INSTALL_DIR: ${{ github.workspace }}/build/ghidra/ghidra_12.2_PUBLIC

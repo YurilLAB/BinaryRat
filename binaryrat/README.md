@@ -123,9 +123,11 @@ PATH_TO_ENGINE --seed 0 --steps 1000`.
 ## Remaining milestones
 
 The extractor follows bounded direct calls and reports shared-storage candidates
-and Itanium and MSVC RTTI. Analysts can review a proposed layout and create a
-new structure with native undo. General interprocedural inference, calibrated
-confidence, and applying types to existing targets from the GUI and Python remain open.
+and Itanium and MSVC RTTI. The engine's summary solver carries parameter evidence
+through recursive call cycles and shifted pointers. Analysts can review a
+proposed layout and create a new structure with native undo. Pointers passed
+through memory or indirect calls, calibrated confidence, and applying types to
+existing targets from the GUI and Python remain open.
 [Architecture and milestones](docs/ARCHITECTURE.md)
 
 The whole-program profiler records analyzer timings, completion, wall time,

@@ -95,6 +95,42 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(len(result["rejected"]), 1)
         self.assertEqual(result["score_kind"], "uncalibrated_evidence_strength")
 
+    def test_summary_solver_response_shape_and_refusals(self):
+        request = dict(id="solve", op="types.solve",
+                       summaries=[dict(id="a", accesses=[dict(offset=0, width=4, evidence_id="a:0",
+                                                              storage_view="floating_point")]),
+                                  dict(id="b", accesses=[dict(offset=4, width=4, evidence_id="b:4")])],
+                       edges=[dict(caller="a", callee="b", offset=8, evidence_id="call"),
+                              dict(caller="b", callee="a", offset=-8, evidence_id="back")],
+                       roots=[dict(summary="a", object_id="obj")])
+        refusals = [dict(request, id="no-roots", roots=[]),
+                    dict(request, id="unknown", edges=[dict(caller="a", callee="zz", offset=0,
+                                                            evidence_id="x")]),
+                    dict(request, id="limit", maximum_states=65537),
+                    dict(request, id="roots", roots=[dict(summary="a", object_id="obj")] * 17),
+                    dict(request, id="after", op="ping")]
+        with tempfile.TemporaryDirectory() as root:
+            responses = self.run_requests(root, [request] + refusals)
+        result = responses[0]["result"]
+        self.assertEqual(sorted(result), ["components", "roots", "score_kind"])
+        self.assertEqual(result["components"], [dict(summaries=["a", "b"], consistent=True,
+                                                     withheld_edges=[])])
+        solved = result["roots"][0]
+        self.assertEqual(sorted(solved), ["complete", "derived", "layout", "object_id", "overflowed",
+                                          "rejected", "states", "status", "summary",
+                                          "withheld_components"])
+        self.assertEqual(solved["states"], [
+            dict(summary="a", offset=0, hops=0, edge=None, parent=None),
+            dict(summary="b", offset=8, hops=1, edge=0, parent=0)])
+        self.assertEqual(solved["derived"][0], dict(state=0, access=0, offset=0, width=4,
+                                                    evidence_id="a:0", storage_view="floating_point"))
+        self.assertEqual([(f["offset"], f["evidence_ids"]) for f in solved["layout"]["fields"]],
+                         [(0, ["a:0"]), (12, ["b:4"])])
+        for response in responses[1:5]:
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["error"]["code"], "invalid_request")
+        self.assertTrue(responses[5]["ok"])
+
     def test_numeric_overflow_is_rejected_at_protocol_boundary(self):
         observation = dict(object_id="object", offset=2**63, width=4,
                            evidence_id="x", object_start_known=True)

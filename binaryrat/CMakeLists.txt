@@ -13,6 +13,7 @@ add_library(binaryrat_core
   native/src/live_cache.cpp
   native/src/ownership.cpp
   native/src/scheduler.cpp
+  native/src/summaries.cpp
   native/src/types.cpp)
 target_compile_features(binaryrat_core PUBLIC cxx_std_20)
 target_include_directories(binaryrat_core PUBLIC native/include)
@@ -44,7 +45,7 @@ install(FILES native/third_party/picosha2/LICENSE
   DESTINATION share/licenses/BinaryRat/picosha2)
 
 if(BUILD_TESTING)
-  set(native_tests admission cache executor live_cache scheduler types ownership)
+  set(native_tests admission cache executor live_cache scheduler summaries types ownership)
   if(CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android)$")
     list(APPEND native_tests host_cgroups)
   endif()
@@ -60,4 +61,8 @@ if(BUILD_TESTING)
     "${CMAKE_CURRENT_SOURCE_DIR}/native/tests/live_cache_fuzz.py"
     --engine "$<TARGET_FILE:binaryrat-engine>" --steps 1000)
   set_tests_properties(native.live_cache_fuzz PROPERTIES TIMEOUT 120)
+  add_test(NAME native.types_solve_fuzz COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/native/tests/types_solve_fuzz.py"
+    --engine "$<TARGET_FILE:binaryrat-engine>" --cases 300)
+  set_tests_properties(native.types_solve_fuzz PROPERTIES TIMEOUT 120)
 endif()

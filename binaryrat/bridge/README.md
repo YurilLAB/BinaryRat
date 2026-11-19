@@ -176,6 +176,21 @@ keeps all equally short incoming call paths, and bounds the total decompiles,
 p-code operations, and evidence. At depths above 1 the call records include the
 caller and hop for reconstruction.
 
+`BinaryRatSolveLayouts.java OUTPUT_JSON ENTRY_HEX|name:FUNCTION PARAM_INDEX
+[TIMEOUT_SECONDS] [MAX_SUMMARIES=32]` replaces the depth limit with summaries.
+It decompiles each reached function parameter once and records direct calls
+that pass the parameter plus an exact constant, matching a CALL input's
+position to the callee's parameter. The engine's `types.solve` then follows
+those edges through recursion: a cycle that hands back the same pointer is
+solved, and one that moves it, such as a list walk, is withheld and marks the
+report incomplete. A shifted argument such as `value + 1` keeps its exact
+offset. Refused calls (unsupported callee or parameter) are listed with a
+reason, and calls redirected only in p-code are not followed. The report's
+`analysis_mode` is `read_only_summary_layout_evidence`; the evidence table and
+reviewed structure creation read depth-mode reports only. Headless only; the
+summary, decompile, p-code, edge and evidence limits fail closed.
+[Summary verification](../benchmarks/verify_summary_layout.py)
+
 `union_candidates` highlights exact loads at the same offset whose independently
 observed consumers interpret the bytes as integers and floating-point values.
 Each view points to the load and the typed operation. The candidate captures

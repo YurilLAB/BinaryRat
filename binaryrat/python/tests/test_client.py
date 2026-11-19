@@ -57,6 +57,16 @@ class ClientTests(unittest.TestCase):
         self.patch.stop()
         self.directory.cleanup()
 
+    def test_solve_types_sends_only_given_limits(self):
+        with EngineClient("binaryrat-engine") as client:
+            sent = client.solve_types([dict(id="a", accesses=[])], [], [dict(summary="a", object_id="o")],
+                                      maximum_states=3)["received"]
+        self.assertEqual(sent["op"], "types.solve")
+        self.assertEqual(sent["roots"], [dict(summary="a", object_id="o")])
+        self.assertEqual(sent["maximum_states"], 3)
+        self.assertNotIn("maximum_derived", sent)
+        self.assertNotIn("maximum_extent", sent)
+
     def test_persistent_process_and_precise_argument_boundaries(self):
         with EngineClient("engine with spaces", cache_dir="cache with spaces") as client:
             first = client.cache_put({"function": "ram:10"}, {"c": "return 1;"}, ["type:a"])

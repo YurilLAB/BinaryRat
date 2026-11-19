@@ -114,7 +114,8 @@ def main() -> None:
                      "BinaryRat/ghidra_scripts/BinaryRatProfile.java",
                      "BinaryRat/ghidra_scripts/BinaryRatRecoverLayouts.java",
                      "BinaryRat/ghidra_scripts/BinaryRatRecoverRtti.java",
-                     "BinaryRat/ghidra_scripts/BinaryRatReviewLayout.java"}):
+                     "BinaryRat/ghidra_scripts/BinaryRatReviewLayout.java",
+                     "BinaryRat/ghidra_scripts/BinaryRatSolveLayouts.java"}):
             raise RuntimeError("unexpected extension contents")
         with ZipFile(io.BytesIO(package.read("BinaryRat/lib/BinaryRat.jar"))) as library:
             if not {"binaryrat/writeback/ProtectedLayoutWriteBack.class",
