@@ -1,3 +1,4 @@
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Exercise CodeView layout resolution and the bounded LLVM tool invocation."""
 

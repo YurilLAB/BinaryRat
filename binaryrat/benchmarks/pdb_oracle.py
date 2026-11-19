@@ -1,3 +1,4 @@
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Read concrete CodeView byte layouts from a separate fixture PDB."""
 

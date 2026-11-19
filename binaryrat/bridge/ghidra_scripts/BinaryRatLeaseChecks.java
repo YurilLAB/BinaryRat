@@ -55,7 +55,7 @@ public class BinaryRatLeaseChecks extends GhidraScript {
         checkSampleReader();
         checkExportPolicy(fixture.getEntryPoint());
         Path directory = Files.createTempDirectory("binaryrat-lease-check-");
-        try (EngineClient engine = EngineClient.start(Path.of(System.getenv("BINARYRAT_ENGINE")), directory);
+        try (EngineClient engine = EngineClient.start(EngineClient.findExecutable(), directory);
                 ScheduledDecompiler scheduler = testScheduler(engine)) {
             JsonObject blocker = request("blocker");
             blocker.addProperty("reserve_bytes", 256L << 20);

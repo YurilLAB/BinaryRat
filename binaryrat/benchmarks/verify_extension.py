@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Install the extension in isolated Ghidra settings and run stock parity."""
 

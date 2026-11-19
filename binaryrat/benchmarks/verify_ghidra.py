@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Exact stock/parallel integration checks with explicitly scoped measurements."""
 from __future__ import annotations

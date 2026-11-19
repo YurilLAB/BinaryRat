@@ -1,3 +1,4 @@
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Checks for the detached checksum shipped alongside a BinaryRat extension."""
 import hashlib

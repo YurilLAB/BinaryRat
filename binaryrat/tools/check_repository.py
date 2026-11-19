@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Check BinaryRat authorship, branch policy, release pin, and bundled licenses."""
 import argparse

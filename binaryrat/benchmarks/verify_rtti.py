@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Verify ABI metadata against the existing stripped C++ inheritance fixture."""
 

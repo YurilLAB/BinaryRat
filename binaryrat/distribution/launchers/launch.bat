@@ -1,4 +1,5 @@
 @echo off
+rem Copyright 2026 YurilLAB
 rem SPDX-License-Identifier: Apache-2.0
 setlocal DisableDelayedExpansion
 for %%i in ("%~dp0..") do set "BINARYRAT_BUNDLE_DIR=%%~fi"

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Profile whole-program Ghidra 12.2 auto-analysis on fresh, pinned imports."""
 from __future__ import annotations

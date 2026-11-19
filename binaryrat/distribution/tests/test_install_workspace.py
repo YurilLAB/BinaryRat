@@ -1,4 +1,8 @@
-"""Exercise bundled workspace configuration without a user application profile."""
+"""Exercise bundled workspace configuration without a user application profile.
+
+Copyright 2026 YurilLAB
+SPDX-License-Identifier: Apache-2.0
+"""
 
 from io import BytesIO
 from pathlib import Path

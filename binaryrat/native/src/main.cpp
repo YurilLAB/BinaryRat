@@ -1,3 +1,4 @@
+// Copyright 2026 YurilLAB
 // SPDX-License-Identifier: Apache-2.0
 #include <binaryrat/cache.hpp>
 #include <binaryrat/host.hpp>

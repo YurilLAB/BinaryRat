@@ -1,3 +1,4 @@
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Read declared byte-aligned aggregate members from a corpus DWARF file."""
 

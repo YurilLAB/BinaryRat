@@ -48,8 +48,17 @@ means compilation, oracle separation and stripping checks passed. The
 read-only layout verifier runs inference on the stripped C artifact with
 `read_packed` parameter 0 selected. It reads `PackedRecord` from the separate
 DWARF or PDB after Ghidra exits and scores exact field byte offsets and widths.
-The PE oracle uses LLVM's `llvm-pdbutil`. Semantic type scoring, confidence calibration, whole-program
-fixtures and the required 100MB+ benchmark suite remain to be implemented.
+The PE oracle uses LLVM's `llvm-pdbutil`.
+
+`fixtures/layout_paths.c` is not built by `build_corpus.py`:
+`benchmarks/verify_interprocedural_layout.py` compiles it itself for its
+call-path checks. An offline confidence-calibration evaluator exists
+(`benchmarks/calibrate_type_confidence.py`, see
+[confidence calibration](../docs/evidence/confidence-calibration.md)), but with a
+single source family so far no calibrated model exists and scores remain
+uncalibrated support. Semantic type scoring, whole-program fixtures and a
+100MB+ benchmark suite beyond the pinned LLVM parity sample remain to be
+implemented.
 
 The fixture ABI and layout depend on compiler and target. Read the debug files
 for ground truth; do not assume hard-coded host offsets. Optimized debug

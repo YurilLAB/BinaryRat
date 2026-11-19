@@ -1,3 +1,4 @@
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Validate sampling, raw parity comparison and coverage checks without a JVM."""
 

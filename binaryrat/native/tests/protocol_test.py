@@ -1,3 +1,4 @@
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the actual C++ process, persistence, validation, and recovery."""
 from collections import Counter, defaultdict

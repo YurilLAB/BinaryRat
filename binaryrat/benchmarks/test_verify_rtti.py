@@ -1,3 +1,4 @@
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Keep host CI failures readable even when the full Ghidra log is unavailable."""
 

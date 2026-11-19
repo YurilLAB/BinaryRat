@@ -5,7 +5,7 @@
 - [No-return analyzer candidate checks](no-return-candidate-checks.md)
 
 The new C++ project, Python package, headless script, corpus and CI are additive.
-The root README has a marked BinaryRat introduction; upstream LICENSE/NOTICE are
+The root README is now a BinaryRat overview marked as modified; upstream LICENSE/NOTICE are
 preserved unchanged. The root CMake entry point is new and does not alter Gradle.
 
 Upstream CI adaptations (not runtime patches):

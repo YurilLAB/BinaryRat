@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Measure the implemented native artifact roundtrip, without a JVM-speed claim."""
 import argparse

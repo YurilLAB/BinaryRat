@@ -1,3 +1,4 @@
+// Copyright 2026 YurilLAB
 // SPDX-License-Identifier: Apache-2.0
 // Verify packaged protected write-back on a disposable, saved headless Program.
 

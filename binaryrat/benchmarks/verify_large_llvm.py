@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Verify raw export parity on a deterministic slice of a 100 MB+ LLVM ELF."""
 from __future__ import annotations

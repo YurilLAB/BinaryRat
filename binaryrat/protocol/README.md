@@ -4,8 +4,9 @@ Launch `binaryrat-engine serve --cache DIRECTORY`. One process exclusively owns
 each directory; a second owner fails, and OS locks release on process exit.
 Do not share it with direct library instances. The protocol runs over UTF-8
 stdin/stdout; diagnostics go to stderr. Input lines are limited to 16 MiB.
-End-of-input shuts down cleanly: queued leases are cancelled and running
-leases are released.
+End-of-input shuts down cleanly: queued leases are cancelled, running leases
+receive `lease.stop` with reason `shutdown`, and an attached process still
+running when `kill_grace_ms` expires is killed before the engine exits.
 
 ```json
 {"id":"1","op":"ping","protocol_version":1}
@@ -43,7 +44,7 @@ Operations:
 | `sched.release` | `lease` | `status`, `run_ms`, `peak_resident_bytes`, `killed` |
 | `sched.cancel` | `lease` | `cancelled` |
 | `sched.stats` | none | workers, queued, running, peaks, per-status counts |
-| `types.recover` | `observations`, optional `maximum_extent` | `layouts`, `rejected`, `score_kind` |
+| `types.recover` | `observations` (see below), optional `maximum_extent` | `layouts` (fields and `union_candidates`), `rejected`, `score_kind` |
 
 ## Scheduler
 
@@ -99,8 +100,18 @@ arriving is put with `as_of`, the `seq` read before computing it; it is stored
 unverified if a later journaled change could have affected it, or if the
 journal no longer reaches back to `as_of`. There is no disk-quota eviction yet.
 
-An observation has `object_id`, signed-64-bit `offset`, unsigned-64-bit `width`,
-optional unsigned `stride`, `evidence_id`, and boolean `object_start_known`.
-Unknown origins abstain. Overlap is exposed as ambiguity; it does not prove a
-union. Minimum extent is a lower bound, not an exact allocation size or array
-length. `evidence_strength` is explicitly uncalibrated, not a probability.
+## Layout recovery
+
+A `types.recover` observation has `object_id`, signed-64-bit `offset`,
+unsigned-64-bit `width`, optional unsigned `stride`, `evidence_id`, boolean
+`object_start_known`, and optional `storage_view`: `integer` or
+`floating_point` (any other value is an `invalid_request`). Unknown origins
+abstain. Overlap is exposed as ambiguity; it does not prove a union. Minimum
+extent is a lower bound, not an exact allocation size or array length.
+
+Each layout lists `fields` and `union_candidates`. A union candidate is one
+offset read through both an integer view (width 1, 2, 4 or 8) and a
+floating-point view (width 4 or 8) by distinct evidence; each entry has
+`offset`, `views` (`kind`, `width`, `evidence_ids`) and `evidence_strength`.
+Strided observations and evidence labelled with both views do not count.
+`evidence_strength` is explicitly uncalibrated, not a probability.
