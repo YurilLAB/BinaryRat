@@ -31,9 +31,13 @@ public final class LayoutEvidenceBrowser {
 	private LayoutEvidenceBrowser() {
 	}
 
-	/** The p-code and overlap are recorded evidence. The name and entry come from the open Program. */
+	/**
+	 * The p-code and overlap are recorded evidence. The name, entry and instruction text come from
+	 * the open Program.
+	 */
 	public record Row(Address address, int offset, int width, String operation, long pcodeOrder,
-			Address functionEntry, String functionName, boolean overlaps, boolean instructionBytesVerified) {
+			Address functionEntry, String functionName, boolean overlaps, boolean instructionBytesVerified,
+			String instruction) {
 	}
 
 	/** Revision refers to this open Program during validation, independently of the capture session. */
@@ -172,6 +176,6 @@ public final class LayoutEvidenceBrowser {
 		}
 		boolean verified = verifyInstructionBytes(observation, instruction);
 		return new Row(site, offset, width, operation, orderNumber, entry, function.getName(true),
-			overlaps, verified);
+			overlaps, verified, instruction.toString());
 	}
 }

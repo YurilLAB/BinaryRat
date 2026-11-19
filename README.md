@@ -17,7 +17,7 @@ BinaryRat is an open-source reverse-engineering project for Linux and Windows, b
 - **Reviewed type creation** lets an analyst approve a new structure with provenance and native Ghidra undo.
 - **Call-site corrections** show an instruction's p-code with register names, before and after Listing overrides, and apply or replace a reviewed prototype at one call with native undo. Indirect calls start from the decompiler's view of their arguments.
 - **Desktop and scripting access** provides BinaryRat actions in CodeBrowser, headless exports, and typed Python access through PyGhidra.
-- **BinaryRat analyst tools** compare two decompiler exports with `binaryrat-diff` and show which instructions support a proposed field with `binaryrat-explain`. Both work offline on saved reports.
+- **BinaryRat analyst tools** compare two decompiler exports with `binaryrat-diff` (`--patch` shows the changed C) and show which instructions support a proposed field with `binaryrat-explain`. Both work offline on saved reports. `binaryrat-decompile` decompiles a function from a saved project, selected by name or by any address inside it.
 
 ## Project status
 

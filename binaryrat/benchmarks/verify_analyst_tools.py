@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import time
@@ -44,6 +45,42 @@ def entries(data):
             raise ValueError(f"Duplicate fixture function at {key}")
         rows[key] = row
     return rows
+
+
+def review_lines(row):
+    # The text binaryrat-diff --patch compares, as documented in its README.
+    lines = [f"/* prototype: {row['prototype']} */"]
+    lines += [f"/* error: {line} */" for line in row["error"].splitlines()]
+    return lines + row["c"].splitlines()
+
+
+def apply_patch(before, patch):
+    """Apply a unified diff to a list of lines, checking every removed and context line."""
+    lines = patch.splitlines()
+    if len(lines) < 3 or not lines[0].startswith("--- ") or not lines[1].startswith("+++ "):
+        raise ValueError("Malformed patch header")
+    result, cursor, index = [], 0, 2
+    while index < len(lines):
+        hunk = re.fullmatch(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", lines[index])
+        if hunk is None:
+            raise ValueError(f"Malformed hunk header: {lines[index]!r}")
+        start = int(hunk[1]) - (0 if hunk[2] == "0" else 1)
+        if start < cursor:
+            raise ValueError("Overlapping patch hunks")
+        result += before[cursor:start]
+        cursor, index = start, index + 1
+        while index < len(lines) and not lines[index].startswith("@@"):
+            tag, text = lines[index][:1], lines[index][1:]
+            if tag in (" ", "-"):
+                if cursor >= len(before) or before[cursor] != text:
+                    raise ValueError("Patch context disagrees with the earlier capture")
+                cursor += 1
+            if tag in (" ", "+"):
+                result.append(text)
+            elif tag != "-":
+                raise ValueError(f"Unknown patch line: {lines[index]!r}")
+            index += 1
+    return result + before[cursor:]
 
 
 def verify(exports, layout_path):
@@ -89,6 +126,23 @@ def verify(exports, layout_path):
                 row["before_name"] != old[key]["name"] or row["after_name"] != late[key]["name"]):
             raise ValueError(f"Wrong diff for fixture function {key}")
 
+    patched, patch_time = invoke("binaryrat-diff", baseline, deadline, "--json", "--patch", status=1)
+    patched = json.loads(patched)
+    if [{k: v for k, v in row.items() if k != "patch"} for row in patched["changes"]] != diff["changes"]:
+        raise ValueError("--patch changed the comparison itself")
+    patches = 0
+    for row in patched["changes"]:
+        key = (row["address_space"], row["address"])
+        textual = {"prototype", "c", "error"} & set(row["fields"])
+        if bool(textual) != ("patch" in row):
+            raise ValueError(f"Patch presence disagrees with the changed fields of {key}")
+        if textual:
+            patches += 1
+            if apply_patch(review_lines(old[key]), row["patch"]) != review_lines(late[key]):
+                raise ValueError(f"The patch for {key} does not turn the baseline into the timeout capture")
+    if not patches:
+        raise ValueError("The timeout capture produced no text patch")
+
     # The corpus read_packed fixture reads four bytes at +1 behind its one-byte tag.
     text, lookup_time = invoke("binaryrat-explain", layout_path, "--offset", "0x1")
     reads = [obs for obs in layout["observations"] if obs["operation"] == "LOAD" and
@@ -103,11 +157,12 @@ def verify(exports, layout_path):
 
     return {
         "passed": True, "program_id": identity, "functions": len(old), "changed": count,
+        "patches_applied": patches,
         "layout_citations": sites,
         "inputs": [{"name": path.name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
                    for path, data in inputs.items()],
         "cli_wall_seconds_including_startup": {
-            "unchanged": same_time, "changed": diff_time, "field_lookup": lookup_time,
+            "unchanged": same_time, "changed": diff_time, "patch": patch_time, "field_lookup": lookup_time,
         },
     }
 

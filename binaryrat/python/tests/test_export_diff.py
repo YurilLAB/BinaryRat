@@ -9,7 +9,8 @@ import random
 import tempfile
 import unittest
 
-from binaryrat.export_diff import compare_exports, main
+from binaryrat.export_diff import _fingerprint, _patches, compare_exports, main
+from binaryrat.exports import parse_export
 from binaryrat.exports import ExportError
 
 
@@ -177,3 +178,67 @@ class ExportDiffTests(unittest.TestCase):
                              expected)
             self.assertEqual(inputs, [hashlib.sha256(path.read_bytes()).digest()
                                       for path in (self.before, self.after)])
+
+    def test_patch_diffs_changed_prototype_c_and_error_only(self):
+        self.write(self.before, [row("10", c="int f(void)\n{\n  return 1;\n}\n"), row("20"), row("30")])
+        self.write(self.after, [
+            row("10", c="int f(void)\n{\n  return 2;\n}\n", prototype="int f(void)"),
+            row("20", name="renamed"), row("30", error="timed out", completed=False),
+        ])
+        report = compare_exports(self.before, self.after, patch_context=0)
+        changes = {change["address"]: change for change in report["changes"]}
+        self.assertNotIn("patch", changes["20"], "a rename alone has no text diff")
+        self.assertEqual(changes["10"]["patch"].splitlines(), [
+            "--- before ram:10 parse", "+++ after ram:10 parse", "@@ -1 +1 @@",
+            "-/* prototype: void parse(void) */", "+/* prototype: int f(void) */",
+            "@@ -4 +4 @@", "-  return 1;", "+  return 2;"])
+        self.assertIn("+/* error: timed out */", changes["30"]["patch"].splitlines())
+        self.assertNotIn("patch", compare_exports(self.before, self.after)["changes"][0])
+        status, out, err = self.cli("--patch", "--json")
+        self.assertEqual((status, err), (1, ""))
+        # The default three context lines join both edits into one hunk.
+        self.assertEqual(json.loads(out)["changes"][0]["patch"].count("@@"), 2)
+        status, out, err = self.cli("--patch", "--context", "1")
+        self.assertEqual((status, err), (1, ""))
+        lines = out.splitlines()
+        self.assertEqual(lines[2], 'changed ram:10 "parse" (prototype, c)')
+        self.assertEqual(lines[3:5], ["--- before ram:10 parse", "+++ after ram:10 parse"])
+        self.assertIn("+  return 2;", lines)
+        self.assertIn('changed ram:20 "parse" -> "renamed" (name)', lines)
+
+    def test_patch_escapes_terminal_controls_and_checks_its_arguments(self):
+        self.write(self.before, [row(c="x\n")])
+        self.write(self.after, [row(c="x\x1b[2J\ty\n")])
+        status, out, err = self.cli("--patch")
+        self.assertEqual((status, err), (1, ""))
+        self.assertNotIn("\x1b", out)
+        self.assertIn("+x\\x1b[2J\\ty", out.splitlines())
+        for options in (("--context", "2"), ("--patch", "--context", "-1")):
+            with self.subTest(options=options):
+                with redirect_stderr(io.StringIO()):
+                    try:
+                        code = main([str(self.before), str(self.after), *options])
+                    except SystemExit as exit:
+                        code = exit.code
+                self.assertEqual(code, 2)
+        with self.assertRaises(ValueError):
+            compare_exports(self.before, self.after, patch_context=True)
+
+    def test_patch_refuses_an_export_replaced_between_passes(self):
+        self.write(self.before, [row(c="a\n")])
+        self.write(self.after, [row(c="b\n")])
+        with self.before.open(encoding="utf-8") as stream:
+            old = _fingerprint(next(parse_export(stream)))
+        with self.after.open(encoding="utf-8") as stream:
+            record = next(parse_export(stream))
+        new = _fingerprint(record)
+        entry = record.function.entry
+        self.assertIn(entry, _patches(self.before, self.after, 1 << 20, {entry: (old, new)}, 3))
+        # The second pass must see the same records the first pass fingerprinted.
+        for prints in ((new, new), (old, old)):
+            with self.subTest(prints=prints), self.assertRaisesRegex(ExportError, "changed while"):
+                _patches(self.before, self.after, 1 << 20, {entry: prints}, 3)
+        missing = dict(entry=entry)
+        with self.assertRaisesRegex(ExportError, "changed while"):
+            from binaryrat.models import Address
+            _patches(self.before, self.after, 1 << 20, {Address("ram", 0x99): (old, new)}, 3)

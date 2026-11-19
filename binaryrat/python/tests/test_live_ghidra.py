@@ -24,7 +24,7 @@ from binaryrat import (
     Address, LayoutRecoveryError, LiveProgramError, Page, StaleProgramError, decompile_program,
     open_program,
 )
-from binaryrat.decompile_cli import _parse_entry
+from binaryrat.decompile_cli import _parse_function
 from binaryrat.live import ProgramView, _monitor
 from binaryrat.live_service import (
     LIVE_PROTOCOL_VERSION,
@@ -43,14 +43,21 @@ _REQUIRE_SHARED_SERVICE = os.environ.get("BINARYRAT_REQUIRE_SHARED_SERVICE") == 
 
 
 class LiveProgramInputTests(unittest.TestCase):
-    def test_cli_entry_parser_checks_unsigned_hex_and_preserves_space(self):
+    def test_cli_function_parser_separates_addresses_and_names(self):
         from argparse import ArgumentTypeError
 
-        self.assertEqual(_parse_entry("ram:0xffffffffffffffff"), ("ram", (1 << 64) - 1))
-        self.assertEqual(_parse_entry("0A"), (None, 10))
-        for bad in ("-1", "0x", "ram:", "ram:1:2", "ram:0x10000000000000000", "ram: 1"):
+        self.assertEqual(_parse_function("ram:0xffffffffffffffff"), ("address", ("ram", (1 << 64) - 1, None)))
+        self.assertEqual(_parse_function("0x0A"), ("address", (None, 10, None)))
+        # A bare hexadecimal token is an address, remembered in case a name was meant.
+        self.assertEqual(_parse_function("add"), ("address", (None, 0xADD, "add")))
+        for name in ("main", "ns::f", ".text", "FUN_140001000", "operator<<", "_start"):
+            with self.subTest(name=name):
+                self.assertEqual(_parse_function(name), ("name", name))
+        self.assertEqual(_parse_function("name:add"), ("name", "add"))
+        for bad in ("", "name:", "0x", "1x", "ram:", "ram:1:2", "ram:0x10000000000000000", "ram: 1",
+                    "ram:main", "a b", "f\x1b", "10000000000000000"):
             with self.subTest(entry=bad), self.assertRaises(ArgumentTypeError):
-                _parse_entry(bad)
+                _parse_function(bad)
 
     def test_missing_project_and_invalid_domain_path(self):
         with TemporaryDirectory() as tmp:
@@ -249,6 +256,17 @@ class LiveGhidraTests(unittest.TestCase):
             self.assertEqual(view.functions(offset=500), Page((), None))
             self.assertEqual(view.function_at(self.entry), first.items[0])
             self.assertIsNone(view.function_at(Address("ram", self.entry.offset + 1)))
+            # The call instruction's interior and the next instruction belong to dispatch.
+            for interior in (1, 5):
+                self.assertEqual(view.function_containing(Address("ram", self.entry.offset + interior)),
+                                 first.items[0])
+            self.assertIsNone(view.function_containing(Address("ram", self.entry.offset + 0x100000)))
+            self.assertEqual(view.functions_named("answer"), Page(second.items, None))
+            self.assertEqual(view.functions_named("answer", limit=1), Page(second.items, None))
+            self.assertEqual(view.functions_named("missing"), Page((), None))
+            for bad in ("", "a" * 2001, "x\n", "ns::"):
+                with self.subTest(name=bad), self.assertRaises(ValueError):
+                    view.functions_named(bad)
 
             outgoing = view.xrefs_from(self.entry)
             incoming = view.xrefs_to(self.target)
@@ -380,6 +398,34 @@ class LiveGhidraTests(unittest.TestCase):
         while child_ids() & started and monotonic() < deadline:
             sleep(0.01)
         self.assertFalse(child_ids() & started, "view close leaked a native decompiler")
+
+    def test_cli_selects_functions_by_name_interior_address_or_listing(self):
+        executable = shutil.which("binaryrat-decompile")
+        base = [*([executable] if executable is not None else [sys.executable, "-m", "binaryrat.decompile_cli"]),
+                str(self.marker), self.program_path]
+        options = ["--install-dir", str(self.install), "--backend", "stock"]
+        before = self.snapshot()
+        with open_program(self.marker, self.program_path, backend="stock") as view:
+            stock = view.decompile(self.target)
+
+        def run(*arguments):
+            return subprocess.run([*base, *arguments, *options], encoding="utf-8", capture_output=True,
+                                  timeout=120)
+
+        named = run("answer", "--json")
+        self.assertEqual(named.returncode, 0, named.stderr)
+        self.assertEqual(json.loads(named.stdout)["c"], stock.c)
+        interior = run(f"{self.entry.space}:{self.entry.offset + 5:x}", "--json")
+        self.assertEqual(interior.returncode, 0, interior.stderr)
+        self.assertEqual(json.loads(interior.stdout)["function"]["name"], "dispatch")
+        self.assertIn(f"is inside dispatch at {self.entry}", interior.stderr)
+        listed = run("--list", "--match", "ANS")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(listed.stdout.splitlines(), [f"{self.target}  {stock.function.signature}"])
+        missing = run("missing")
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn('no function named "missing"', missing.stderr)
+        self.assertEqual(before, self.snapshot())
 
     def test_scheduled_backend_is_shared_with_the_cli(self):
         from ghidra.framework import Application

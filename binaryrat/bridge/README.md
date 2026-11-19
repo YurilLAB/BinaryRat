@@ -60,8 +60,9 @@ detected during export stops publication.
 ### Inspect a possible structure in CodeBrowser
 
 1. Install the extension and let auto-analysis finish. In **Window → Script Manager**, enable **In Tool** for `BinaryRatRecoverLayouts.java` and `BinaryRatBrowseLayout.java`.
-2. Put the cursor inside the function that uses the suspected structure. Choose **Tools → BinaryRat → Recover Layout at Cursor**, enter the zero-based parameter index and the path for the new JSON file. For a first look, keep the direct-call depth at zero. Increase it to include supported calls that receive the same object pointer.
-3. Open **Tools → BinaryRat → Browse Layout Evidence** and enter the path to that JSON file. Filter or sort the table by field offset, access width, function or operation. Double-click a row to navigate to its instruction in the Listing.
+2. Put the cursor inside the function that uses the suspected structure. Choose **Tools → BinaryRat → Recover Layout at Cursor** and enter the zero-based parameter index; the dialog lists the parameters of the Listing signature to help. The suggested report path in your home folder is a new file name, so repeated runs need no edits. For a first look, keep the direct-call depth at zero. Increase it to include supported calls that receive the same object pointer.
+3. When the report is saved, its evidence table opens. Filter or sort it by field offset (shown as `+0x1`), access width, operation, instruction text or function. Double-click a row to navigate to its instruction in the Listing.
+4. To reopen a saved report later, choose **Tools → BinaryRat → Browse Layout Evidence** and pick the JSON file. The file dialog starts in the folder of the latest recovered report.
 
 For example, the corpus function `read_packed` reads a four-byte field starting at byte offset 1 of parameter 0. The corresponding table row takes you to the load, where you can inspect the surrounding instructions before deciding how to type the field. Overlapping widths remain visible as alternatives.
 

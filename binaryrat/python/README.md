@@ -15,6 +15,7 @@ BinaryRat reports without starting a JVM or opening the Ghidra project.
 ```sh
 binaryrat-diff before.serial.jsonl after.serial.jsonl
 binaryrat-diff before.serial.jsonl after.serial.jsonl --json
+binaryrat-diff before.serial.jsonl after.serial.jsonl --patch
 binaryrat-explain read_packed.json --offset 0x1
 ```
 
@@ -23,8 +24,11 @@ digests, prototypes, C text or decompilation status changed. It matches on
 address space and entry offset and checks that each file describes a single
 revision of the same SHA-256-identified executable. For a useful comparison,
 keep the same load addresses and export selection. A function present in only
-one capture is reported as added or removed. The exit code is 0 for identical
-records, 1 for differences and 2 for invalid inputs.
+one capture is reported as added or removed. `--patch` adds a unified diff of
+each changed prototype, error and C text (`--context N` lines around each hunk,
+3 by default; with `--json` it is the `patch` field). It reads both files a second
+time and keeps only the earlier text of the changed functions in memory. The exit
+code is 0 for identical records, 1 for differences and 2 for invalid inputs.
 
 `binaryrat-explain` shows which recorded instructions support a proposed
 field. Supply a byte offset, or omit `--offset` to inspect the layout for the
@@ -122,6 +126,10 @@ ceiling. Startup, engine, cache and running-analysis errors from the scheduled
 backend reach the caller. A context closes its decompilation session before
 releasing its Program.
 
+`view.function_containing(address)` finds the function whose body holds an
+address, and `view.functions_named(name)` finds functions by simple or
+qualified name; a name can repeat across namespaces.
+
 `view.decompilation_backend` reports the selected backend.
 `view.decompile_with_metrics(entry)` includes the result and its cache
 status. Set `BINARYRAT_CACHE_DIR` before launching Python to persist scheduled
@@ -148,12 +156,20 @@ installed and your Ghidra 12.2 installation selected, run
 
 ```console
 binaryrat-decompile workspace.gpr /program ram:0x401000 --json
+binaryrat-decompile workspace.gpr /program parse_header
+binaryrat-decompile workspace.gpr /program 0x401a2c
+binaryrat-decompile workspace.gpr /program --list --match parse
 ```
 
 The CLI requires the shared scheduler by default. Pass `--install-dir` to
-select a Ghidra installation explicitly. The address is an unsigned
-hexadecimal offset. Omit the address space to use the Program's image-base
-space. By default the command writes C on success. The JSON form includes
+select a Ghidra installation explicitly. Select the function by any address
+in its body, such as a call site from a crash report, or by name
+(`ns::f` for a qualified name). An address is an unsigned hexadecimal offset;
+omit the address space to use the Program's image-base space. A name that is
+also valid hexadecimal, such as `add`, needs the `name:` prefix. A shared name
+is refused with the matching entries. `--list` prints each function's entry
+and signature without decompiling, and `--match` keeps names that contain the
+text. By default the command writes C on success. The JSON form includes
 the backend, cache status and decompiler flags. Exit status is 0 on success,
 1 for an incomplete decompilation, 2 for invalid input or an unavailable
 Program or backend, and 130 on interruption.

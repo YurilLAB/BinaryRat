@@ -328,6 +328,45 @@ class ProgramView:
             )
             return _function(function) if function is not None else None
 
+    def function_containing(self, address: Address) -> ProgramFunction | None:
+        """Look up the local function whose body contains an address, such as a call site."""
+        with self._read() as program:
+            function = program.getFunctionManager().getFunctionContaining(
+                self._native_address(program, address)
+            )
+            return _function(function) if function is not None and not function.isExternal() else None
+
+    def functions_named(self, name: str, *, limit: int = 100) -> Page[ProgramFunction]:
+        """Find local functions by simple name, or by qualified name such as ``ns::f``.
+
+        A name can repeat across namespaces and, for unnamed sections, within one. The
+        page lists matches in ascending entry order; ``next_offset`` is never set.
+        """
+        if not isinstance(name, str) or not name or len(name) > 2000 or not name.isprintable():
+            raise ValueError("function name must be a printable string of 1 to 2000 characters")
+        self._validate_page(0, limit)
+        simple = name.rsplit("::", 1)[-1]
+        if not simple:
+            raise ValueError("function name must not end with '::'")
+        from ghidra.program.model.symbol import SymbolType
+
+        with self._read() as program:
+            manager = program.getFunctionManager()
+            matches = []
+            for symbol in _iter_java(program.getSymbolTable().getSymbols(simple)):
+                _check_cancel(self._cancel)
+                if symbol.getSymbolType() != SymbolType.FUNCTION or symbol.isExternal():
+                    continue
+                function = manager.getFunctionAt(symbol.getAddress())
+                if function is None or function.isExternal():
+                    continue
+                if name not in (str(function.getName()), str(function.getName(True))):
+                    continue
+                if len(matches) == limit:
+                    return Page(tuple(sorted(matches, key=lambda f: f.entry)), None, truncated=True)
+                matches.append(_function(function))
+            return Page(tuple(sorted(matches, key=lambda f: f.entry)), None)
+
     def xrefs_to(
         self, target: Address, *, offset: int = 0, limit: int = 100
     ) -> Page[CrossReference]:

@@ -5,6 +5,7 @@ Apache-2.0; Copyright 2026 YurilLAB.
 
 import argparse
 from dataclasses import dataclass, fields
+import difflib
 import hashlib
 import json
 from pathlib import Path
@@ -32,15 +33,21 @@ class _Fingerprint:
 
 _FIELDS = tuple(field.name for field in fields(_Fingerprint))
 _DEFAULT_MIB = 64
+_PATCHED_FIELDS = {"prototype", "c", "error"}
 
 
-class FunctionChange(TypedDict):
+class _FunctionChangeFields(TypedDict):
     kind: Literal["added", "removed", "changed"]
     address_space: str
     address: str
     before_name: str | None
     after_name: str | None
     fields: list[str]
+
+
+class FunctionChange(_FunctionChangeFields, total=False):
+    # Present only when a patch was requested and the prototype, C or error changed.
+    patch: str
 
 
 class DiffReport(TypedDict):
@@ -112,10 +119,57 @@ def _change(kind: Literal["added", "removed", "changed"], entry: Address,
                           before_name=before, after_name=after, fields=changed)
 
 
-def compare_exports(before: Path, after: Path, *, max_record_mib: int = _DEFAULT_MIB) -> DiffReport:
-    """Compare exported records, keeping fingerprints in memory instead of decompiled C."""
+def _review_lines(record: Decompilation) -> list[str]:
+    lines = [f"/* prototype: {record.prototype} */"]
+    if record.error:
+        lines += [f"/* error: {line} */" for line in record.error.splitlines()]
+    return lines + record.c.splitlines()
+
+
+def _patches(before: Path, after: Path, limit: int, wanted: dict[Address, tuple[_Fingerprint, _Fingerprint]],
+             context: int) -> dict[Address, str]:
+    """Diff the prototype, error and C of changed functions in a second pass.
+
+    Only the earlier export's text for those functions is held in memory. Each record
+    must still match its first-pass fingerprint, so a file replaced between passes fails.
+    """
+    earlier: dict[Address, list[str]] = {}
+    patches: dict[Address, str] = {}
+    for side, path in enumerate((before, after)):
+        try:
+            with path.open("rb") as stream:
+                for record in parse_export(_lines(stream, limit)):
+                    entry = record.function.entry
+                    prints = wanted.get(entry)
+                    if prints is None:
+                        continue
+                    if _fingerprint(record) != prints[side]:
+                        raise ExportError("the export changed while it was being compared")
+                    if side == 0:
+                        earlier[entry] = _review_lines(record)
+                        continue
+                    name = record.function.name
+                    patches[entry] = "\n".join(difflib.unified_diff(
+                        earlier.pop(entry), _review_lines(record), f"before {entry} {name}",
+                        f"after {entry} {name}", n=context, lineterm=""))
+        except (ExportError, RecursionError) as error:
+            raise ExportError(f"{path}: {error}") from error
+    if len(patches) != len(wanted):
+        raise ExportError("the exports changed while they were being compared")
+    return patches
+
+
+def compare_exports(before: Path, after: Path, *, max_record_mib: int = _DEFAULT_MIB,
+                    patch_context: int | None = None) -> DiffReport:
+    """Compare exported records, keeping fingerprints in memory instead of decompiled C.
+
+    With ``patch_context``, each change to a prototype, error or C text also carries a
+    unified diff with that many context lines, from a second pass over both files.
+    """
     if type(max_record_mib) is not int or not 1 <= max_record_mib <= (sys.maxsize - 1) // (1024 * 1024):
         raise ValueError("max_record_mib is outside the supported positive range")
+    if patch_context is not None and (type(patch_context) is not int or not 0 <= patch_context <= 10_000):
+        raise ValueError("patch_context must be an integer from 0 to 10000")
     limit = max_record_mib * 1024 * 1024
     previous: dict[Address, _Fingerprint] = {}
     program_id = ""
@@ -124,6 +178,7 @@ def compare_exports(before: Path, after: Path, *, max_record_mib: int = _DEFAULT
 
     counts = {"added": 0, "removed": 0, "changed": 0, "unchanged": 0}
     changes: dict[Address, FunctionChange] = {}
+    patched: dict[Address, tuple[_Fingerprint, _Fingerprint]] = {}
     for _, entry, current in _records(after, limit, program_id):
         old = previous.pop(entry, None)
         if old is None:
@@ -135,9 +190,14 @@ def compare_exports(before: Path, after: Path, *, max_record_mib: int = _DEFAULT
             counts["changed"] += 1
             changed = [name for name in _FIELDS if getattr(old, name) != getattr(current, name)]
             changes[entry] = _change("changed", entry, old.name, current.name, changed)
+            if patch_context is not None and _PATCHED_FIELDS.intersection(changed):
+                patched[entry] = (old, current)
     counts["removed"] = len(previous)
     for entry, old in previous.items():
         changes[entry] = _change("removed", entry, old.name, None, [])
+    if patched:
+        for entry, patch in _patches(before, after, limit, patched, patch_context).items():
+            changes[entry]["patch"] = patch
     return DiffReport(schema_version=1, program_id=program_id, counts=counts,
                       changes=[changes[key] for key in sorted(changes)])
 
@@ -155,6 +215,8 @@ def _print_text(report: DiffReport) -> None:
         detail = ", ".join(change["fields"])
         print(f'{change["kind"]} {space}:{change["address"]} {names}' +
               (f" ({detail})" if detail else ""))
+        for line in change.get("patch", "").splitlines():
+            print(line if line.replace("\t", " ").isprintable() else ascii(line)[1:-1])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -162,17 +224,26 @@ def main(argv: list[str] | None = None) -> int:
         prog="binaryrat-diff",
         description="Compare two BinaryRat decompiler exports of the same executable SHA-256.",
         epilog="Use the same selection and address layout to track edits. Added and removed "
-               "describe records in the exports. Exit 0 for identical records, 1 for differences, "
-               "and 2 for errors.",
+               "describe records in the exports. --patch reads both files twice and holds the "
+               "earlier text of changed functions in memory. Exit 0 for identical records, "
+               "1 for differences, and 2 for errors.",
     )
     parser.add_argument("before", type=Path)
     parser.add_argument("after", type=Path)
     parser.add_argument("--json", action="store_true", help="emit a versioned JSON report")
+    parser.add_argument("--patch", action="store_true",
+                        help="show a unified diff of each changed prototype, error and C text")
+    parser.add_argument("--context", type=int, metavar="LINES",
+                        help="context lines around each --patch hunk (default: 3)")
     parser.add_argument("--max-record-mib", type=int, default=_DEFAULT_MIB,
                         help="maximum input line size in MiB, including newline (default: 64)")
     args = parser.parse_args(argv)
+    if args.context is not None and not args.patch:
+        parser.error("--context only applies to --patch")
     try:
-        report = compare_exports(args.before, args.after, max_record_mib=args.max_record_mib)
+        report = compare_exports(args.before, args.after, max_record_mib=args.max_record_mib,
+                                 patch_context=(args.context if args.context is not None else 3)
+                                 if args.patch else None)
     except (OSError, ValueError) as error:
         print(f"binaryrat-diff: {error}", file=sys.stderr)
         return 2

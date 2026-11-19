@@ -22,6 +22,7 @@ import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JDialog;
 import javax.swing.JLabel;
+import javax.swing.JTable;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
@@ -244,6 +245,32 @@ public final class WorkspaceProbe implements GhidraLaunchable {
             "Expected three structure accesses in the example");
         require(!program.isChanged() && program.getModificationNumber() == revision,
             "Layout recovery changed the Program");
+        // Recovery opens the new report's evidence table, the analyst's next step.
+        var table = await("evidence table from the workspace recovery",
+            () -> dialog("BinaryRat Layout Evidence — measurement_area (parameter 0)"));
+        await("evidence rows with hex offsets and disassembly", () -> {
+            var rows = descendants(table).filter(JTable.class::isInstance).map(JTable.class::cast)
+                .findFirst().orElse(null);
+            if (rows == null || rows.getRowCount() < 3) {
+                return null;
+            }
+            int offset = rows.getColumnModel().getColumnIndex("Offset");
+            int instruction = rows.getColumnModel().getColumnIndex("Instruction");
+            for (int row = 0; row < rows.getRowCount(); row++) {
+                if (!String.valueOf(rows.getValueAt(row, offset)).startsWith("+0x") ||
+                        String.valueOf(rows.getValueAt(row, instruction)).isBlank()) {
+                    return null;
+                }
+            }
+            return Boolean.TRUE;
+        });
+        swing(() -> {
+            snapshot(table, WorkspaceProbe.evidence.resolve("evidence.png"));
+            descendants(table).filter(JButton.class::isInstance).map(JButton.class::cast)
+                .filter(button -> button.getText().equals("Dismiss")).findFirst().orElseThrow().doClick();
+            return null;
+        });
+        await("evidence table dismissed", () -> table.isShowing() ? null : Boolean.TRUE);
         inspectCorrections(tool, program, function, revision);
     }
 

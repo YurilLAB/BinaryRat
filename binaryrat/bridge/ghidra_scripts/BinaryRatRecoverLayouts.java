@@ -7,6 +7,7 @@
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -26,6 +27,8 @@ import com.google.gson.JsonObject;
 import binaryrat.EngineClient;
 import binaryrat.LayoutEvidence;
 import binaryrat.ScheduledDecompiler;
+import binaryrat.writeback.LayoutEvidenceBrowser;
+import binaryrat.writeback.LayoutEvidenceTable;
 import generic.hash.HashUtilities;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
@@ -35,8 +38,10 @@ import ghidra.app.script.GhidraScript;
 import ghidra.app.services.CodeViewerService;
 import ghidra.app.services.ProgramManager;
 import ghidra.features.base.values.GhidraValuesMap;
+import ghidra.framework.preferences.Preferences;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.pcode.HighFunction;
@@ -61,6 +66,7 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 	private static final String PARAMETER = "Parameter index";
 	private static final String DEPTH = "Direct-call depth";
 	private static final String OUTPUT = "Output JSON path";
+	private static final int LISTED_PARAMETERS = 8;
 	private long revision;
 
 	private record Request(Function function, int parameter, int timeout, int depth, Path output) {
@@ -120,6 +126,9 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 					failure);
 			}
 			println("BinaryRat layout evidence written: " + output);
+			if (!isRunningHeadless()) {
+				showReport(output);
+			}
 		}
 		finally {
 			try (Stream<Path> files = Files.walk(workspace)) {
@@ -130,6 +139,30 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 			catch (IOException cleanup) {
 				printerr("Unable to clean up temporary layout workspace: " + cleanup.getMessage());
 			}
+		}
+	}
+
+	/** Opens the new report's evidence table, the next step after a desktop recovery. */
+	private void showReport(Path output) throws CancelledException {
+		var tool = state.getTool();
+		// Browse Layout Evidence starts in the folder that holds the latest report.
+		Preferences.setProperty(LayoutEvidenceTable.DIRECTORY_PREFERENCE, output.getParent().toString());
+		Preferences.store();
+		if (!LayoutEvidenceTable.supported(tool)) {
+			return;
+		}
+		try {
+			var review = LayoutEvidenceBrowser.read(currentProgram, output, monitor);
+			if (review.rows().isEmpty()) {
+				tool.setStatusInfo("BinaryRat found no exact field accesses. The report is at " + output);
+				return;
+			}
+			LayoutEvidenceTable.show(tool, currentProgram, review, monitor);
+		}
+		catch (IOException | IllegalArgumentException failure) {
+			// The report is already published; reopen it later with Browse Layout Evidence.
+			printerr("The layout report was written, but its evidence table did not open: " +
+				failure.getMessage());
 		}
 	}
 
@@ -161,13 +194,12 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 		GhidraValuesMap values = new GhidraValuesMap();
 		values.defineInt(PARAMETER, 0);
 		values.defineInt(DEPTH, 0);
-		values.defineString(OUTPUT, Path.of(System.getProperty("user.home"),
-			"layout-" + hex(entry) + ".json").toString());
+		values.defineString(OUTPUT, unusedReportPath(entry).toString());
 		values.setValidator((input, status) -> {
 			String error = input.hasValue(PARAMETER) && input.hasValue(DEPTH) ?
 				parameterError(input.getInt(PARAMETER), input.getInt(DEPTH)) : "Enter both numbers";
-			if (error == null && (!input.hasValue(OUTPUT) || input.getString(OUTPUT).isBlank())) {
-				error = "Enter a path for the new JSON report";
+			if (error == null) {
+				error = outputError(input.hasValue(OUTPUT) ? input.getString(OUTPUT) : null);
 			}
 			if (error != null) {
 				status.setStatusText(error, MessageType.ERROR);
@@ -176,12 +208,61 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 		});
 		setReusePreviousChoices(false);
 		askValues("Recover Layout at Cursor",
-			"Function " + function.getName(true) + " at " + entry +
+			"Function " + function.getName(true) + " at " + entry + "\n" + parameterList(function) +
 			"\nSelect a zero-based decompiler parameter index. Use depth 0 for this function only.",
 			values);
 		checkCursor(cursor);
 		return new Request(function, values.getInt(PARAMETER), 30, values.getInt(DEPTH),
 			Path.of(values.getString(OUTPUT)));
+	}
+
+	/** The Listing's view of the parameters, to help pick an index; the decompiler can differ. */
+	private static String parameterList(Function function) {
+		Parameter[] parameters = function.getParameters();
+		if (parameters.length == 0) {
+			return "The Listing signature has no parameters. The decompiler may still find some.";
+		}
+		StringBuilder text = new StringBuilder("Parameters in the Listing signature:");
+		for (int i = 0; i < Math.min(parameters.length, LISTED_PARAMETERS); i++) {
+			text.append("\n    ").append(i).append(": ").append(parameters[i].getDataType().getDisplayName())
+				.append(' ').append(parameters[i].getName());
+		}
+		if (parameters.length > LISTED_PARAMETERS) {
+			text.append("\n    and ").append(parameters.length - LISTED_PARAMETERS).append(" more");
+		}
+		return text.toString();
+	}
+
+	/** The first free report name, so a second run on one function needs no new path. */
+	private static Path unusedReportPath(Address entry) {
+		Path home = Path.of(System.getProperty("user.home"));
+		Path first = home.resolve("layout-" + hex(entry) + ".json");
+		for (int copy = 2; Files.exists(first, LinkOption.NOFOLLOW_LINKS) && copy < 1000; copy++) {
+			Path next = home.resolve("layout-" + hex(entry) + "-" + copy + ".json");
+			if (!Files.exists(next, LinkOption.NOFOLLOW_LINKS)) {
+				return next;
+			}
+		}
+		return first;
+	}
+
+	private static String outputError(String output) {
+		if (output == null || output.isBlank()) {
+			return "Enter a path for the new JSON report";
+		}
+		try {
+			Path path = Path.of(output).toAbsolutePath().normalize();
+			if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+				return "A file already exists at that path. Enter a new file name";
+			}
+			if (path.getParent() == null || !Files.isDirectory(path.getParent())) {
+				return "The folder for the report does not exist";
+			}
+		}
+		catch (InvalidPathException invalid) {
+			return "Enter a valid file path";
+		}
+		return null;
 	}
 
 	private Function requireSupported(Function function) throws IOException {

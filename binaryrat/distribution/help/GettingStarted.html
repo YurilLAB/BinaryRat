@@ -32,8 +32,8 @@
 <ol>
   <li>Find <code>measurement_area</code> in the Symbol Tree and navigate into its code.</li>
   <li>Open <b>Tools → BinaryRat → Inspect Selected Function</b> for focused decompilation as you navigate. Use the panel’s refresh or cancel controls.</li>
-  <li>When analysis finishes, use <b>Recover Layout at Cursor</b> with parameter 0. Save the evidence to a new JSON report.</li>
-  <li>Under <b>Browse Layout Evidence</b>, open the report and double-click an evidence row to jump to its instruction.</li>
+  <li>When analysis finishes, use <b>Recover Layout at Cursor</b> with parameter 0. The dialog lists the function’s parameters and suggests a new report file.</li>
+  <li>The evidence table opens when the report is saved. Double-click a row to jump to its instruction. Reopen a saved report later with <b>Browse Layout Evidence</b>.</li>
 </ol>
 <p>The sample contains a structure with count, width and height fields. Its <a href="examples/walkthrough.c">source</a> is provided for reference.</p>
 <h2>Correct a call prototype</h2>
@@ -59,7 +59,8 @@
 <p>With Python 3.10 or later, install the BinaryRat wheel and the bundled PyGhidra dependencies into a virtual environment from the application directory:</p>
 <pre>python -m pip install --no-index --find-links python --find-links ghidra/Ghidra/Features/PyGhidra/pypkg/dist "binaryrat[live]"</pre>
 <p>Set <code>JAVA_HOME_OVERRIDE</code> to the full path to the bundled <code>jdk</code> directory. Use saved projects for scripting and supply the bundled Ghidra path:</p>
-<pre>binaryrat-decompile project.gpr /example ram:0x401000 --json --install-dir ghidra</pre>
-<p>Use the real entry address shown in CodeBrowser for the selected function.</p>
+<pre>binaryrat-decompile project.gpr /example measurement_area --install-dir ghidra
+binaryrat-decompile project.gpr /example --list --match measurement --install-dir ghidra</pre>
+<p>Select a function by name or by any address inside it, as shown in CodeBrowser. Add <code>--json</code> for the result with its backend and cache status.</p>
 </body>
 </html>

@@ -120,6 +120,7 @@ def main() -> None:
         with ZipFile(io.BytesIO(package.read("BinaryRat/lib/BinaryRat.jar"))) as library:
             if not {"binaryrat/writeback/ProtectedLayoutWriteBack.class",
                     "binaryrat/writeback/LayoutEvidenceBrowser.class",
+                    "binaryrat/writeback/LayoutEvidenceTable.class",
                     "binaryrat/writeback/CallPrototypeOverride.class",
                     "binaryrat/analysis/AnalysisProfiles.class",
                     "binaryrat/DecompilationSession.class",

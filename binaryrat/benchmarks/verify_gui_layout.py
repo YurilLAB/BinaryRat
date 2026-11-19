@@ -59,6 +59,9 @@ def main():
         if os.name == "nt":
             # Ghidra's launch.bat sets -Duser.home from USERPROFILE after JAVA_TOOL_OPTIONS.
             env["USERPROFILE"] = str(home)
+            # The Windows shell resolves Desktop inside the profile. Swing's file dialogs
+            # (Browse Layout Evidence) fail without it, as on a profile that lacks one.
+            (home / "Desktop").mkdir()
         env.pop("BINARYRAT_ENGINE", None)
         env.pop("BINARYRAT_CACHE_DIR", None)
         prep = run([str(launcher), str(work), "layout", "-import", str(binary), "-max-cpu", "2",

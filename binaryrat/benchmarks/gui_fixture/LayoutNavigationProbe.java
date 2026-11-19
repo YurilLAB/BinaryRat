@@ -150,11 +150,19 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         CountDownLatch recovery = script(tool, "BinaryRatRecoverLayouts.java");
         JDialog options = await("parameter options", () -> dialog("Recover Layout at Cursor"));
         swing(() -> {
+            // The dialog lists the Listing's parameters to help choose an index.
+            if (descendants(options).filter(JLabel.class::isInstance).map(c -> ((JLabel) c).getText())
+                    .filter(text -> text != null).map(text -> text.replace("&nbsp;", " ").replaceAll("<[^>]*>", " "))
+                    .noneMatch(text -> text.contains("0: PackedRecord * record"))) {
+                throw new AssertionError("Recover Layout at Cursor did not list the parameters");
+            }
             widget(options, JTextField.class, w -> w.getText().endsWith(".json")).setText(report.toString());
             widget(options, JButton.class, b -> b.getText().equals("OK")).doClick();
             return null;
         });
         await("published GUI recovery report", () -> Files.isRegularFile(report) ? Boolean.TRUE : null);
+        // Recovery opens the new report's evidence table directly.
+        JDialog recovered = await("evidence table opened by recovery", () -> dialog("BinaryRat Layout Evidence"));
         if (!recovery.await(10, TimeUnit.SECONDS)) {
             throw new AssertionError("Recovery script did not finish after publishing");
         }
@@ -179,6 +187,13 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         if (evidence.equals(entry)) {
             throw new AssertionError("Fixture needs distinct navigation addresses");
         }
+        String disassembly = program.getListing().getInstructionAt(evidence).toString();
+        await("recovered evidence row", () -> evidenceRow(recovered, evidence, disassembly) >= 0 ? Boolean.TRUE : null);
+        swing(() -> {
+            widget(recovered, JButton.class, b -> "Dismiss".equals(b.getText())).doClick();
+            return null;
+        });
+        await("recovered evidence table dismissed", () -> recovered.isShowing() ? null : Boolean.TRUE);
         swing(() -> listing.goTo(new ProgramLocation(program, entry), true));
         await("distinct starting address", () -> entry.equals(listing.getCurrentLocation().getAddress()) ?
             Boolean.TRUE : null);
@@ -202,23 +217,16 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         CountDownLatch browse = script(tool, "BinaryRatBrowseLayout.java");
         JDialog open = await("report picker", () -> dialog("Choose a BinaryRat layout report"));
         swing(() -> {
-            widget(open, JTextField.class, w -> true).setText(report.toString());
-            widget(open, JButton.class, b -> "OK".equals(b.getText())).doClick();
+            widget(open, JTextField.class, w -> "filenameTextField".equals(w.getName())).setText(report.toString());
+            widget(open, JButton.class, b -> "Open".equals(b.getText())).doClick();
             return null;
         });
         JDialog evidenceTable = await("layout evidence table", () -> dialog("BinaryRat Layout Evidence"));
         await("evidence row", () -> {
             JTable table = widget(evidenceTable, JTable.class, t -> true);
             int column = table.getColumnModel().getColumnIndex("Location");
-            for (int row = 0; row < table.getRowCount(); row++) {
-                Object location = table.getValueAt(row, column);
-                if (!(location instanceof AddressBasedLocation address) || !evidence.equals(address.getAddress())) {
-                    continue;
-                }
-                Object verification = table.getValueAt(row, table.getColumnModel().getColumnIndex("Instruction bytes"));
-                if (!"Verified".equals(verification)) {
-                    throw new AssertionError("Evidence row is missing an instruction byte verification");
-                }
+            int row = evidenceRow(evidenceTable, evidence, disassembly);
+            if (row >= 0) {
                 if (evidence.equals(listing.getCurrentLocation().getAddress())) {
                     throw new AssertionError("Listing already at evidence before row activation");
                 }
@@ -265,6 +273,27 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         }
         System.out.printf(Locale.ROOT, "BINARYRAT_GUI_NAVIGATION_OK %s %s %s %.3f %.3f%n",
             entry, interior, evidence, recoverSeconds, browseSeconds);
+    }
+
+    /** The row citing an instruction, checked for its verified bytes, hex offset and disassembly. */
+    private static int evidenceRow(JDialog dialog, Address evidence, String disassembly) {
+        JTable table = widget(dialog, JTable.class, t -> true);
+        var columns = table.getColumnModel();
+        for (int row = 0; row < table.getRowCount(); row++) {
+            Object location = table.getValueAt(row, columns.getColumnIndex("Location"));
+            if (!(location instanceof AddressBasedLocation address) || !evidence.equals(address.getAddress())) {
+                continue;
+            }
+            if (!"Verified".equals(table.getValueAt(row, columns.getColumnIndex("Instruction bytes")))) {
+                throw new AssertionError("Evidence row is missing an instruction byte verification");
+            }
+            if (!"+0x1".equals(String.valueOf(table.getValueAt(row, columns.getColumnIndex("Offset")))) ||
+                    !disassembly.equals(table.getValueAt(row, columns.getColumnIndex("Instruction")))) {
+                throw new AssertionError("Evidence row lacks its hex offset or disassembly");
+            }
+            return row;
+        }
+        return -1;
     }
 
     private static void inspectForeground(PluginTool tool, Program program, CodeViewerService listing,
