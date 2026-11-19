@@ -2,18 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 package binaryrat.desktop;
 
-import javax.swing.Icon;
+import javax.swing.ImageIcon;
 
 import resources.ResourceManager;
 
-/** The README logo at the sizes BinaryRat's own windows, actions and dialogs use. */
+/** The README logo, scaled for BinaryRat's own windows, actions and dialogs. */
 public final class BinaryRatIcons {
-    /** Rendered by binaryrat/tools/make_branding.py into the extension JAR. */
-    public static final String LOGO_16_PATH = "images/binaryrat/logo16.png";
-    public static final Icon LOGO_16 = ResourceManager.loadImage(LOGO_16_PATH);
-    public static final Icon LOGO_24 = ResourceManager.loadImage("images/binaryrat/logo24.png");
-    public static final Icon LOGO_32 = ResourceManager.loadImage("images/binaryrat/logo32.png");
-    public static final Icon LOGO_64 = ResourceManager.loadImage("images/binaryrat/logo64.png");
+    /** A byte-for-byte copy of binaryrat/docs/assets/logo.png inside the extension JAR. */
+    public static final String LOGO_PATH = "images/binaryrat/logo.png";
+    private static final ImageIcon LOGO = ResourceManager.loadImage(LOGO_PATH);
+    public static final ImageIcon LOGO_16 = ResourceManager.getScaledIcon(LOGO, 16, 16);
+    public static final ImageIcon LOGO_32 = ResourceManager.getScaledIcon(LOGO, 32, 32);
+    public static final ImageIcon LOGO_64 = ResourceManager.getScaledIcon(LOGO, 64, 64);
 
     private BinaryRatIcons() {
     }

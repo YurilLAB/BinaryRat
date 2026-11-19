@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// Modified by BinaryRat to show the BinaryRat splash image.
+// Modified by BinaryRat to show the BinaryRat README logo as the splash image.
 package ghidra.framework.main;
 
 import java.awt.*;
@@ -44,7 +44,8 @@ class InfoPanel extends JPanel {
 
 	private final static String SPLASH_FILENAME = "splash.txt";
 	private final static String CLOUD_REV_FILENAME = "images/cloudbarReversed.jpg";
-	private final static String GHIDRA_FILENAME = "images/BinaryRatSplash.png";
+	private final static String GHIDRA_FILENAME = "images/BinaryRatLogo.png";
+	private final static int SPLASH_IMAGE_SIZE = 500;
 	private final static String CLOUD_FILENAME = "images/cloudbar.jpg";
 
 	private static final String FONT_ID = "font.splash.infopanel";
@@ -180,7 +181,8 @@ class InfoPanel extends JPanel {
 		imagePanel.setBackground(bgColor);
 
 		imagePanel.setLayout(new BorderLayout());
-		ImageIcon ghidraSplashImage = ResourceManager.loadImage(GHIDRA_FILENAME);
+		ImageIcon ghidraSplashImage = ResourceManager.getScaledIcon(
+			ResourceManager.loadImage(GHIDRA_FILENAME), SPLASH_IMAGE_SIZE, SPLASH_IMAGE_SIZE);
 
 		JLabel l = new GIconLabel(ghidraSplashImage);
 		imagePanel.add(l, BorderLayout.CENTER);

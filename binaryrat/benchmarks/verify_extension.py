@@ -126,6 +126,9 @@ def main() -> None:
                     "binaryrat/RttiEvidence.class",
                     "binaryrat/SummaryLayouts.class"} <= set(library.namelist()):
                 raise RuntimeError("extension is missing a shared Java service")
+            if (library.read("images/binaryrat/logo.png") !=
+                    (PROJECT / "binaryrat/docs/assets/logo.png").read_bytes()):
+                raise RuntimeError("extension icons must use the README logo unchanged")
         for name in ("LICENSE", "NOTICE"):
             if package.read(f"BinaryRat/{name}") != (PROJECT / name).read_bytes():
                 raise RuntimeError(f"missing or altered extension {name}")

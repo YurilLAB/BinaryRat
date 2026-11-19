@@ -17,6 +17,7 @@ import java.util.concurrent.FutureTask;
 import java.util.stream.Stream;
 
 import javax.imageio.ImageIO;
+import javax.swing.Icon;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JDialog;
@@ -55,12 +56,20 @@ import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.SymbolType;
 import ghidra.program.util.ProgramLocation;
 import ghidra.util.extensions.ExtensionUtils;
+import resources.icons.DerivedImageIcon;
 import resources.icons.UrlImageIcon;
 
 /** Exercise the actual CodeBrowser defaults from a new bundled application profile. */
 public final class WorkspaceProbe implements GhidraLaunchable {
     /** Directory beside the JSON report that receives window pictures. */
     private static Path evidence;
+    /** The fork's copy of binaryrat/docs/assets/logo.png, the logo in the README. */
+    private static final String LOGO = "images/BinaryRatLogo.png";
+
+    private static boolean isLogo(Icon icon, String path) {
+        String url = source(icon);
+        return url != null && url.endsWith("/" + path);
+    }
 
     @Override
     public void launch(GhidraApplicationLayout layout, String[] args) {
@@ -93,46 +102,61 @@ public final class WorkspaceProbe implements GhidraLaunchable {
         }
     }
 
-    /** The fork's splash, About and window icons, and BinaryRat's own window, use the README logo. */
+    /** The fork's splash, About and window icons, and BinaryRat's own window, scale the README logo. */
     private static void inspectBranding(PluginTool tool, Path evidence) throws Exception {
         require(ApplicationInformationDisplayFactory.createSplashScreenTitle().equals("Welcome To BinaryRat") &&
             ApplicationInformationDisplayFactory.createAboutTitle().equals("About BinaryRat"),
             "Splash and About titles do not name BinaryRat");
         for (String size : List.of("home", "16", "24", "32", "40", "48", "64", "128", "256")) {
-            var url = new GIcon("icon.base.application." + size).getUrl();
-            String expected = "images/BinaryRatIcon" + (size.equals("home") ? "16" : size) + ".png";
-            require(url != null && url.toString().endsWith(expected), "Application icon " + size + " is " + url);
+            var icon = new GIcon("icon.base.application." + size);
+            int pixels = size.equals("home") ? 16 : Integer.parseInt(size);
+            require(isLogo(icon, LOGO) && icon.getIconWidth() == pixels && icon.getIconHeight() == pixels,
+                "Application icon " + size + " is " + source(icon) + " at " + icon.getIconWidth());
         }
-        var animation = new GIcon("icon.dragon.256").getUrl();
-        require(animation != null && animation.toString().endsWith("images/BinaryRatIcon256.png"),
-            "Window animations use " + animation);
+        var animation = new GIcon("icon.dragon.256");
+        require(isLogo(animation, LOGO) && animation.getIconWidth() == 256,
+            "Window animations use " + source(animation));
         await("BinaryRat function view registered", () ->
             tool.getComponentProvider("BinaryRat Function") != null ? Boolean.TRUE : null);
         swing(() -> {
             // A tool window shows its template's icon; the application icons cover other windows.
             var toolIcon = tool.getIconURL();
-            require(toolIcon.getLocation().equals("images/BinaryRatIcon24.png") &&
-                toolIcon.getSmallIcon() instanceof UrlImageIcon small &&
-                small.getOriginalPath().equals("images/BinaryRatIcon16.png"),
+            require(toolIcon.getLocation().equals(LOGO) && isLogo(toolIcon.getSmallIcon(), LOGO) &&
+                toolIcon.getSmallIcon().getIconWidth() == 16,
                 "CodeBrowser tool icon: " + toolIcon.getLocation() + " / " + toolIcon.getSmallIcon());
             var frameIcons = tool.getToolFrame().getIconImages();
             require(!frameIcons.isEmpty() && frameIcons.getFirst().getWidth(null) == 16,
                 "CodeBrowser window icons: " + frameIcons);
             var about = ApplicationInformationDisplayFactory.createAboutComponent();
             var splash = descendants(about).filter(JLabel.class::isInstance).map(label -> ((JLabel) label).getIcon())
-                .filter(UrlImageIcon.class::isInstance).map(UrlImageIcon.class::cast).findFirst().orElse(null);
-            require(splash != null && splash.getOriginalPath().equals("images/BinaryRatSplash.png") &&
-                splash.getIconWidth() == 500 && splash.getIconHeight() == 500, "About image: " + splash);
+                .filter(icon -> isLogo(icon, LOGO)).findFirst().orElse(null);
+            require(splash != null && splash.getIconWidth() == 500 && splash.getIconHeight() == 500,
+                "About image: " + splash);
             snapshot(about, evidence.resolve("about.png"));
             var provider = tool.getComponentProvider("BinaryRat Function");
-            require(provider.getIcon() instanceof UrlImageIcon icon &&
-                icon.getOriginalPath().equals("images/binaryrat/logo16.png") && icon.getIconWidth() == 16,
-                "BinaryRat function view icon: " + provider.getIcon());
+            require(isLogo(provider.getIcon(), "images/binaryrat/logo.png") &&
+                provider.getIcon().getIconWidth() == 16,
+                "BinaryRat function view icon: " + source(provider.getIcon()));
             var inspect = action(tool, "BinaryRatForegroundPlugin", "Inspect Selected Function");
             require(inspect.getToolBarData() != null && inspect.getToolBarData().getIcon() == provider.getIcon(),
                 "The toolbar lacks the BinaryRat function view button");
             return null;
         });
+    }
+
+    /** The resource URL an icon was loaded from, through theme and scaling wrappers. */
+    private static String source(Icon icon) {
+        while (true) {
+            if (icon instanceof GIcon theme) {
+                icon = theme.getDelegate();
+            }
+            else if (icon instanceof DerivedImageIcon derived) {
+                icon = derived.getSourceIcon();
+            }
+            else {
+                return icon instanceof UrlImageIcon url ? url.getUrl().toString() : null;
+            }
+        }
     }
 
     /** Paint a Swing component tree into a PNG for the CI evidence. Call on the EDT. */

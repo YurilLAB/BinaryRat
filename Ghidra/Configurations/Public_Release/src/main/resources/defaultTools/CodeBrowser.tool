@@ -3,7 +3,7 @@
     <SUPPORTED_DATA_TYPE CLASS_NAME="ghidra.program.model.listing.Program" />
     <SUPPORTED_DATA_TYPE CLASS_NAME="ghidra.program.model.listing.DataTypeArchive" />
     <!-- Modified by BinaryRat: the CodeBrowser tool shows the BinaryRat logo. -->
-    <ICON LOCATION="images/BinaryRatIcon24.png" />
+    <ICON LOCATION="images/BinaryRatLogo.png" />
     <TOOL TOOL_NAME="CodeBrowser" INSTANCE_NAME="">
         <OPTIONS />
         <PACKAGE NAME="Ghidra Core">

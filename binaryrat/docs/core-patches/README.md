@@ -7,19 +7,22 @@
 
 ## Branding
 
-The source-built fork and its bundle show the logo from the README. These are resource
-and text changes, not runtime patches. `binaryrat/tools/make_branding.py` renders every
-image from `binaryrat/docs/assets/logo.png` (`--check` finds stale images), and
-`binaryrat/tools/test_make_branding.py` checks their sizes, licence entries and references.
+The source-built fork and its bundle show the README logo, `binaryrat/docs/assets/logo.png`.
+These are resource and text changes, not runtime patches. Every GUI copy of the logo is that
+file byte for byte; Ghidra scales it at runtime. `binaryrat/tools/test_branding.py` checks the
+copies and every reference.
 
 | Upstream file | Change |
 | --- | --- |
-| `Ghidra/Framework/Gui/src/main/resources/images/BinaryRat*.png` | New icons (16 to 256 pixels) and splash image, listed as Apache License 2.0 in the module's `certification.manifest` |
-| `Ghidra/Features/Base/data/base.icons.theme.properties` | Application, window and home icons |
+| `Ghidra/Framework/Gui/src/main/resources/images/BinaryRatLogo.png` | The README logo, listed as Apache License 2.0 in the module's `certification.manifest` |
+| `Ghidra/Features/Base/data/base.icons.theme.properties` | Application, window and home icons: `BinaryRatLogo.png[size(N,N)]` |
 | `Ghidra/Framework/Docking/data/docking.theme.properties` | Icon drawn by window animations |
 | `Ghidra/Configurations/Public_Release/src/main/resources/defaultTools/CodeBrowser.tool` | CodeBrowser tool icon |
-| `Ghidra/Features/Base/src/main/java/ghidra/framework/main/InfoPanel.java` | Splash and About image |
+| `Ghidra/Features/Base/src/main/java/ghidra/framework/main/InfoPanel.java` | Splash and About image, the logo scaled to 500 pixels |
 | `Ghidra/Features/Base/src/main/java/ghidra/framework/main/GhidraApplicationInformationDisplayFactory.java` | Splash and About titles |
+
+The extension JAR (`images/binaryrat/logo.png`) and the bundle's `help/logo.png` carry the same
+file. `verify_extension.py` compares the JAR copy with the README logo.
 
 The application name, settings directory and version text stay Ghidra's, so projects,
 scripts and user settings carry over unchanged. The bundle's desktop check

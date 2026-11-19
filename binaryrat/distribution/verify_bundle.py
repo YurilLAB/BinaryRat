@@ -71,7 +71,8 @@ def verify(archive: Path, output: Path, extract_dir: Path) -> None:
     source = root / "sources" / JDK_SOURCE_NAME
     for license_path in ("LICENSE", "NOTICE", "jdk/legal/java.base/LICENSE",
                          "jdk/legal/java.base/ASSEMBLY_EXCEPTION", EXTENSION_ROOT + "LICENSE",
-                         EXTENSION_ROOT + "NOTICE", "help/GettingStarted.html", "help/examples/walkthrough.c"):
+                         EXTENSION_ROOT + "NOTICE", "help/GettingStarted.html", "help/logo.png",
+                         "help/examples/walkthrough.c"):
         if not (root / license_path).is_file() or (root / license_path).stat().st_size == 0:
             raise ValueError(f"missing package content {license_path}")
     if manifest["jdk_source_sha256"] != JDK_SOURCE_SHA256 or digest(source) != JDK_SOURCE_SHA256:
