@@ -5,7 +5,7 @@
 
 BinaryRat is an open-source reverse-engineering project for Linux and Windows, built on Ghidra 12.2. Its C++20 engine manages decompilation scheduling and caching, and a Java extension connects it to Ghidra's native decompiler. [Ghidra 12.2 upstream](https://github.com/NationalSecurityAgency/ghidra/tree/Ghidra_12.2_build)
 
-**Download BinaryRat for Windows x64 or Linux x64.** Each complete ZIP includes the patched Ghidra build, BinaryRat's native engine and compiled extension, the default desktop workspace, JDK 25, and local help with an example binary. Extract the ZIP, launch `binaryrat.bat` on Windows or `./binaryrat` on Linux, then create a local project and import a binary. [Downloads](https://github.com/YurilLAB/BinaryRat/releases)
+**Standalone BinaryRat previews for Windows x64 and Linux x64.** Verified ZIPs are published on GitHub Releases after both platform builds pass CI. Each ZIP includes the patched Ghidra build, BinaryRat's native engine and compiled extension, the default desktop workspace, JDK 25, and local help with an example binary. Extract the ZIP and launch `binaryrat.bat` on Windows or `./binaryrat` on Linux. [Releases](https://github.com/YurilLAB/BinaryRat/releases)
 
 ## What BinaryRat does
 

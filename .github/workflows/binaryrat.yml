@@ -292,10 +292,44 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
-        with:
-          distribution: temurin
-          java-version: '25.0.5+8'
+      - name: Install the hash-pinned Temurin JDK from its portable archive
+        shell: python
+        run: |
+          import hashlib, os, subprocess, tarfile
+          from pathlib import Path
+          from zipfile import ZipFile
+          windows = os.name == "nt"
+          if windows:
+              filename = "OpenJDK25U-jdk_x64_windows_hotspot_25.0.5_8.zip"
+              expected = "636bdc13dc649ddc7d5921c5c7d23cca6e44fd19d662b45cc9c02135a6c96c42"
+          else:
+              filename = "OpenJDK25U-jdk_x64_linux_hotspot_25.0.5_8.tar.gz"
+              expected = "68982529869257d0ee6b824ec5aa270ff8b118bb438670da0b97ebdab178d7fb"
+          runtime = Path(os.environ["RUNNER_TEMP"]) / "binaryrat-jdk"
+          runtime.mkdir(parents=True, exist_ok=True)
+          archive = runtime / filename
+          url = "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/" + archive.name
+          subprocess.run(["curl.exe" if windows else "curl", "--fail", "--silent", "--show-error", "--location", "--retry", "3",
+                          "--output", str(archive), url], check=True)
+          with archive.open("rb") as source:
+              digest = hashlib.file_digest(source, "sha256").hexdigest()
+          if digest != expected:
+              raise SystemExit("Temurin archive SHA-256 verification failed")
+          if windows:
+              with ZipFile(archive) as package:
+                  package.extractall(runtime)
+          else:
+              with tarfile.open(archive, "r:gz") as package:
+                  package.extractall(runtime, filter="data")
+          archive.unlink()
+          java_home = runtime / "jdk-25.0.5+8"
+          javac = "javac.exe" if windows else "javac"
+          if not (java_home / "bin" / javac).is_file():
+              raise SystemExit("Pinned Temurin archive did not contain javac")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              print(f"JAVA_HOME={java_home}", file=env)
+          with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as path:
+              print(java_home / "bin", file=path)
       - if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
@@ -405,7 +439,7 @@ jobs:
           display = [] if os.name == "nt" else ["xvfb-run", "-a"]
           subprocess.run([*display, sys.executable, "binaryrat/distribution/verify_workspace.py",
                           "--bundle", "build/br/BinaryRat", "--output", "build/reports/workspace"], check=True)
-      - name: Check bundle tooling and shared decompilation from the bundled Python wheel
+      - name: Run bundle tooling and required shared Python service tests
         shell: python
         run: |
           import os, subprocess, sys
@@ -422,7 +456,7 @@ jobs:
                               "BINARYRAT_GHIDRA_INSTALL_DIR": str(ghidra),
                               "BINARYRAT_REQUIRE_SHARED_SERVICE": "1"}
           subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "binaryrat/python/tests",
-                          "-p", "test_live_ghidra.py"], env=env, check=True)
+                          "-p", "test_live_ghidra.py", "-v"], env=env, check=True)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: binaryrat-complete-${{ matrix.os }}-${{ matrix.revision }}

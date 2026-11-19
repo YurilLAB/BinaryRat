@@ -2,7 +2,7 @@
 
 ## Open a binary in the complete application
 
-Download the Windows x64 or Linux x64 ZIP from a BinaryRat release and extract the whole archive to a writable directory. Run `binaryrat.bat` on Windows or `./binaryrat` on Linux. The bundle includes Temurin JDK 25 and uses it for both desktop and headless launches. Use `--version` for the exact BinaryRat revision and runtime version. [BinaryRat releases](https://github.com/YurilLAB/BinaryRat/releases)
+When a standalone preview is published, download its Windows x64 or Linux x64 ZIP and extract the whole archive to a writable directory. Run `binaryrat.bat` on Windows or `./binaryrat` on Linux. The bundle includes Temurin JDK 25 and uses it for both desktop and headless launches. Use `--version` for the exact BinaryRat revision and runtime version. [BinaryRat releases](https://github.com/YurilLAB/BinaryRat/releases)
 
 Choose **File → New Project** to create a local project, then **File → Import File** and select a binary. Open the imported Program in CodeBrowser. The bundled default workspace exposes BinaryRat's actions under **Tools → BinaryRat**. The `help` directory in the bundle includes a walkthrough and sample. For a terminal workflow, use `binaryrat-headless.bat` or `./binaryrat-headless` with the standard Ghidra headless arguments.
 
