@@ -4,6 +4,7 @@ package binaryrat.desktop;
 
 import docking.action.DockingAction;
 import docking.action.builder.ActionBuilder;
+import docking.widgets.OptionDialogBuilder;
 import ghidra.app.plugin.ProgramPlugin;
 import ghidra.app.services.GhidraScriptService;
 import ghidra.framework.plugintool.PluginInfo;
@@ -11,7 +12,6 @@ import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.plugintool.util.PluginStatus;
 import ghidra.program.model.listing.Program;
 import ghidra.program.util.ProgramLocation;
-import ghidra.util.Msg;
 
 /** Put the supported desktop workflows in a new CodeBrowser workspace. */
 @PluginInfo(
@@ -66,12 +66,16 @@ public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
     }
 
     private void showGettingStarted() {
-        Msg.showInfo(this, tool.getToolFrame(), "Getting Started with BinaryRat",
+        new OptionDialogBuilder("Getting Started with BinaryRat",
             "<html><b>Open a binary</b><br>" +
             "In the project window, create or open a local project and choose File &rarr; Import File.<br>" +
             "Double-click the imported program to open it in CodeBrowser.<br><br>" +
             "<b>Inspect analysis and evidence</b><br>" +
             "Choose an action from Tools &rarr; BinaryRat, or use the Listing and Decompiler normally.<br>" +
-            "The application archive includes an offline guide in help/GettingStarted.html.</html>");
+            "The rat button in the toolbar opens the BinaryRat function view for the Listing selection.<br>" +
+            "The application archive includes an offline guide in help/GettingStarted.html.</html>")
+            .setIcon(BinaryRatIcons.LOGO_64)
+            .addOption("OK")
+            .show(tool.getToolFrame());
     }
 }

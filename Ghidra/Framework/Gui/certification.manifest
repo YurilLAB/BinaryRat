@@ -13,6 +13,15 @@ data/gui.palette.theme.properties||GHIDRA||||END|
 data/gui.theme.properties||GHIDRA||||END|
 src/main/java/ghidra/framework/options/package.html||GHIDRA||||END|
 src/main/java/ghidra/util/layout/package.html||GHIDRA||||END|
+src/main/resources/images/BinaryRatIcon128.png||Apache License 2.0||||END|
+src/main/resources/images/BinaryRatIcon16.png||Apache License 2.0||||END|
+src/main/resources/images/BinaryRatIcon24.png||Apache License 2.0||||END|
+src/main/resources/images/BinaryRatIcon256.png||Apache License 2.0||||END|
+src/main/resources/images/BinaryRatIcon32.png||Apache License 2.0||||END|
+src/main/resources/images/BinaryRatIcon40.png||Apache License 2.0||||END|
+src/main/resources/images/BinaryRatIcon48.png||Apache License 2.0||||END|
+src/main/resources/images/BinaryRatIcon64.png||Apache License 2.0||||END|
+src/main/resources/images/BinaryRatSplash.png||Apache License 2.0||||END|
 src/main/resources/images/EmptyIcon.gif||GHIDRA||||END|
 src/main/resources/images/EmptyIcon16.gif||GHIDRA||||END|
 src/main/resources/images/GhidraIcon128.png||GHIDRA||||END|

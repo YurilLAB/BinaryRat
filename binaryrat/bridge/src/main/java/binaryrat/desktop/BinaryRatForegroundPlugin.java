@@ -27,6 +27,7 @@ import docking.ActionContext;
 import docking.WindowPosition;
 import docking.action.DockingAction;
 import docking.action.MenuData;
+import docking.action.ToolBarData;
 import ghidra.app.plugin.ProgramPlugin;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.services.CodeViewerService;
@@ -133,7 +134,9 @@ public class BinaryRatForegroundPlugin extends ProgramPlugin {
             }
         };
         action.setMenuBarData(new MenuData(
-            new String[] {"Tools", "BinaryRat", "Inspect Selected Function"}));
+            new String[] {"Tools", "BinaryRat", "Inspect Selected Function"}, BinaryRatIcons.LOGO_16));
+        action.setToolBarData(new ToolBarData(BinaryRatIcons.LOGO_16, "BinaryRat"));
+        action.setDescription("Open the BinaryRat function view for the Listing selection");
         tool.addAction(action);
     }
 
@@ -141,6 +144,7 @@ public class BinaryRatForegroundPlugin extends ProgramPlugin {
         Provider() {
             super(BinaryRatForegroundPlugin.this.tool, "BinaryRat Function",
                 BinaryRatForegroundPlugin.this.getName());
+            setIcon(BinaryRatIcons.LOGO_16);
             setDefaultWindowPosition(WindowPosition.RIGHT);
         }
 

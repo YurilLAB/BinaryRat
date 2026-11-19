@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// Modified by BinaryRat to title the splash screen and About dialog BinaryRat.
 package ghidra.framework.main;
 
 import java.awt.Image;
@@ -50,12 +51,12 @@ public class GhidraApplicationInformationDisplayFactory
 
 	@Override
 	protected String doCreateSplashScreenTitle() {
-		return "Welcome To Ghidra";
+		return "Welcome To BinaryRat";
 	}
 
 	@Override
 	protected String doCreateAboutTitle() {
-		return "About Ghidra";
+		return "About BinaryRat";
 	}
 
 	@Override

@@ -4,13 +4,17 @@ package binaryrat.writeback;
 
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 
 import javax.swing.SwingUtilities;
 
+import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.plugin.core.analysis.AnalysisWorker;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.util.parser.FunctionSignatureParser;
@@ -18,14 +22,23 @@ import ghidra.framework.model.TransactionInfo;
 import ghidra.program.database.data.DataTypeUtilities;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.CategoryPath;
+import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.FunctionDefinitionDataType;
+import ghidra.program.model.data.Undefined;
+import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.listing.FlowOverride;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionSignature;
+import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.pcode.DataTypeSymbol;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.pcode.PcodeOp;
+import ghidra.program.model.pcode.PcodeOpAST;
+import ghidra.program.model.pcode.Varnode;
+import ghidra.program.model.symbol.SourceType;
+import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolType;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
@@ -33,12 +46,28 @@ import ghidra.util.task.TaskMonitor;
 /** Explicitly apply a type at one reviewed call instruction using Ghidra's native override. */
 public final class CallPrototypeOverride {
     public static final int MAX_SIGNATURE_LENGTH = 1024;
+    /** Limit for the decompilation that suggests a prototype from the call's current p-code. */
+    public static final int SUGGESTION_TIMEOUT_SECONDS = 30;
     private static final int MAX_ARGUMENTS = 64;
     private static final String TRANSACTION = "Apply BinaryRat call-site signature";
     private static final String AUTO_ANALYSIS_TRANSACTION = "Auto Analysis";
     private static final String OVERRIDE_PREFIX = "prt";
+    private static final String DEFAULT_NAME = "call_target";
+    private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]{0,127}");
 
     private CallPrototypeOverride() {
+    }
+
+    /** Where the prototype offered for review came from. */
+    public enum Suggestion {
+        /** Nothing reliable: the analyst writes the prototype. */
+        NONE,
+        /** The called function's own signature, set by a user or an import. */
+        CALLEE,
+        /** The decompiler's current view of this call's inputs and output. */
+        DECOMPILER,
+        /** The override already at this call, which a new prototype replaces. */
+        EXISTING_OVERRIDE
     }
 
     /** Bound to the specific Program and revision from which the analyst's review was prepared. */
@@ -50,11 +79,16 @@ public final class CallPrototypeOverride {
         private final String callerName;
         private final String targetName;
         private final boolean indirect;
+        private final boolean variadicTarget;
         private final String suggestedSignature;
+        private final Suggestion suggestionSource;
         private final String callingConvention;
+        private final List<String> callingConventions;
+        private final String replacedOverride;
+        private final FunctionSignature replacedSignature;
 
-        private Candidate(Program program, Site site, long revision, String suggestion,
-                String convention) {
+        private Candidate(Program program, Site site, long revision, Offer offer, String convention,
+                List<String> conventions) {
             this.program = program;
             this.functionEntry = site.caller().getEntryPoint();
             this.callSite = site.address();
@@ -62,8 +96,13 @@ public final class CallPrototypeOverride {
             this.callerName = site.caller().getName(true);
             this.targetName = site.target() == null ? "Indirect target" : site.target().getName(true);
             this.indirect = site.target() == null;
-            this.suggestedSignature = suggestion;
+            this.variadicTarget = site.target() != null && site.target().hasVarArgs();
+            this.suggestedSignature = offer.text();
+            this.suggestionSource = offer.source();
             this.callingConvention = convention;
+            this.callingConventions = List.copyOf(conventions);
+            this.replacedOverride = site.override() == null ? null : site.override().getName();
+            this.replacedSignature = site.override() == null ? null : overrideSignature(site.override());
         }
 
         public Address functionEntry() {
@@ -90,46 +129,96 @@ public final class CallPrototypeOverride {
             return indirect;
         }
 
+        /** A direct call to a fixed-argument function: editing the callee usually fits better. */
+        public boolean directFixedArguments() {
+            return !indirect && !variadicTarget;
+        }
+
         public String suggestedSignature() {
             return suggestedSignature;
         }
 
+        public Suggestion suggestionSource() {
+            return suggestionSource;
+        }
+
+        /** The calling convention preselected for review. */
         public String callingConvention() {
             return callingConvention;
         }
+
+        /** {@code default} followed by the Program's compiler-specification conventions. */
+        public List<String> callingConventions() {
+            return callingConventions;
+        }
+
+        /** True when applying replaces the signature override already at this call. */
+        public boolean replacesOverride() {
+            return replacedOverride != null;
+        }
     }
 
-    public record Result(boolean committedAfterCancellation) {
+    public record Result(boolean committedAfterCancellation, boolean replacedOverride) {
     }
 
-    /** Inspect a Listing location in the selected caller. An interior byte is normalized. */
+    private record Offer(String text, Suggestion source) {
+        static final Offer NONE = new Offer("", Suggestion.NONE);
+    }
+
+    /** Inspect a Listing location in the selected caller without decompiling it. */
     public static Candidate inspect(Program program, Address functionEntry, Address callSite,
             long revision) throws IOException {
+        try {
+            return inspect(program, functionEntry, callSite, revision, null);
+        }
+        catch (CancelledException impossible) {
+            throw new IOException(impossible);
+        }
+    }
+
+    /**
+     * Inspect a Listing location in the selected caller. An interior byte is normalized. With a
+     * monitor, a call without a user-defined callee signature is decompiled once so the review
+     * starts from the decompiler's view of its inputs and output. Run off the EDT.
+     */
+    public static Candidate inspect(Program program, Address functionEntry, Address callSite,
+            long revision, TaskMonitor monitor) throws IOException, CancelledException {
         Objects.requireNonNull(program, "program");
         Object consumer = retain(program);
         try {
             AutoAnalysisManager analysis = AutoAnalysisManager.getAnalysisManager(program);
             checkIdle(program, analysis, revision);
             Site site = findSite(program, functionEntry, callSite);
-            String suggestion = "";
+            Function target = site.target();
+            List<String> conventions = conventions(program);
             String convention = Function.DEFAULT_CALLING_CONVENTION_STRING;
-            if (site.target() != null) {
-                Function target = site.target();
-                String current = target.getCallingConventionName();
-                if (program.getCompilerSpec().getCallingConvention(current) != null) {
-                    convention = current;
+            Offer offer = Offer.NONE;
+            if (site.override() != null) {
+                FunctionSignature current = overrideSignature(site.override());
+                offer = offer(prototype(current, nameFor(target), program), Suggestion.EXISTING_OVERRIDE);
+                convention = current.getCallingConventionName();
+            }
+            else {
+                if (target != null) {
+                    convention = target.getCallingConventionName();
                 }
-                if (target.getParameterCount() <= MAX_ARGUMENTS) {
-                    FunctionDefinitionDataType proposal = new FunctionDefinitionDataType(
-                        CategoryPath.ROOT, "call_target", target.getSignature(true),
-                        program.getDataTypeManager());
-                    suggestion = proposal.getPrototypeString();
+                if (target != null &&
+                    target.getSignatureSource().isHigherPriorityThan(SourceType.ANALYSIS)) {
+                    offer = offer(prototype(target.getSignature(true), nameFor(target), program),
+                        Suggestion.CALLEE);
+                }
+                if (offer.source() == Suggestion.NONE && monitor != null) {
+                    offer = offer(decompiledCall(program, site, monitor), Suggestion.DECOMPILER);
+                }
+                if (offer.source() == Suggestion.NONE && target != null) {
+                    offer = offer(prototype(target.getSignature(true), nameFor(target), program),
+                        Suggestion.CALLEE);
                 }
             }
-            if (suggestion.length() > MAX_SIGNATURE_LENGTH) {
-                suggestion = "";
+            if (!conventions.contains(convention)) {
+                convention = Function.DEFAULT_CALLING_CONVENTION_STRING;
             }
-            Candidate candidate = new Candidate(program, site, revision, suggestion, convention);
+            Candidate candidate = new Candidate(program, site, revision, offer, convention, conventions);
             checkIdle(program, analysis, revision);
             return candidate;
         }
@@ -138,9 +227,16 @@ public final class CallPrototypeOverride {
         }
     }
 
-    /** Apply only the new override reviewed for this Program and revision. Run off the EDT. */
+    /** Apply the reviewed signature with the candidate's calling convention. Run off the EDT. */
     public static Result apply(Program program, Candidate candidate, String signature,
             TaskMonitor monitor) throws Exception {
+        return apply(program, candidate, signature,
+            candidate == null ? null : candidate.callingConvention(), monitor);
+    }
+
+    /** Apply only the new override reviewed for this Program and revision. Run off the EDT. */
+    public static Result apply(Program program, Candidate candidate, String signature,
+            String callingConvention, TaskMonitor monitor) throws Exception {
         if (SwingUtilities.isEventDispatchThread()) {
             throw new IllegalStateException("Run the call-site correction off the Swing thread");
         }
@@ -153,16 +249,24 @@ public final class CallPrototypeOverride {
         Objects.requireNonNull(monitor, "monitor");
         monitor.checkCancelled();
         String text = validateSignatureText(signature);
+        if (callingConvention == null || !candidate.callingConventions().contains(callingConvention)) {
+            throw new IOException("Choose one of the Program's calling conventions");
+        }
         Object consumer = retain(program);
         try {
             AutoAnalysisManager analysis = AutoAnalysisManager.getAnalysisManager(program);
             checkIdle(program, analysis, candidate.revision());
             Site site = findSite(program, candidate.functionEntry(), candidate.callSite());
+            checkSameOverride(site, candidate);
             FunctionSignature original = site.target() == null ? null : site.target().getSignature(true);
             var parser = new FunctionSignatureParser(program.getDataTypeManager(), null);
             FunctionDefinitionDataType prototype = parser.parse(original, text);
-            prototype.setCallingConvention(candidate.callingConvention());
-            prototype.setNoReturn(original != null && original.hasNoReturn());
+            prototype.setCallingConvention(callingConvention);
+            prototype.setNoReturn(candidate.replacedSignature != null ?
+                candidate.replacedSignature.hasNoReturn() : original != null && original.hasNoReturn());
+            if (candidate.replacedSignature != null && sameSignature(prototype, candidate.replacedSignature)) {
+                throw new IOException("This call already uses that prototype");
+            }
             checkIdle(program, analysis, candidate.revision());
             return submit(program, analysis, candidate, prototype, monitor);
         }
@@ -204,11 +308,19 @@ public final class CallPrototypeOverride {
                     }
                     checkRevision(current, candidate.revision());
                     Site site = findSite(current, candidate.functionEntry(), candidate.callSite());
+                    checkSameOverride(site, candidate);
                     checkRevision(current, candidate.revision());
                     workerMonitor.checkCancelled();
                     int transaction = current.startTransaction(TRANSACTION);
                     boolean commit = false;
                     try {
+                        if (site.override() != null) {
+                            // The stock writer keeps markers in the override namespace, so remove
+                            // the reviewed one first. Both edits share this undo step.
+                            DataTypeSymbol previous = HighFunctionDBUtil.readOverride(site.override());
+                            site.override().delete();
+                            previous.cleanupUnusedOverride();
+                        }
                         HighFunctionDBUtil.writeOverride(site.caller(), site.address(), prototype);
                         if (!matchesOverride(site.caller(), site.address(), prototype)) {
                             throw new IOException("Ghidra did not install the reviewed call signature");
@@ -258,7 +370,7 @@ public final class CallPrototypeOverride {
         if (caller == null || !matchesOverride(caller, candidate.callSite(), prototype)) {
             throw new IOException("The reviewed call signature is no longer present");
         }
-        return new Result(cancelledAfterWrite || monitor.isCancelled());
+        return new Result(cancelledAfterWrite || monitor.isCancelled(), candidate.replacesOverride());
     }
 
     private static Object retain(Program program) throws IOException {
@@ -284,6 +396,24 @@ public final class CallPrototypeOverride {
         if (program.getModificationNumber() != revision) {
             throw new IOException("The Program changed. Review the call site again");
         }
+    }
+
+    private static void checkSameOverride(Site site, Candidate candidate) throws IOException {
+        String present = site.override() == null ? null : site.override().getName();
+        if (!Objects.equals(present, candidate.replacedOverride)) {
+            throw new IOException("The call's signature override changed. Review the call site again");
+        }
+    }
+
+    private static List<String> conventions(Program program) {
+        var names = new ArrayList<String>();
+        names.add(Function.DEFAULT_CALLING_CONVENTION_STRING);
+        for (String name : program.getFunctionManager().getCallingConventionNames()) {
+            if (!names.contains(name) && !Function.UNKNOWN_CALLING_CONVENTION_STRING.equals(name)) {
+                names.add(name);
+            }
+        }
+        return names;
     }
 
     private static Site findSite(Program program, Address functionEntry, Address location)
@@ -332,16 +462,40 @@ public final class CallPrototypeOverride {
                 throw new IOException("The direct call requires a local target without a thunk or call fixup");
             }
         }
+        return new Site(caller, address, target, existingOverride(program, caller, address));
+    }
+
+    /**
+     * The single readable signature override of this caller at the call, or null. The stock
+     * writer may delete other {@code prt} labels at the address, so any other one blocks the edit.
+     */
+    private static Symbol existingOverride(Program program, Function caller, Address address)
+            throws IOException {
+        var namespace = HighFunction.findOverrideSpace(caller);
+        Symbol existing = null;
         var symbols = program.getSymbolTable().getSymbolsAsIterator(address);
         while (symbols.hasNext()) {
             var symbol = symbols.next();
-            // The stock writer may delete any other prt* label at this address.
-            if (symbol.getSymbolType() == SymbolType.LABEL &&
-                symbol.getName().startsWith(OVERRIDE_PREFIX)) {
-                throw new IOException("A signature override or protected prt label already exists at this call");
+            if (symbol.getSymbolType() != SymbolType.LABEL || !symbol.getName().startsWith(OVERRIDE_PREFIX)) {
+                continue;
             }
+            boolean override = namespace != null && namespace.equals(symbol.getParentNamespace()) &&
+                symbol.getName().startsWith(OVERRIDE_PREFIX + "_") && !symbol.hasReferences() &&
+                overrideSignature(symbol) != null;
+            if (!override) {
+                throw new IOException("A protected prt label exists at this call. BinaryRat leaves it unchanged");
+            }
+            if (existing != null) {
+                throw new IOException("This call has more than one signature override");
+            }
+            existing = symbol;
         }
-        return new Site(caller, address, target);
+        return existing;
+    }
+
+    private static FunctionSignature overrideSignature(Symbol symbol) {
+        DataTypeSymbol data = HighFunctionDBUtil.readOverride(symbol);
+        return data != null && data.getDataType() instanceof FunctionSignature signature ? signature : null;
     }
 
     private static boolean matchesOverride(Function caller, Address address, FunctionSignature expected) {
@@ -349,19 +503,18 @@ public final class CallPrototypeOverride {
         if (namespace == null) {
             return false;
         }
+        FunctionSignature installed = null;
+        int markers = 0;
         var symbols = caller.getProgram().getSymbolTable().getSymbolsAsIterator(address);
         while (symbols.hasNext()) {
             var symbol = symbols.next();
-            if (symbol.getSymbolType() != SymbolType.LABEL ||
-                !symbol.getParentNamespace().equals(namespace) ||
-                !symbol.getName().startsWith(OVERRIDE_PREFIX + "_")) {
-                continue;
+            if (symbol.getSymbolType() == SymbolType.LABEL && namespace.equals(symbol.getParentNamespace()) &&
+                symbol.getName().startsWith(OVERRIDE_PREFIX)) {
+                markers++;
+                installed = overrideSignature(symbol);
             }
-            var override = HighFunctionDBUtil.readOverride(symbol);
-            return override != null && override.getDataType() instanceof FunctionSignature actual &&
-                sameSignature(expected, actual);
         }
-        return false;
+        return markers == 1 && installed != null && sameSignature(expected, installed);
     }
 
     private static boolean sameSignature(FunctionSignature expected, FunctionSignature actual) {
@@ -382,6 +535,96 @@ public final class CallPrototypeOverride {
             }
         }
         return true;
+    }
+
+    private static String nameFor(Function target) {
+        return target != null && IDENTIFIER.matcher(target.getName()).matches() ? target.getName() : DEFAULT_NAME;
+    }
+
+    private static String prototype(FunctionSignature signature, String name, Program program) {
+        if (signature == null || signature.getArguments().length > MAX_ARGUMENTS) {
+            return "";
+        }
+        return new FunctionDefinitionDataType(CategoryPath.ROOT, name, signature,
+            program.getDataTypeManager()).getPrototypeString();
+    }
+
+    /** A suggestion is only offered when it passes the same checks as typed input. */
+    private static Offer offer(String text, Suggestion source) {
+        if (text == null || text.isBlank()) {
+            return Offer.NONE;
+        }
+        try {
+            return new Offer(validateSignatureText(text), source);
+        }
+        catch (IOException unusable) {
+            return Offer.NONE;
+        }
+    }
+
+    /** The decompiler's current inputs and output at this call, as Ghidra's own override offers. */
+    private static String decompiledCall(Program program, Site site, TaskMonitor monitor)
+            throws CancelledException {
+        var decompiler = new DecompInterface();
+        try {
+            var options = new DecompileOptions();
+            options.grabFromProgram(program);
+            decompiler.setOptions(options);
+            decompiler.toggleSyntaxTree(true);
+            decompiler.setSimplificationStyle("decompile");
+            if (!decompiler.openProgram(program)) {
+                return "";
+            }
+            var result = decompiler.decompileFunction(site.caller(), SUGGESTION_TIMEOUT_SECONDS, monitor);
+            monitor.checkCancelled();
+            HighFunction high = result == null ? null : result.getHighFunction();
+            if (high == null) {
+                return "";
+            }
+            var operations = high.getPcodeOps(site.address());
+            while (operations.hasNext()) {
+                PcodeOpAST op = operations.next();
+                if (op.getOpcode() == PcodeOp.CALL || op.getOpcode() == PcodeOp.CALLIND) {
+                    return describeCall(op, site.target());
+                }
+            }
+            return "";
+        }
+        finally {
+            decompiler.dispose();
+        }
+    }
+
+    private static String describeCall(PcodeOp op, Function target) {
+        if (op.getNumInputs() - 1 > MAX_ARGUMENTS) {
+            return "";
+        }
+        // A callee signature from analysis is a guess; the call's own varnodes are evidence.
+        Parameter[] declared = target == null ||
+            target.getSignatureSource().isLowerOrEqualPriorityThan(SourceType.ANALYSIS) ?
+                new Parameter[0] : target.getParameters();
+        DataType output = op.getOutput() == null ? null : type(op.getOutput());
+        var text = new StringBuilder();
+        text.append(output == null ? VoidDataType.dataType.getDisplayName() : output.getDisplayName())
+            .append(' ').append(nameFor(target)).append('(');
+        for (int i = 1; i < op.getNumInputs(); i++) {
+            Parameter parameter = i - 1 < declared.length ? declared[i - 1] : null;
+            DataType known = parameter == null || Undefined.isUndefined(parameter.getDataType()) ?
+                null : parameter.getDataType();
+            DataType type = known != null ? known : type(op.getInput(i));
+            if (type == null) {
+                return "";
+            }
+            String name = parameter != null && parameter.getSource() != SourceType.DEFAULT &&
+                IDENTIFIER.matcher(parameter.getName()).matches() ? parameter.getName() : "param_" + i;
+            text.append(i == 1 ? "" : ", ").append(type.getDisplayName()).append(' ').append(name);
+        }
+        return text.append(')').toString();
+    }
+
+    private static DataType type(Varnode varnode) {
+        var high = varnode.getHigh();
+        return high == null ? null : high.getDataType();
     }
 
     private static String validateSignatureText(String signature) throws IOException {
@@ -413,6 +656,6 @@ public final class CallPrototypeOverride {
         return text;
     }
 
-    private record Site(Function caller, Address address, Function target) {
+    private record Site(Function caller, Address address, Function target, Symbol override) {
     }
 }

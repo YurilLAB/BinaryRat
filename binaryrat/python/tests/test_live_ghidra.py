@@ -482,7 +482,12 @@ class LiveGhidraTests(unittest.TestCase):
                 instruction.setFlowOverride(FlowOverride.BRANCH)
             self.assertNotIn(PcodeOp.CALL, [op.getOpcode() for op in instruction.getPcode(True)])
             raw = read(program, entry, entry, program.getModificationNumber(), TaskMonitor.DUMMY)
-            self.assertEqual(raw, snapshot)
+            self.assertEqual(list(map(str, raw.operations())), operations)
+            self.assertEqual(list(snapshot.overridden()), [])
+            overridden = list(map(str, raw.overridden()))
+            self.assertTrue(any(line.startswith("BRANCH ") for line in overridden), overridden)
+            self.assertFalse(any(line.startswith("CALL ") for line in overridden), overridden)
+            self.assertEqual(list(map(str, raw.notes())), ["Flow override: BRANCH"])
         self.assertEqual(before, self.snapshot())
 
     def test_instruction_pcode_preserves_the_program_overlay(self):

@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// Modified by BinaryRat to show the BinaryRat splash image.
 package ghidra.framework.main;
 
 import java.awt.*;
@@ -43,7 +44,7 @@ class InfoPanel extends JPanel {
 
 	private final static String SPLASH_FILENAME = "splash.txt";
 	private final static String CLOUD_REV_FILENAME = "images/cloudbarReversed.jpg";
-	private final static String GHIDRA_FILENAME = "images/GHIDRA_Splash.png";
+	private final static String GHIDRA_FILENAME = "images/BinaryRatSplash.png";
 	private final static String CLOUD_FILENAME = "images/cloudbar.jpg";
 
 	private static final String FONT_ID = "font.splash.infopanel";

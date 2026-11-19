@@ -2,7 +2,8 @@
 <TOOL_CONFIG CONFIG_NAME="NO_LONGER_USED">
     <SUPPORTED_DATA_TYPE CLASS_NAME="ghidra.program.model.listing.Program" />
     <SUPPORTED_DATA_TYPE CLASS_NAME="ghidra.program.model.listing.DataTypeArchive" />
-    <ICON LOCATION="greenDragon24.png" />
+    <!-- Modified by BinaryRat: the CodeBrowser tool shows the BinaryRat logo. -->
+    <ICON LOCATION="images/BinaryRatIcon24.png" />
     <TOOL TOOL_NAME="CodeBrowser" INSTANCE_NAME="">
         <OPTIONS />
         <PACKAGE NAME="Ghidra Core">

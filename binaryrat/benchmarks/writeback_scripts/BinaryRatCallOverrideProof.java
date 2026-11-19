@@ -5,15 +5,19 @@ import java.io.IOException;
 import java.util.HexFormat;
 import java.util.Random;
 
+import binaryrat.desktop.InstructionPcode;
 import binaryrat.writeback.CallPrototypeOverride;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.script.GhidraScript;
 import ghidra.app.util.cparser.C.ParseException;
+import ghidra.app.util.parser.FunctionSignatureParser;
 import ghidra.program.database.ProgramDB;
 import ghidra.program.flatapi.FlatProgramAPI;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.data.CategoryPath;
 import ghidra.program.model.lang.CompilerSpecID;
 import ghidra.program.model.lang.LanguageID;
+import ghidra.program.model.listing.FlowOverride;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionSignature;
 import ghidra.program.model.pcode.HighFunction;
@@ -49,9 +53,13 @@ public class BinaryRatCallOverrideProof extends GhidraScript {
             setup();
             controls();
             malformedAndFuzz();
+            suggestions();
             rollbackAndUndo();
+            replacement();
+            instructionPcode();
             println("BINARYRAT_CALL_OVERRIDE_OK malformed_cases=" + FUZZ_CASES +
-                " direct_and_indirect=true cancellation_rollback=true undo_redo=true");
+                " direct_and_indirect=true cancellation_rollback=true undo_redo=true" +
+                " decompiler_suggestion=true replacement=true pcode=true");
         }
         finally {
             program.release(this);
@@ -62,7 +70,7 @@ public class BinaryRatCallOverrideProof extends GhidraScript {
         var space = program.getAddressFactory().getDefaultAddressSpace();
         callerEntry = space.getAddress(0x1000);
         peerCall = callerEntry.add(5);
-        indirectCall = callerEntry.add(10);
+        indirectCall = callerEntry.add(15);
         calleeEntry = space.getAddress(0x1020);
         var flat = new FlatProgramAPI(program, monitor);
         int transaction = program.startTransaction("Build disposable x86 call fixture");
@@ -72,8 +80,8 @@ public class BinaryRatCallOverrideProof extends GhidraScript {
             var code = memory.createInitializedBlock(".text", callerEntry, 64, (byte) 0x90,
                 monitor, false);
             code.setExecute(true);
-            // call callee; call callee; call rax; ret
-            memory.setBytes(callerEntry, HexFormat.of().parseHex("e81b000000e816000000ffd0c3"));
+            // call callee; call callee; mov edi, 7; call rax; ret
+            memory.setBytes(callerEntry, HexFormat.of().parseHex("e81b000000e816000000bf07000000ffd0c3"));
             // mov eax, 42; ret
             memory.setBytes(calleeEntry, HexFormat.of().parseHex("b82a000000c3"));
             require(flat.disassemble(callerEntry) && flat.createFunction(callerEntry, "caller") != null,
@@ -201,7 +209,11 @@ public class BinaryRatCallOverrideProof extends GhidraScript {
         require(override(peerCall) == null &&
             originalCallee.equals(program.getFunctionManager().getFunctionAt(calleeEntry)
                 .getPrototypeString(true, true)), "override changed the peer call or callee signature");
-        expect(IOException.class, "signature override", () -> candidate(callerEntry));
+        var existing = candidate(callerEntry);
+        require(existing.replacesOverride() &&
+            existing.suggestionSource() == CallPrototypeOverride.Suggestion.EXISTING_OVERRIDE &&
+            existing.suggestedSignature().equals("int callee(int value)"),
+            "an existing override was not offered for review: " + existing.suggestedSignature());
         program.undo();
         require(override(callerEntry) == null && typeCount() == types,
             "native undo did not remove the new signature and marker");
@@ -217,6 +229,116 @@ public class BinaryRatCallOverrideProof extends GhidraScript {
         program.undo();
         require(override(indirectCall) == null && override(callerEntry) != null,
             "undo of the indirect call changed the direct call");
+    }
+
+    private void suggestions() throws Exception {
+        long before = revision();
+        int types = typeCount();
+        var indirect = CallPrototypeOverride.inspect(program, callerEntry, indirectCall, revision(), monitor);
+        require(indirect.indirect() &&
+            indirect.suggestionSource() == CallPrototypeOverride.Suggestion.DECOMPILER,
+            "indirect call was not offered the decompiler's view: " + indirect.suggestionSource());
+        var parsed = new FunctionSignatureParser(program.getDataTypeManager(), null)
+            .parse(null, indirect.suggestedSignature());
+        require(parsed.getArguments().length == 1,
+            "decompiler suggestion missed the EDI argument: " + indirect.suggestedSignature());
+        println("Decompiler suggestion at " + indirectCall + ": " + indirect.suggestedSignature());
+        var direct = CallPrototypeOverride.inspect(program, callerEntry, callerEntry, revision(), monitor);
+        require(direct.directFixedArguments() && !direct.replacesOverride() &&
+            direct.callingConventions().getFirst().equals(Function.DEFAULT_CALLING_CONVENTION_STRING) &&
+            direct.callingConventions().contains(direct.callingConvention()),
+            "direct call review lacks its calling conventions: " + direct.callingConventions());
+        expect(IOException.class, "calling conventions", () ->
+            CallPrototypeOverride.apply(program, direct, PROTOTYPE, "binaryrat_missing_convention", monitor));
+        require(before == revision() && typeCount() == types && !program.canUndo() &&
+            override(indirectCall) == null, "inspection or a rejected convention changed the Program");
+    }
+
+    private void replacement() throws Exception {
+        require(override(callerEntry) != null && override(indirectCall) == null &&
+            overrideTypes() == 1, "replacement starts from the direct override only");
+        var review = candidate(callerEntry);
+        long before = revision();
+        expect(IOException.class, "already uses", () ->
+            CallPrototypeOverride.apply(program, review, "int callee(int value)", monitor));
+        require(before == revision(), "re-applying the same prototype changed the Program");
+        String other = review.callingConventions().stream()
+            .filter(name -> !name.equals(review.callingConvention())).findFirst().orElseThrow();
+        var result = CallPrototypeOverride.apply(program, review, "long callee(long value)", other, monitor);
+        var replaced = override(callerEntry);
+        require(result.replacedOverride() && replaced != null &&
+            replaced.getReturnType().getName().equals("long") &&
+            replaced.getCallingConventionName().equals(other) && markers(callerEntry) == 1 &&
+            overrideTypes() == 1, "replacement left " + markers(callerEntry) + " markers and " +
+                overrideTypes() + " override types: " + replaced);
+        expect(IOException.class, "Program changed", () ->
+            CallPrototypeOverride.apply(program, review, "short callee(short value)", monitor));
+        program.undo();
+        var restored = override(callerEntry);
+        require(restored != null && restored.getReturnType().getName().equals("int") &&
+            markers(callerEntry) == 1 && overrideTypes() == 1,
+            "one undo did not restore the previous override: " + restored);
+        program.redo();
+        require(override(callerEntry).getReturnType().getName().equals("long"),
+            "redo did not restore the replacement");
+        program.undo();
+
+        int transaction = program.startTransaction("Unreadable override marker");
+        try {
+            var caller = program.getFunctionManager().getFunctionAt(callerEntry);
+            program.getSymbolTable().createLabel(indirectCall, "prt_deadbeef_1000",
+                HighFunction.findCreateOverrideSpace(caller), SourceType.USER_DEFINED);
+        }
+        finally {
+            program.endTransaction(transaction, true);
+        }
+        expect(IOException.class, "protected prt label", () -> candidate(indirectCall));
+        program.undo();
+        require(markers(indirectCall) == 0, "fixture marker was not undone");
+    }
+
+    private void instructionPcode() throws Exception {
+        var raw = InstructionPcode.read(program, callerEntry, indirectCall.add(1), revision(), monitor);
+        require(raw.instructionAddress().equals(indirectCall) && raw.overridden().isEmpty() &&
+            raw.notes().isEmpty() && !raw.truncated() &&
+            raw.operations().stream().anyMatch(line -> line.endsWith("= COPY RAX")) &&
+            raw.operations().stream().anyMatch(line -> line.startsWith("CALLIND $U")) &&
+            raw.operations().contains("RSP = INT_SUB RSP, 8:8"),
+            "p-code was not formatted with register names: " + raw.operations());
+        int transaction = program.startTransaction("Flow override fixture");
+        try {
+            program.getListing().getInstructionAt(indirectCall).setFlowOverride(FlowOverride.CALL_RETURN);
+        }
+        finally {
+            program.endTransaction(transaction, true);
+        }
+        var overridden = InstructionPcode.read(program, callerEntry, indirectCall, revision(), monitor);
+        require(overridden.operations().equals(raw.operations()) &&
+            overridden.overridden().stream().anyMatch(line -> line.startsWith("RETURN")) &&
+            overridden.notes().contains("Flow override: CALL_RETURN") &&
+            InstructionPcode.describe(overridden).contains("what the decompiler reads"),
+            "flow override view: " + InstructionPcode.describe(overridden));
+        expect(IOException.class, "instruction override", () -> candidate(indirectCall));
+        program.undo();
+    }
+
+    /** Function definitions that Ghidra keeps for call-site overrides. */
+    private int overrideTypes() {
+        var category = program.getDataTypeManager().getCategory(new CategoryPath(HighFunctionDBUtil.AUTO_CAT));
+        return category == null ? 0 : category.getDataTypes().length;
+    }
+
+    private int markers(Address address) {
+        var caller = program.getFunctionManager().getFunctionAt(callerEntry);
+        var scope = HighFunction.findOverrideSpace(caller);
+        int count = 0;
+        for (var symbol : program.getSymbolTable().getSymbols(address)) {
+            if (symbol.getSymbolType() == SymbolType.LABEL && scope != null &&
+                scope.equals(symbol.getParentNamespace()) && symbol.getName().startsWith("prt")) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private int[] inputCounts() {

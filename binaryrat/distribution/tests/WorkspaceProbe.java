@@ -6,6 +6,7 @@ import java.awt.Component;
 import java.awt.Container;
 import java.awt.Window;
 import java.awt.event.WindowEvent;
+import java.awt.image.BufferedImage;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -15,7 +16,9 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import java.util.stream.Stream;
 
+import javax.imageio.ImageIO;
 import javax.swing.JButton;
+import javax.swing.JComboBox;
 import javax.swing.JDialog;
 import javax.swing.JLabel;
 import javax.swing.JTextArea;
@@ -26,6 +29,8 @@ import com.google.gson.JsonParser;
 
 import docking.DefaultActionContext;
 import docking.action.DockingActionIf;
+import docking.framework.ApplicationInformationDisplayFactory;
+import generic.theme.GIcon;
 import ghidra.GhidraApplicationLayout;
 import ghidra.GhidraLaunchable;
 import ghidra.app.plugin.core.decompile.DecompilerActionContext;
@@ -50,9 +55,12 @@ import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.SymbolType;
 import ghidra.program.util.ProgramLocation;
 import ghidra.util.extensions.ExtensionUtils;
+import resources.icons.UrlImageIcon;
 
 /** Exercise the actual CodeBrowser defaults from a new bundled application profile. */
 public final class WorkspaceProbe implements GhidraLaunchable {
+    /** Directory beside the JSON report that receives window pictures. */
+    private static Path evidence;
 
     @Override
     public void launch(GhidraApplicationLayout layout, String[] args) {
@@ -73,6 +81,8 @@ public final class WorkspaceProbe implements GhidraLaunchable {
                 require(file != null, "Packaged example import missing");
                 return project.getProject().getToolServices().launchDefaultTool(List.of(file));
             });
+            evidence = Path.of(args[2]).toAbsolutePath().getParent();
+            inspectBranding(tool, evidence);
             inspect(tool, Path.of(args[2]));
             System.out.println("BINARYRAT_WORKSPACE_OK");
             System.exit(0);
@@ -80,6 +90,76 @@ public final class WorkspaceProbe implements GhidraLaunchable {
         catch (Throwable error) {
             error.printStackTrace();
             System.exit(1);
+        }
+    }
+
+    /** The fork's splash, About and window icons, and BinaryRat's own window, use the README logo. */
+    private static void inspectBranding(PluginTool tool, Path evidence) throws Exception {
+        require(ApplicationInformationDisplayFactory.createSplashScreenTitle().equals("Welcome To BinaryRat") &&
+            ApplicationInformationDisplayFactory.createAboutTitle().equals("About BinaryRat"),
+            "Splash and About titles do not name BinaryRat");
+        for (String size : List.of("home", "16", "24", "32", "40", "48", "64", "128", "256")) {
+            var url = new GIcon("icon.base.application." + size).getUrl();
+            String expected = "images/BinaryRatIcon" + (size.equals("home") ? "16" : size) + ".png";
+            require(url != null && url.toString().endsWith(expected), "Application icon " + size + " is " + url);
+        }
+        var animation = new GIcon("icon.dragon.256").getUrl();
+        require(animation != null && animation.toString().endsWith("images/BinaryRatIcon256.png"),
+            "Window animations use " + animation);
+        await("BinaryRat function view registered", () ->
+            tool.getComponentProvider("BinaryRat Function") != null ? Boolean.TRUE : null);
+        swing(() -> {
+            // A tool window shows its template's icon; the application icons cover other windows.
+            var toolIcon = tool.getIconURL();
+            require(toolIcon.getLocation().equals("images/BinaryRatIcon24.png") &&
+                toolIcon.getSmallIcon() instanceof UrlImageIcon small &&
+                small.getOriginalPath().equals("images/BinaryRatIcon16.png"),
+                "CodeBrowser tool icon: " + toolIcon.getLocation() + " / " + toolIcon.getSmallIcon());
+            var frameIcons = tool.getToolFrame().getIconImages();
+            require(!frameIcons.isEmpty() && frameIcons.getFirst().getWidth(null) == 16,
+                "CodeBrowser window icons: " + frameIcons);
+            var about = ApplicationInformationDisplayFactory.createAboutComponent();
+            var splash = descendants(about).filter(JLabel.class::isInstance).map(label -> ((JLabel) label).getIcon())
+                .filter(UrlImageIcon.class::isInstance).map(UrlImageIcon.class::cast).findFirst().orElse(null);
+            require(splash != null && splash.getOriginalPath().equals("images/BinaryRatSplash.png") &&
+                splash.getIconWidth() == 500 && splash.getIconHeight() == 500, "About image: " + splash);
+            snapshot(about, evidence.resolve("about.png"));
+            var provider = tool.getComponentProvider("BinaryRat Function");
+            require(provider.getIcon() instanceof UrlImageIcon icon &&
+                icon.getOriginalPath().equals("images/binaryrat/logo16.png") && icon.getIconWidth() == 16,
+                "BinaryRat function view icon: " + provider.getIcon());
+            var inspect = action(tool, "BinaryRatForegroundPlugin", "Inspect Selected Function");
+            require(inspect.getToolBarData() != null && inspect.getToolBarData().getIcon() == provider.getIcon(),
+                "The toolbar lacks the BinaryRat function view button");
+            return null;
+        });
+    }
+
+    /** Paint a Swing component tree into a PNG for the CI evidence. Call on the EDT. */
+    private static void snapshot(Component component, Path destination) throws Exception {
+        var size = component.isShowing() ? component.getSize() : component.getPreferredSize();
+        if (!component.isShowing()) {
+            component.setSize(size);
+            layout(component);
+        }
+        var image = new BufferedImage(Math.max(1, size.width), Math.max(1, size.height),
+            BufferedImage.TYPE_INT_ARGB);
+        var graphics = image.createGraphics();
+        try {
+            component.printAll(graphics);
+        }
+        finally {
+            graphics.dispose();
+        }
+        ImageIO.write(image, "png", destination.toFile());
+    }
+
+    private static void layout(Component component) {
+        component.doLayout();
+        if (component instanceof Container container) {
+            for (var child : container.getComponents()) {
+                layout(child);
+            }
         }
     }
 
@@ -183,8 +263,12 @@ public final class WorkspaceProbe implements GhidraLaunchable {
         var pcodeText = swing(() -> namedIn(pcode, JTextArea.class, "BinaryRat instruction p-code output"));
         require(pcodeText != null && !pcodeText.isEditable(), "P-code output must be read-only");
         String raw = swing(pcodeText::getText);
-        require(raw.contains(site.toString()) && raw.lines().skip(3).anyMatch(line -> line.contains("CALL")),
-            "P-code dialog did not show the selected call instruction\n" + raw);
+        require(raw.contains(site.toString()) && raw.lines().skip(3).anyMatch(line -> line.contains("CALL")) &&
+            raw.contains("RSP = INT_SUB RSP"), "P-code dialog did not show the selected call instruction\n" + raw);
+        swing(() -> {
+            snapshot(pcode, evidence.resolve("pcode.png"));
+            return null;
+        });
         close(pcode);
         require(program.getModificationNumber() == originalRevision && !program.isChanged(),
             "Inspecting instruction p-code changed the Program");
@@ -271,10 +355,34 @@ public final class WorkspaceProbe implements GhidraLaunchable {
             "Call-site override changed a function prototype");
 
         long appliedRevision = program.getModificationNumber();
-        click("BinaryRat override call prototype");
-        correctionStatus("Override unavailable:");
-        require(program.getModificationNumber() == appliedRevision && overrideAt(function, site) != null,
-            "Duplicate attempt changed the existing prototype override");
+        var review = openOverride();
+        swing(() -> {
+            require(signatureField(review).getText().equals("uint measurement_bias(uint value)"),
+                "The existing override was not offered for review: " + signatureField(review).getText());
+            var origin = namedIn(review, JLabel.class, "BinaryRat call prototype origin");
+            require(origin != null && origin.getText().startsWith("Showing the override already at this call"),
+                "The review does not say it replaces the existing override");
+            var convention = namedIn(review, JComboBox.class, "BinaryRat call prototype convention");
+            require(convention != null && convention.getItemCount() > 1 && convention.getSelectedItem() != null,
+                "The review lacks a calling convention choice");
+            snapshot(review, evidence.resolve("override.png"));
+            return null;
+        });
+        press(review, "Apply");
+        require(correctionStatus("Override failed:").contains("already uses that prototype"),
+            "Re-applying the same prototype was not reported");
+        require(program.getModificationNumber() == appliedRevision,
+            "Re-applying the same prototype changed the Program");
+
+        submitOverride(openOverride(), "int measurement_bias(int value)");
+        correctionStatus("Call prototype override replaced at " + site);
+        var replaced = overrideAt(function, site);
+        require(replaced != null && replaced.getReturnType().getName().equals("int") &&
+            overrideMarkers(function, site) == 1, "Replacement did not leave one int override: " + replaced);
+        undo(program);
+        var restored = overrideAt(function, site);
+        require(restored != null && restored.getReturnType().isEquivalent(UnsignedIntegerDataType.dataType) &&
+            overrideMarkers(function, site) == 1, "One undo did not restore the previous override");
 
         undo(program);
         require(overrideAt(function, site) == null && overrideAt(peerFunction, peerSite) == null,
@@ -284,6 +392,23 @@ public final class WorkspaceProbe implements GhidraLaunchable {
             var override = namedVisible(JButton.class, "BinaryRat override call prototype");
             return status != null && status.getText().startsWith("Ready: measurement_area") &&
                 override != null && override.isEnabled() ? Boolean.TRUE : null;
+        });
+        // The default right-hand dock is narrow: every correction button must still be on screen.
+        await("correction buttons fully visible", () -> {
+            for (String name : List.of("BinaryRat inspect instruction p-code", "BinaryRat override call prototype",
+                "BinaryRat open interactive decompiler")) {
+                var button = namedVisible(JButton.class, name);
+                var visible = button == null ? null : button.getVisibleRect();
+                if (visible == null || button.getWidth() == 0 || visible.width != button.getWidth() ||
+                    visible.height != button.getHeight()) {
+                    return null;
+                }
+            }
+            return Boolean.TRUE;
+        });
+        swing(() -> {
+            snapshot(tool.getToolFrame(), evidence.resolve("codebrowser.png"));
+            return null;
         });
         System.out.println("BINARYRAT_WORKSPACE_CORRECTIONS_OK");
     }
@@ -302,6 +427,14 @@ public final class WorkspaceProbe implements GhidraLaunchable {
             }
         }
         return null;
+    }
+
+    private static int overrideMarkers(Function function, Address site) {
+        var namespace = HighFunction.findOverrideSpace(function);
+        return namespace == null ? 0 : (int) Arrays.stream(function.getProgram().getSymbolTable().getSymbols(site))
+            .filter(symbol -> namespace.equals(symbol.getParentNamespace()) &&
+                symbol.getSymbolType() == SymbolType.LABEL && symbol.getName().startsWith("prt"))
+            .count();
     }
 
     private static void undo(Program program) throws Exception {

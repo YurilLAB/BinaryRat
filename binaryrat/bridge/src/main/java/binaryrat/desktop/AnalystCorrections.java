@@ -5,11 +5,15 @@ package binaryrat.desktop;
 import java.awt.BorderLayout;
 import java.awt.FlowLayout;
 import java.awt.Font;
+import java.awt.GridLayout;
 import java.io.IOException;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
+import javax.swing.BorderFactory;
+import javax.swing.Box;
 import javax.swing.JButton;
+import javax.swing.JComboBox;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
@@ -56,7 +60,7 @@ final class AnalystCorrections extends JPanel {
         pcode.addActionListener(event -> inspectPcode());
         override.addActionListener(event -> prepareOverride());
         interactive.addActionListener(event -> openInteractive());
-        var buttons = new JPanel(new FlowLayout(FlowLayout.LEADING));
+        var buttons = new JPanel(new WrapLayout(FlowLayout.LEADING, 5, 5));
         buttons.add(pcode);
         buttons.add(override);
         buttons.add(interactive);
@@ -100,7 +104,7 @@ final class AnalystCorrections extends JPanel {
         }
         perform(at, "Inspect Call Site", "Override unavailable", true,
             monitor -> CallPrototypeOverride.inspect(at.program(), at.functionEntry(), at.location(),
-                at.revision()),
+                at.revision(), monitor),
             candidate -> {
                 clearStatus();
                 tool.showDialog(new PrototypeDialog(at, candidate), this);
@@ -118,19 +122,7 @@ final class AnalystCorrections extends JPanel {
             text.setName("BinaryRat instruction p-code output");
             text.setEditable(false);
             text.setFont(new Font(Font.MONOSPACED, Font.PLAIN, text.getFont().getSize()));
-            var lines = new StringBuilder();
-            lines.append(evidence.instructionAddress()).append("  ").append(evidence.instruction())
-                .append("\n\nRaw instruction p-code (before flow overrides)\n");
-            if (evidence.operations().isEmpty()) {
-                lines.append("This instruction has no p-code operations.\n");
-            }
-            for (String operation : evidence.operations()) {
-                lines.append(operation).append('\n');
-            }
-            if (evidence.truncated()) {
-                lines.append("\nSome operations or operands were omitted.\n");
-            }
-            text.setText(lines.toString());
+            text.setText(InstructionPcode.describe(evidence));
             text.setCaretPosition(0);
             addWorkPanel(new JScrollPane(text));
             addDismissButton();
@@ -165,32 +157,65 @@ final class AnalystCorrections extends JPanel {
         private final Selection at;
         private final CallPrototypeOverride.Candidate candidate;
         private final JTextField signature;
+        private final JComboBox<String> convention;
 
         PrototypeDialog(Selection at, CallPrototypeOverride.Candidate candidate) {
             super("Override Call Prototype", true);
             this.at = at;
             this.candidate = candidate;
-            signature = new JTextField(candidate.suggestedSignature(), 52);
+            signature = new JTextField(candidate.suggestedSignature(), 56);
             signature.setName("BinaryRat call prototype signature");
             signature.setToolTipText("Enter a C prototype such as int call_target(int value)");
+            convention = new JComboBox<>(candidate.callingConventions().toArray(String[]::new));
+            convention.setName("BinaryRat call prototype convention");
+            convention.setSelectedItem(candidate.callingConvention());
+            convention.setToolTipText("Calling convention the decompiler uses for this call");
             var prompt = new JLabel("C prototype for " + candidate.targetName() + " at " +
                 candidate.callSite() + " in " + candidate.callerName());
             prompt.setLabelFor(signature);
-            var form = new JPanel(new BorderLayout(0, 4));
-            form.add(prompt, BorderLayout.NORTH);
-            form.add(signature, BorderLayout.CENTER);
-            var details = new JPanel(new BorderLayout());
-            details.add(new JLabel("Applies to this call only. Calling convention: " +
-                candidate.callingConvention()), BorderLayout.NORTH);
-            if (candidate.suggestedSignature().isBlank()) {
-                details.add(new JLabel("For example, int call_target(int value)"), BorderLayout.SOUTH);
+            var conventionLabel = new JLabel("Calling convention");
+            conventionLabel.setLabelFor(convention);
+            var conventionRow = new JPanel(new FlowLayout(FlowLayout.LEADING, 0, 0));
+            conventionRow.add(conventionLabel);
+            conventionRow.add(Box.createHorizontalStrut(8));
+            conventionRow.add(convention);
+
+            var notes = new JPanel(new GridLayout(0, 1, 0, 2));
+            var origin = new JLabel(origin(candidate));
+            origin.setName("BinaryRat call prototype origin");
+            notes.add(origin);
+            if (candidate.replacesOverride()) {
+                notes.add(new JLabel("Apply replaces the current override at this call. Undo restores it."));
             }
-            form.add(details, BorderLayout.SOUTH);
+            else {
+                notes.add(new JLabel("Applies to this call only. Use Undo to remove it."));
+            }
+            if (candidate.directFixedArguments()) {
+                notes.add(new JLabel("To change every call to " + candidate.targetName() +
+                    ", edit its function signature instead."));
+            }
+            var form = new JPanel(new BorderLayout(0, 6));
+            var entry = new JPanel(new BorderLayout(0, 4));
+            entry.add(prompt, BorderLayout.NORTH);
+            entry.add(signature, BorderLayout.CENTER);
+            entry.add(conventionRow, BorderLayout.SOUTH);
+            form.add(entry, BorderLayout.NORTH);
+            form.add(notes, BorderLayout.SOUTH);
+            form.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
             addWorkPanel(form);
             addOKButton();
             setOkButtonText("Apply");
             addCancelButton();
             setFocusComponent(signature);
+        }
+
+        private static String origin(CallPrototypeOverride.Candidate candidate) {
+            return switch (candidate.suggestionSource()) {
+                case EXISTING_OVERRIDE -> "Showing the override already at this call.";
+                case DECOMPILER -> "Suggested from the decompiler's current view of this call.";
+                case CALLEE -> "Suggested from the signature of " + candidate.targetName() + ".";
+                case NONE -> "No suggestion. For example: int call_target(int value)";
+            };
         }
 
         @Override
@@ -200,10 +225,12 @@ final class AnalystCorrections extends JPanel {
                 return;
             }
             String value = signature.getText();
+            String chosen = (String) convention.getSelectedItem();
             close();
             perform(at, "Write Call Prototype", "Override failed", false,
-                monitor -> CallPrototypeOverride.apply(at.program(), candidate, value, monitor),
-                result -> status.setText("Call prototype override applied at " + candidate.callSite() +
+                monitor -> CallPrototypeOverride.apply(at.program(), candidate, value, chosen, monitor),
+                result -> status.setText("Call prototype override " +
+                    (result.replacedOverride() ? "replaced" : "applied") + " at " + candidate.callSite() +
                     ". Use Undo to revert." + (result.committedAfterCancellation() ?
                         " The write committed before cancellation." : "")));
         }

@@ -8,13 +8,18 @@
 <style>
   body { color: #24292f; background: #fff; margin: 3rem auto; max-width: 50rem; padding: 0 1.5rem; line-height: 1.6; font: 1rem/1.6 system-ui, sans-serif; }
   h1,h2 { line-height: 1.2; }
+  .brand { display: flex; align-items: center; gap: 1rem; }
+  .brand img { flex: none; }
   pre { white-space: pre-wrap; overflow: auto; background: #f3f4f6; border-radius: .25rem; padding: .8rem; }
   code { font-size: .94em; }
   @media (prefers-color-scheme: dark) { body { color: #eee; background: #151b22; } pre { background: #222b36; } }
 </style>
 </head>
 <body>
-<h1>Getting started with BinaryRat</h1>
+<header class="brand">
+  <img src="logo.png" alt="BinaryRat logo" width="96" height="96">
+  <h1>Getting started with BinaryRat</h1>
+</header>
 <h2>Open a binary</h2>
 <ol>
   <li>Extract the archive. Launch <code>binaryrat</code> on Linux or <code>binaryrat.bat</code> on Windows.</li>
@@ -34,8 +39,9 @@
 <h2>Correct a call prototype</h2>
 <ol>
   <li>With <b>Inspect Selected Function</b> open, select the call to <code>measurement_bias</code> inside <code>measurement_area</code> in the Listing.</li>
-  <li>Choose <b>Inspect Instruction P-code</b> to see the raw operations for that instruction.</li>
+  <li>Choose <b>Inspect Instruction P-code</b> to see the operations for that instruction, with register names.</li>
   <li>Choose <b>Override Call Prototype</b>, review the signature and calling convention, and select <b>Apply</b>. The change applies to that call site. Use CodeBrowser’s <b>Undo</b> to revert it.</li>
+  <li>Choose <b>Override Call Prototype</b> again to see the override and replace it. For an indirect call, the first suggestion comes from the decompiler’s view of the call’s arguments.</li>
   <li>Use <b>Open Interactive Decompiler</b> to open the selected function and address for token-level actions such as renaming, retyping, or splitting a variable.</li>
 </ol>
 <h2>Choose analysis depth</h2>
