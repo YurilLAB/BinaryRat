@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 YurilLAB
 # SPDX-License-Identifier: Apache-2.0
 """Assemble the source-built BinaryRat application and its pinned, redistributable JDK."""
 
@@ -30,6 +31,13 @@ JDK_VERSION = "25.0.5+8"
 JDK_SOURCE_NAME = "OpenJDK25U-jdk-sources_25.0.5_8.tar.gz"
 JDK_SOURCE_SHA256 = "f331d870d998f9c144c361c220960f8ad2de169dc1b1c4dc4145291c501c2341"
 WORKSPACE_JAR = "Ghidra/Configurations/Public_Release/lib/Public_Release.jar"
+LAUNCH_PROPERTIES = "support/launch.properties"
+# CVE-2026-114938 (OpenJDK advisory 2026-11-17): on x86-64 CPUs with AVX-512 VBMI the
+# C2 Base64 decoding intrinsic of JDK 17 to 27 builds up to 25.0.5 can write past its
+# output array. The pinned Temurin predates the fix, so every JVM the bundle starts
+# (desktop, headless and PyGhidra all read launch.properties) runs without the Base64
+# intrinsics. Drop this when JDK_VERSION moves to a fixed Temurin build.
+JVM_MITIGATIONS = ("-XX:-UseBASE64Intrinsics",)
 EXTENSION_ROOT = "ghidra/Ghidra/Extensions/BinaryRat/"
 STORED_SUFFIXES = frozenset({".jar", ".zip", ".gz", ".whl", ".png", ".jpg", ".gif", ".xz"})
 DEVICE_NAME = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$", re.IGNORECASE)
@@ -123,6 +131,21 @@ def read_properties(raw: bytes) -> dict[str, str]:
     return properties
 
 
+def mitigated_launch_properties(raw: bytes) -> bytes:
+    """Append the bundle's JVM mitigations to Ghidra's launch.properties, once each."""
+    text = raw.decode("utf-8")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    present = {line.strip() for line in text.splitlines()}
+    missing = [f"VMARGS={flag}" for flag in JVM_MITIGATIONS if f"VMARGS={flag}" not in present]
+    if not missing:
+        return raw
+    if text and not text.endswith("\n"):
+        text += newline
+    lines = ["", "# BinaryRat bundle: the pinned JDK runs without the intrinsics affected by CVE-2026-114938.",
+             *missing, ""]
+    return (text + newline.join(lines)).encode("utf-8")
+
+
 def read_small(archive: ZipFile, path: str, limit: int = 8 << 20) -> bytes:
     entry = archive.getinfo(path)
     if entry.is_dir() or entry.file_size > limit:
@@ -146,7 +169,7 @@ def validate_ghidra(archive: ZipFile, entries: dict[str, ZipInfo], revision: str
             properties.get("application.release.name") != "DEV" or
             properties.get("application.java.min") != "25"):
         raise ValueError("Ghidra version, build revision or minimum JDK does not match this BinaryRat build")
-    necessary = ("LICENSE", "support/LaunchSupport.jar", WORKSPACE_JAR,
+    necessary = ("LICENSE", "support/LaunchSupport.jar", LAUNCH_PROPERTIES, WORKSPACE_JAR,
                  "ghidraRun" + host.suffix, "support/analyzeHeadless" + host.suffix)
     for entry in necessary:
         if root + entry not in entries or entries[root + entry].is_dir():
@@ -251,6 +274,8 @@ def add_ghidra(writer: Writer, archive: ZipFile, entries: dict[str, ZipInfo], ro
         path = name.removeprefix(root)
         if path == WORKSPACE_JAR:
             writer.bytes("ghidra/" + path, edit_workspace_jar(read_small(archive, name)))
+        elif path == LAUNCH_PROPERTIES:
+            writer.bytes("ghidra/" + path, mitigated_launch_properties(read_small(archive, name)))
         else:
             with archive.open(entry) as stream:
                 writer.stream("ghidra/" + path, stream, entry.file_size, bool(entry.external_attr >> 16 & 0o111))
@@ -318,6 +343,7 @@ def build(args: argparse.Namespace, host: Host) -> Path:
                     "extension_archive_sha256": digest(args.extension),
                     "jdk": properties["IMPLEMENTOR_VERSION"],
                     "jdk_source_sha256": JDK_SOURCE_SHA256,
+                    "jvm_mitigations": list(JVM_MITIGATIONS),
                     "example": example_name,
                     "example_sha256": digest(args.example),
                     "python_wheel": args.wheel.name if args.wheel else None,
