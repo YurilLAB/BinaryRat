@@ -149,12 +149,16 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         long recoveryStart = System.nanoTime();
         CountDownLatch recovery = script(tool, "BinaryRatRecoverLayouts.java");
         JDialog options = await("parameter options", () -> dialog("Recover Layout at Cursor"));
+        // The dialog lists the Listing's parameters to help choose an index. Stripped and
+        // debug-info fixtures differ (param_1 versus record), so read the expected entry here.
+        Parameter[] parameters = program.getFunctionManager().getFunctionAt(entry).getParameters();
+        String listed = parameters.length == 0 ? "The Listing signature has no parameters" :
+            "0: " + parameters[0].getDataType().getDisplayName() + " " + parameters[0].getName();
         swing(() -> {
-            // The dialog lists the Listing's parameters to help choose an index.
             if (descendants(options).filter(JLabel.class::isInstance).map(c -> ((JLabel) c).getText())
-                    .filter(text -> text != null).map(text -> text.replace("&nbsp;", " ").replaceAll("<[^>]*>", " "))
-                    .noneMatch(text -> text.contains("0: PackedRecord * record"))) {
-                throw new AssertionError("Recover Layout at Cursor did not list the parameters");
+                    .filter(text -> text != null).map(LayoutNavigationProbe::plain)
+                    .noneMatch(text -> text.contains(listed))) {
+                throw new AssertionError("Recover Layout at Cursor did not list the parameters: " + listed);
             }
             widget(options, JTextField.class, w -> w.getText().endsWith(".json")).setText(report.toString());
             widget(options, JButton.class, b -> b.getText().equals("OK")).doClick();
@@ -273,6 +277,12 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         }
         System.out.printf(Locale.ROOT, "BINARYRAT_GUI_NAVIGATION_OK %s %s %s %.3f %.3f%n",
             entry, interior, evidence, recoverSeconds, browseSeconds);
+    }
+
+    /** Label HTML from HTMLUtilities.toLiteralHTML as plain text. */
+    private static String plain(String html) {
+        return html.replaceAll("<[^>]*>", " ").replace("&nbsp;", " ").replace("&lt;", "<")
+            .replace("&gt;", ">").replace("&quot;", "\"").replace("&amp;", "&");
     }
 
     /** The row citing an instruction, checked for its verified bytes, hex offset and disassembly. */
