@@ -74,7 +74,8 @@ See the [engine protocol](protocol/README.md) and [Python service](python/README
 
 The bridge's live cache uses schema 2 keys, tracked dependencies, and replay
 to verify Program reads across changes and restarts. Stock verification also
-checks that output matches the ascending stock process history. Schema 1 keys require
+checks that output matches the ascending stock process history; the source-built
+fork drops the join records behind that history at each native flush. Schema 1 keys require
 callers to supply complete semantic identities; function bytes and the in-memory
 modification number alone cannot establish correctness across reopen/import, and
 plain exports are evidence artifacts, not reusable decompilations.

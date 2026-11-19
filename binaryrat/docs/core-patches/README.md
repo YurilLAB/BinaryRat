@@ -3,6 +3,7 @@
 ## Runtime patches
 
 - [No-return analyzer candidate checks](no-return-candidate-checks.md)
+- [Decompiler join records at cache flush](decompiler-join-flush.md)
 
 The new C++ project, Python package, headless script, corpus and CI are additive.
 The root README is now a BinaryRat overview marked as modified; upstream LICENSE/NOTICE are

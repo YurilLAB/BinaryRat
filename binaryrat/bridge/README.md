@@ -303,9 +303,10 @@ removed. Ghidra raises the modification number once per change record, so the
 tracker can prove every change reached the engine before an entry is trusted
 without replay; a gap is treated as a change of unknown reach. Entries left by an
 earlier session are always replayed first. Replay checks Program queries.
-Native process history, including register-join allocation order, can still
-affect the bytes. Use stock verification when the ascending serial bytes are
-required.
+On official Ghidra, native process history, including register-join allocation
+order, can still affect the bytes. Use stock verification when the ascending
+serial bytes are required. The source-built fork drops join records at each
+native flush ([core patch](../docs/core-patches/decompiler-join-flush.md)).
 
 `cache-proof` edits the Program (use a throwaway project) and, after each change,
 looks every function up with auditing on and decompiles it fresh:

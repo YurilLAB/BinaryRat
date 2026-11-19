@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// Modified by BinaryRat to let a cache flush drop join records made after registration.
 /// \file translate.hh
 /// \brief Classes for disassembly and pcode generation
 ///
@@ -234,6 +235,8 @@ class AddrSpaceManager {
   mutable uintb joinallocate;	///< Next offset to be allocated in join space
   mutable set<JoinRecord *,JoinRecordCompare> splitset;	///< Different splits that have been defined in join space
   mutable vector<JoinRecord *> splitlist; ///< JoinRecords indexed by join address
+  int4 joinbasecount;		///< Number of JoinRecords kept by truncateJoins(), or -1 for none marked
+  uintb joinbaseallocate;	///< Value of \b joinallocate when the baseline was marked
 protected:
   AddrSpace *decodeSpace(Decoder &decoder,const Translate *trans); ///< Add a space to the model based an on XML tag
   void decodeSpaces(Decoder &decoder,const Translate *trans); ///< Restore address spaces in the model from a stream
@@ -272,6 +275,8 @@ public:
   AddrSpace *getNextSpaceInOrder(AddrSpace *spc) const; ///< Get the next \e contiguous address space
   JoinRecord *findAddJoin(const vector<VarnodeData> &pieces,uint4 logicalsize) const; ///< Get (or create) JoinRecord for \e pieces
   JoinRecord *findJoin(uintb offset) const; ///< Find JoinRecord for \e offset in the join space
+  void markJoinBaseline(void);	///< Keep the current JoinRecords when truncating
+  void truncateJoins(void);	///< Delete JoinRecords created after the baseline
   void setDeadcodeDelay(AddrSpace *spc,int4 delaydelta); ///< Set the deadcodedelay for a specific space
   void truncateSpace(const TruncationTag &tag);	///< Mark a space as truncated from its original size
 

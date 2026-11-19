@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// Modified by BinaryRat so a cache flush also drops join records made by earlier functions.
 #include "ghidra_process.hh"
 #include "flow.hh"
 #include "blockaction.hh"
@@ -186,6 +187,7 @@ void RegisterProgram::rawAction(void)
 
   DocumentStorage store;	// temp storage of initialization xml docs
   ghidra->init(store);
+  ghidra->markJoinBaseline();	// FlushNative keeps only the specification's join records
   if (open == -1) {
     open = archlist.size();
     archlist.push_back((ArchitectureGhidra *)0);
@@ -262,6 +264,9 @@ void FlushNative::rawAction(void)
   ghidra->commentdb->clear();	// Clear any comments
   ghidra->stringManager->clear();	// Clear string decodings
   ghidra->cpool->clear();
+  // Join offsets are allocated in first-use order and decide variable order and names.
+  // Records left by earlier functions would make output depend on decompile order.
+  ghidra->truncateJoins();
   res = 0;
 }
 

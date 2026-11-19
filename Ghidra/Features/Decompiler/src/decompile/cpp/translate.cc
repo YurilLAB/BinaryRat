@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// Modified by BinaryRat to let a cache flush drop join records made after registration.
 #include "translate.hh"
 
 namespace ghidra {
@@ -246,6 +247,8 @@ AddrSpaceManager::AddrSpaceManager(void)
   stackspace = (AddrSpace *)0;
   uniqspace = (AddrSpace *)0;
   joinallocate = 0;
+  joinbasecount = -1;
+  joinbaseallocate = 0;
 }
 
 /// The initialization of address spaces is the same across all
@@ -774,6 +777,32 @@ JoinRecord *AddrSpaceManager::findJoin(uintb offset) const
       max = mid - 1;
   }
   throw LowlevelError("Unlinked join address");
+}
+
+/// Record the JoinRecords that exist now, normally those built from the processor and
+/// compiler specifications, as the set that truncateJoins() keeps.
+void AddrSpaceManager::markJoinBaseline(void)
+
+{
+  joinbasecount = (int4)splitlist.size();
+  joinbaseallocate = joinallocate;
+}
+
+/// Delete every JoinRecord created after markJoinBaseline() and restore the next join
+/// offset, so the next function allocates the same join addresses as a new process.
+/// The caller must first release every object that may hold one of these records or
+/// their join addresses. Nothing happens if no baseline was marked.
+void AddrSpaceManager::truncateJoins(void)
+
+{
+  if (joinbasecount < 0) return;
+  while((int4)splitlist.size() > joinbasecount) {
+    JoinRecord *rec = splitlist.back();
+    splitlist.pop_back();
+    splitset.erase(rec);
+    delete rec;
+  }
+  joinallocate = joinbaseallocate;
 }
 
 /// Set the number of passes for a specific AddrSpace before deadcode removal is allowed

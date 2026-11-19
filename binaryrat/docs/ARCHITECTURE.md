@@ -289,6 +289,9 @@ scheduled phase first, then checks each record with an independent ascending
 serial pass. It writes a match count, fallback count, and digest of the exported
 bytes. The large-file CI test compares that export to a separate stock JVM.
 [LLVM parity evidence](evidence/llvm19-linux.md)
+The source-built fork drops those join records at each native flush, so it
+prints every function as a new official decompiler process does, in any order.
+[Core patch](core-patches/decompiler-join-flush.md)
 
 Use identical binaries, CPU/RAM budgets, JVM heap, options and timeouts for
 paired repeated trials. Measure cold and warm caches separately. Separate import,

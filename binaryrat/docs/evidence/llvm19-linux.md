@@ -86,7 +86,8 @@ storage offset `0x0` in ascending order and `0x10` in descending or fresh
 runs. The temporary for `RDX:8,RAX:8` had the opposite offset. Stock Ghidra
 allocates these join offsets in first-use order and walks varnodes in
 address order when assigning names. Its ordinary native cache flush leaves
-the join records in the running decompiler process.
+the join records in the running decompiler process. The source-built fork
+now drops them at each flush. [Core patch](../core-patches/decompiler-join-flush.md)
 [Join allocation](https://github.com/NationalSecurityAgency/ghidra/blob/Ghidra_12.2_build/Ghidra/Features/Decompiler/src/decompile/cpp/translate.cc#L686) ·
 [Native flush](https://github.com/NationalSecurityAgency/ghidra/blob/Ghidra_12.2_build/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc#L255) ·
 [Name assignment](https://github.com/NationalSecurityAgency/ghidra/blob/Ghidra_12.2_build/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc#L3092)

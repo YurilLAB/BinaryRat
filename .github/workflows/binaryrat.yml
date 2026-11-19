@@ -397,6 +397,14 @@ jobs:
         run: |
           python binaryrat/benchmarks/verify_no_return.py --stock-ghidra build/ghidra-stock/ghidra_12.2_PUBLIC --candidate-ghidra "$BINARYRAT_CANDIDATE" --output build/reports/no-return-parity
           python binaryrat/benchmarks/benchmark_no_return.py --stock-ghidra build/ghidra-stock/ghidra_12.2_PUBLIC --candidate-ghidra "$BINARYRAT_CANDIDATE" --output build/reports/no-return-timing --timeout 150
+      - name: Check that source-built decompiler output does not depend on decompile order
+        shell: python
+        run: |
+          import os, subprocess, sys
+          subprocess.run([sys.executable, "binaryrat/benchmarks/verify_decompile_order.py",
+                          "--stock-ghidra", "build/ghidra-stock/ghidra_12.2_PUBLIC",
+                          "--candidate-ghidra", os.environ["BINARYRAT_CANDIDATE"],
+                          "--output", "build/reports/decompile-order"], check=True)
       - name: Compile and test the bundled engine and extension
         shell: python
         run: |
