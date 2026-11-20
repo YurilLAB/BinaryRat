@@ -3,6 +3,7 @@
 package binaryrat;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -108,6 +109,9 @@ public final class SummaryLayouts {
 				for (Path file : (Iterable<Path>) files.sorted(Comparator.reverseOrder())::iterator) {
 					Files.deleteIfExists(file);
 				}
+			}
+			catch (IOException | UncheckedIOException leftover) {
+				// A scanner can still hold a temporary file; the finished result matters more.
 			}
 		}
 	}

@@ -1,7 +1,8 @@
 """Live Program facade tests. Apache-2.0; Copyright 2026 YurilLAB."""
 
 from concurrent.futures import CancelledError
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stderr
+import io
 from hashlib import sha256
 import json
 import os
@@ -24,7 +25,7 @@ from binaryrat import (
     Address, LayoutRecoveryError, LiveProgramError, Page, StaleProgramError, decompile_program,
     open_program,
 )
-from binaryrat.decompile_cli import _parse_function
+from binaryrat.decompile_cli import _parse_function, _resolve, main as decompile_main
 from binaryrat.live import ProgramView, _monitor
 from binaryrat.live_service import (
     LIVE_PROTOCOL_VERSION,
@@ -817,6 +818,67 @@ class LiveGhidraTests(unittest.TestCase):
                 process.wait(timeout=5)
             process.stdout.close()
         self.assertEqual(before, self.snapshot())
+
+    def test_names_holding_scope_marks_and_a_project_java_cannot_open(self):
+        import pyghidra
+        from ghidra.app.util.opinion import BinaryLoader
+        from ghidra.program.flatapi import FlatProgramAPI
+        from java.lang import Object
+
+        # Ghidra keeps a buffer file it could not read open until the JVM collects it.
+        with TemporaryDirectory(ignore_cleanup_errors=True) as root:
+            marker = Path(root) / "names.gpr"
+            raw = marker.with_suffix(".raw")
+            raw.write_bytes(bytes.fromhex("c3c3"))
+            with ExitStack() as cleanup:
+                project = pyghidra.open_project(marker.parent, marker.stem, create=True)
+                cleanup.callback(project.close)
+                results = (pyghidra.program_loader().source(str(raw)).name("named")
+                           .loaders(BinaryLoader.class_).language("x86:LE:64:default")
+                           .project(project).projectFolderPath("/").load())
+                cleanup.callback(results.close)
+                consumer = Object()
+                program = results.getPrimaryDomainObject(consumer)
+                cleanup.callback(program.release, consumer)
+                flat = FlatProgramAPI(program)
+                with pyghidra.transaction(program, "Name functions as a C++ demangler does"):
+                    for offset, name in ((0, "make<ns::Item>"), (1, "pair<a::b,c::d>")):
+                        entry = program.getMinAddress().add(offset)
+                        if flat.getInstructionAt(entry) is None and not flat.disassemble(entry):
+                            raise AssertionError("name fixture did not disassemble")
+                        function = flat.createFunction(entry, name)
+                        if function is None:
+                            raise AssertionError("name fixture function was not created")
+                    function.setParentNamespace(flat.createNamespace(None, "outer"))
+                results.save(pyghidra.task_monitor())
+
+            with open_program(marker, "/named", install_dir=self.install) as view:
+                # The whole name is the symbol; it is not split at the "::" inside it.
+                plain = view.functions_named("make<ns::Item>")
+                self.assertEqual([(item.name, item.entry.offset) for item in plain.items],
+                                 [("make<ns::Item>", 0)])
+                scoped = view.functions_named("outer::pair<a::b,c::d>")
+                self.assertEqual([(item.qualified_name, item.entry.offset) for item in scoped.items],
+                                 [("outer::pair<a::b,c::d>", 1)])
+                self.assertEqual(view.functions_named("pair<a::b,c::d>"), scoped)
+                for partial in ("Item>", "ns::Item>", "c::d>", "outer::make<ns::Item>"):
+                    self.assertEqual(view.functions_named(partial), Page((), None), partial)
+                self.assertEqual(_resolve(view, _parse_function("name:make<ns::Item>")).entry.offset, 0)
+
+            # A Program whose database Java cannot read is one clear error, in the API and the CLI.
+            databases = list(marker.with_suffix(".rep").rglob("*.gbf"))
+            self.assertTrue(databases)
+            for database in databases:
+                database.write_bytes(b"not a Ghidra buffer file")
+            with self.assertRaisesRegex(LiveProgramError, "Could not open /named"):
+                with open_program(marker, "/named", install_dir=self.install):
+                    self.fail("a damaged Program opened")
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                status = decompile_main([str(marker), "/named", "name:make<ns::Item>", "--backend", "stock",
+                                         "--install-dir", str(self.install), "--max-heap-mb", "1048576"])
+            self.assertEqual(status, 2)
+            self.assertIn("binaryrat-decompile: Could not open /named", stderr.getvalue())
 
     def test_stack_strings_through_the_shared_service(self):
         from ghidra.framework import Application

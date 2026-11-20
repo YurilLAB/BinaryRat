@@ -70,4 +70,8 @@ if(BUILD_TESTING)
     "${CMAKE_CURRENT_SOURCE_DIR}/native/tests/stack_strings_fuzz.py"
     --engine "$<TARGET_FILE:binaryrat-engine>" --cases 400)
   set_tests_properties(native.stack_strings_fuzz PROPERTIES TIMEOUT 120)
+  add_test(NAME native.protocol_fuzz COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/native/tests/protocol_fuzz.py"
+    --engine "$<TARGET_FILE:binaryrat-engine>" --cases 400)
+  set_tests_properties(native.protocol_fuzz PROPERTIES TIMEOUT 180)
 endif()

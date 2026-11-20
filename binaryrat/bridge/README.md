@@ -268,13 +268,17 @@ assignments. It reads each function's instructions without decompiling,
 follows register constants through straight-line code (moves, extensions,
 constant arithmetic such as an XOR with a key, and loads from read-only
 memory), and records each store that Ghidra's stack analysis marked as a stack
-write with a known value. A run ends at a jump target or after a jump, and a
-call clears registers, so values from different paths never mix. The engine's
-`strings.stack` op then replays the stores (a later store replaces earlier
-bytes) and reports ASCII and UTF-16LE text of at least the minimum length,
-with its stack offset, terminator and the instructions that wrote it.
-Double-click a row to open the first store. Loads from writable memory, values
-pushed with `push`, and text decoded in a loop are not followed.
+write with a known value. A run ends at a jump target and after a jump or a
+call, so values from different paths never mix and a buffer that is filled
+again after a call is reported as two strings, not as one mixture. A stack
+store of a value that is not known removes the bytes it covers, and what an
+instruction computes conditionally (a conditional move) counts as not known.
+The engine's `strings.stack` op then replays the stores (a later store
+replaces earlier bytes) and reports ASCII and UTF-16LE text of at least the
+minimum length, with its stack offset, terminator and the instructions that
+wrote it. Double-click a row to open the first store. Loads from writable
+memory, values pushed with `push`, text decoded in a loop, and stores through
+a pointer that Ghidra did not resolve to the stack are not followed.
 
 Headless, `BinaryRatStackStrings.java OUTPUT_JSON [all|ENTRY_HEX|name:FUNCTION
 [MINIMUM_LENGTH=4 [MAX_FUNCTIONS=10000]]]` writes the report (`analysis_mode`

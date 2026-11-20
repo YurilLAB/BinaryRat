@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ._console import tolerant_output
 from .summary_layout import ANALYSIS_MODE, explain_summary, parse_summary_report
 
 # Layout extraction bounds a report to 4,096 memory accesses. Also bound the
@@ -256,6 +257,7 @@ def explain(report: dict, offset: int | None = None) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    tolerant_output()
     parser = argparse.ArgumentParser(prog="binaryrat-explain",
                                      description="Inspect the recorded p-code behind a layout proposal.")
     parser.add_argument("report", type=Path,

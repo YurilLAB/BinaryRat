@@ -105,6 +105,22 @@ void corruption_limits_and_paths() {
     { std::ofstream output(path); output << std::string(2048, 'x'); }
     require(!cache.get(key(1)), "oversized on-disk record must miss");
 
+    // Serializing a record recurses once per nesting level, so one nested deeper than any
+    // request can be is refused even when everything else about it is right.
+    const auto written = [&](const json& value) {
+        json payload{{"schema_version", 1}, {"key", key(1)}, {"value", value},
+                     {"dependencies", json::array()}};
+        json record{{"payload", payload}, {"checksum", ArtifactCache::key_digest(payload)}};
+        std::ofstream output(path);
+        output << record.dump();
+    };
+    json nested = "leaf";
+    for (int level = 0; level < 100; ++level) nested = json::array({nested});
+    written(json::array({"leaf"}));
+    require(cache.get(key(1)).value() == json::array({"leaf"}), "a well-formed record written by hand is read");
+    written(nested);
+    require(!cache.get(key(1)), "a record nested deeper than any request must miss");
+
     const auto id = ArtifactCache::key_digest(key(1));
     requires_throw<std::invalid_argument>([&] { cache.remove("subdir/" + id); });
     requires_throw<std::invalid_argument>([&] { cache.remove((directory.path / id).string()); });

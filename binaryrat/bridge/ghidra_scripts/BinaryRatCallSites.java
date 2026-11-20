@@ -44,6 +44,9 @@ public class BinaryRatCallSites extends GhidraScript {
 		if (currentProgram == null) {
 			throw new IllegalStateException("Open an analyzed Program before listing call sites");
 		}
+		// GhidraScript opens an implicit transaction; a read-only listing must not hold one
+		// open, or undo and other tools wait for as long as the decompiles take.
+		end(true);
 		revision = currentProgram.getModificationNumber();
 		if (AutoAnalysisManager.getAnalysisManager(currentProgram).isAnalyzing()) {
 			throw new IllegalStateException("auto-analysis must finish before listing call sites");

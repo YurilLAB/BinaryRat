@@ -104,9 +104,17 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 
 		/** movups xmm0, [rip + target]. */
 		Code loadXmm0(long target) {
-			long next = base + bytes.size() + 7;
-			int displacement = (int) (target - next);
-			emit("0f1005");
+			return relative("0f1005", target);
+		}
+
+		/** call target. */
+		Code call(long target) {
+			return relative("e8", target);
+		}
+
+		private Code relative(String opcode, long target) {
+			emit(opcode);
+			int displacement = (int) (target - (base + bytes.size() + 4));
 			for (int shift = 0; shift < 32; shift += 8) {
 				bytes.write(displacement >>> shift & 0xff);
 			}
@@ -173,13 +181,31 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 				"554889e5" + "b841424344" + "c745f041414141" + "85ff" + "7407" + "c745f042424242" +
 				"8945f4" + "b8575859 5a".replace(" ", "") + "8945e0" + "ffc9" + "75f9" + "5dc3"));
 			memory.setBytes(space.getAddress(0x1300), HexFormat.of().parseHex("e9fbfcffff")); // jmp builder
+			// reuser: values and bytes that are not known must not be reported as text.
+			memory.setBytes(space.getAddress(0x1310), new Code(0x1310)
+				.emit("55 4889e5 4883ec40")                // push rbp; mov rbp,rsp; sub rsp,0x40
+				.emit("b861616161 b962626262")             // mov eax, "aaaa"; mov ecx, "bbbb"
+				.emit("85ff 0f44c1")                       // test edi,edi; cmovz eax,ecx
+				.emit("8945f0")                            // mov [rbp-0x10], eax (either text)
+				.emit("c745e061626364")                    // mov dword [rbp-0x20], "abcd"
+				.emit("c745e465666768")                    // mov dword [rbp-0x1c], "efgh"
+				.emit("897de0")                            // mov [rbp-0x20], edi (unknown over "abcd")
+				.emit("c745d06b65726e")                    // mov dword [rbp-0x30], "kern"
+				.emit("c745d4656c3332")                    // mov dword [rbp-0x2c], "el32"
+				.emit("c745d82e646c6c")                    // mov dword [rbp-0x28], ".dll"
+				.emit("c645dc00")                          // mov byte [rbp-0x24], 0
+				.call(0x1000)                              // the callee is given the buffer
+				.emit("c745d075736572")                    // mov dword [rbp-0x30], "user" (buffer reused)
+				.emit("c645d400")                          // mov byte [rbp-0x2c], 0
+				.emit("c9c3").bytes());                    // leave; ret
 
 			builder = function(flat, 0x1000, "builder");
 			function(flat, 0x1100, "clobbered");
 			brancher = function(flat, 0x1200, "brancher");
 			thunk = function(flat, 0x1300, "builder_thunk");
 			thunk.setThunkedFunction(builder);
-			for (long entry : new long[] { 0x1000, 0x1100, 0x1200 }) {
+			function(flat, 0x1310, "reuser");
+			for (long entry : new long[] { 0x1000, 0x1100, 0x1200, 0x1310 }) {
 				require(new NewFunctionStackAnalysisCmd(space.getAddress(entry), true).applyTo(program, monitor),
 					"stack analysis failed at " + Long.toHexString(entry));
 			}
@@ -215,7 +241,7 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 		require(report.get("schema_version").getAsInt() == 1 &&
 			report.get("analysis_mode").getAsString().equals(StackStrings.ANALYSIS_MODE) &&
 			report.get("revision").getAsLong() == program.getModificationNumber() &&
-			report.get("function").isJsonNull() && report.get("functions_scanned").getAsInt() == 3 &&
+			report.get("function").isJsonNull() && report.get("functions_scanned").getAsInt() == 4 &&
 			report.get("functions_skipped").getAsInt() == 1 && report.get("functions_partial").getAsInt() == 0 &&
 			!report.get("truncated").getAsBoolean(), "report header " + report);
 		List<String> expected = List.of(
@@ -228,7 +254,12 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 			"builder -16 hello ascii true",
 			"clobbered -20 efgh ascii false",
 			"brancher -24 AAAA ascii false",
-			"brancher -24 BBBB ascii false");
+			"brancher -24 BBBB ascii false",
+			// Not "bbbb" at -24 (a conditional move), not "abcdefgh" (its first half was
+			// overwritten), and not the "l32.dll" left under "user" from before the call.
+			"reuser -56 kernel32.dll ascii true",
+			"reuser -36 efgh ascii false",
+			"reuser -56 user ascii true");
 		require(strings(report).equals(expected), "strings " + strings(report));
 		for (JsonElement element : report.getAsJsonArray("strings")) {
 			JsonObject item = element.getAsJsonObject();
@@ -271,7 +302,8 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 		require(first.get("truncated").getAsBoolean() && first.get("functions_scanned").getAsInt() == 1 &&
 			strings(first).size() == 7, "function limit " + strings(first));
 		JsonObject longer = StackStrings.recover(program, null, 9, StackStrings.DEFAULT_FUNCTIONS, monitor);
-		require(strings(longer).equals(List.of("builder -104 fromrodata12345 ascii true")),
+		require(strings(longer).equals(List.of("builder -104 fromrodata12345 ascii true",
+			"reuser -56 kernel32.dll ascii true")),
 			"minimum length 9 " + strings(longer));
 	}
 

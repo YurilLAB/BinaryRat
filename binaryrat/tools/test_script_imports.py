@@ -52,6 +52,18 @@ class CheckoutScriptImportsTest(unittest.TestCase):
         self.assertIn('"binaryrat.writeback.LayoutEvidenceTable"', text)
         self.assertTrue((JAR_ONLY / "writeback/LayoutEvidenceTable.java").is_file())
 
+    def test_read_only_scripts_end_the_implicit_transaction_before_their_work(self):
+        # GhidraScript opens a Program transaction for every script. One that only reads must end
+        # it first, or undo and the tools that wait for edits stall for as long as it runs.
+        work = {"BinaryRatCallSites.java": "CallSites.recover(", "BinaryRatStackStrings.java": "StackStrings.recover(",
+                "BinaryRatRecoverRtti.java": "RttiEvidence."}
+        for name, call in work.items():
+            with self.subTest(script=name):
+                text = code(SCRIPTS / name)
+                self.assertIn(call, text)
+                self.assertIn("end(true);", text)
+                self.assertLess(text.index("end(true);"), text.index(call))
+
     def test_checker_flags_jar_only_imports_and_ignores_strings_and_comments(self):
         def check(text):
             return unavailable_references(_NOISE.sub(" ", text))

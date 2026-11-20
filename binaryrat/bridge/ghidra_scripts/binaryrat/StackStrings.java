@@ -3,10 +3,12 @@
 package binaryrat;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.Iterator;
@@ -43,9 +45,11 @@ import ghidra.util.task.TaskMonitor;
  * instructions are read in address order, register constants are followed through each
  * straight-line run (moves, extensions, constant arithmetic and loads from read-only
  * memory), and every store that Ghidra's stack analysis marked as a stack write with a
- * known value becomes one write. A run ends at a jump target or after a jump, so strings
- * from different paths are never mixed. The Program's modification number is checked
- * around every step and any change fails the run.
+ * known value becomes one write. A run ends at a jump target and after a jump or a call, so
+ * strings from different paths, or from before and after a callee used a buffer, are never
+ * mixed. A stack store of an unknown value removes the bytes it covers, and p-code that an
+ * instruction runs conditionally (a conditional move) yields unknown values. The Program's
+ * modification number is checked around every step and any change fails the run.
  */
 public final class StackStrings {
 	public static final String ANALYSIS_MODE = "read_only_stack_strings";
@@ -60,6 +64,9 @@ public final class StackStrings {
 	// The engine assembles at most 1 MiB of distinct stack bytes per group.
 	private static final long MAXIMUM_GROUP_BYTES = (1 << 20) - MAXIMUM_VALUE_BYTES;
 	private static final int MAXIMUM_TEXT = 1_024;
+	// Earlier writes examined per function when stores of unknown values overwrite them;
+	// past it such a store ends the run instead.
+	private static final long FORGET_BUDGET = 1L << 22;
 
 	private StackStrings() {
 	}
@@ -192,6 +199,7 @@ public final class StackStrings {
 			long groupBytes = 0;
 			Address groupStart = null;
 			boolean endAfter = false;
+			long forgetBudget = FORGET_BUDGET;
 			int index = 0;
 			for (Instruction instruction : program.getListing().getInstructions(function.getBody(), true)) {
 				monitor.checkCancelled();
@@ -209,7 +217,8 @@ public final class StackStrings {
 					groupStart = address;
 				}
 				FlowType flow = instruction.getFlowType();
-				endAfter = flow.isJump() || flow.isTerminal();
+				// A callee may read or rewrite the buffers built so far, so a call ends the run too.
+				endAfter = flow.isJump() || flow.isTerminal() || flow.isCall();
 				StackReference destination = null;
 				int stackWrites = 0;
 				for (Reference reference : references.getReferencesFrom(address)) {
@@ -221,17 +230,37 @@ public final class StackStrings {
 				TreeMap<Long, byte[]> uniques = new TreeMap<>();
 				PcodeOp[] ops = instruction.getPcode();
 				int stores = 0;
-				for (PcodeOp op : ops) {
-					stores += op.getOpcode() == PcodeOp.STORE ? 1 : 0;
+				// P-code after a branch inside the instruction (a conditional move, a repeated
+				// string operation) runs zero or several times, so nothing it computes is known.
+				boolean conditional = false;
+				for (int position = 0; position < ops.length; position++) {
+					int opcode = ops[position].getOpcode();
+					stores += opcode == PcodeOp.STORE ? 1 : 0;
+					conditional |= position < ops.length - 1 && (opcode == PcodeOp.BRANCH ||
+						opcode == PcodeOp.CBRANCH || opcode == PcodeOp.BRANCHIND);
+				}
+				boolean oneStackStore = stores == 1 && stackWrites == 1;
+				if (stackWrites > 0 ? !oneStackStore : conditional && stores > 0) {
+					// Memory changes here, but not which bytes: what follows starts afresh.
+					endAfter = true;
 				}
 				for (int position = 0; position < ops.length; position++) {
 					PcodeOp op = ops[position];
 					if (op.getOpcode() == PcodeOp.STORE) {
-						byte[] value = value(op.getInput(2), registers, uniques);
-						if (value != null && stores == 1 && stackWrites == 1) {
-							current.add(new Write(destination.getStackOffset(), value,
-								(long) index * 256 + position, address));
-							groupBytes += value.length;
+						if (oneStackStore) {
+							Varnode stored = op.getInput(2);
+							byte[] value = conditional ? null : value(stored, registers, uniques);
+							long offset = destination.getStackOffset();
+							if (value != null) {
+								current.add(new Write(offset, value, (long) index * 256 + position, address));
+								groupBytes += value.length;
+							}
+							else if ((forgetBudget -= current.size()) < 0) {
+								endAfter = true;
+							}
+							else {
+								forget(current, offset, stored.getSize());
+							}
 						}
 						continue;
 					}
@@ -241,7 +270,7 @@ public final class StackStrings {
 					}
 					Varnode output = op.getOutput();
 					if (output != null) {
-						assign(output, evaluate(op, registers, uniques), registers, uniques);
+						assign(output, conditional ? null : evaluate(op, registers, uniques), registers, uniques);
 					}
 				}
 			}
@@ -258,6 +287,31 @@ public final class StackStrings {
 				}
 			}
 			return false;
+		}
+
+		/**
+		 * Drops the bytes [offset, offset + size) from the writes so far: a store of an unknown
+		 * value replaced them, so no string may be read across them.
+		 */
+		private static void forget(List<Write> writes, long offset, int size) {
+			long end = offset + size;
+			for (int index = 0; index < writes.size(); index++) {
+				Write write = writes.get(index);
+				long start = write.offset();
+				long stop = start + write.bytes().length;
+				if (stop <= offset || start >= end) {
+					continue;
+				}
+				writes.remove(index--);
+				if (start < offset) {
+					writes.add(++index, new Write(start,
+						Arrays.copyOfRange(write.bytes(), 0, (int) (offset - start)), write.order(), write.address()));
+				}
+				if (stop > end) {
+					writes.add(++index, new Write(end, Arrays.copyOfRange(write.bytes(), (int) (end - start),
+						write.bytes().length), write.order(), write.address()));
+				}
+			}
 		}
 
 		private void finish(Function function, Address start, List<Write> writes, List<Group> groups) {
@@ -477,6 +531,9 @@ public final class StackStrings {
 					for (Path file : (Iterable<Path>) files.sorted(Comparator.reverseOrder())::iterator) {
 						Files.deleteIfExists(file);
 					}
+				}
+				catch (IOException | UncheckedIOException leftover) {
+					// A scanner can still hold a temporary file; the finished result matters more.
 				}
 			}
 		}

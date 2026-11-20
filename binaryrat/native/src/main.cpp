@@ -10,7 +10,10 @@
 #include <binaryrat/types.hpp>
 #include <nlohmann/json.hpp>
 
+#include "json_depth.hpp"
+
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -23,6 +26,11 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 namespace {
 using json = nlohmann::json;
 constexpr std::size_t maximum_line = 16 * 1024 * 1024;
@@ -31,7 +39,9 @@ constexpr std::size_t maximum_line = 16 * 1024 * 1024;
 class Output {
 public:
     void write(const json& line) {
-        const auto text = line.dump();
+        // An error message can quote bytes that are not UTF-8 (a rejected request,
+        // a path in the local code page); a reply must still be written.
+        const auto text = line.dump(-1, ' ', false, json::error_handler_t::replace);
         std::lock_guard lock(mutex_);
         std::cout << text << '\n' << std::flush;
         if (!std::cout) failed_ = true;
@@ -522,6 +532,12 @@ bool read_line(std::string& line, bool& oversized) {
 }
 
 int serve(const std::filesystem::path& directory) {
+#ifdef _WIN32
+    // The protocol is bytes. Text mode would end the input at a 0x1A byte and
+    // rewrite line ends.
+    if (_setmode(_fileno(stdin), _O_BINARY) == -1 || _setmode(_fileno(stdout), _O_BINARY) == -1)
+        throw std::runtime_error("standard streams cannot be switched to binary mode");
+#endif
     // Other threads write responses; reading must never flush std::cout itself.
     std::cin.tie(nullptr);
     binaryrat::CacheOwnership ownership(directory);
@@ -534,6 +550,8 @@ int serve(const std::filesystem::path& directory) {
         json id = nullptr;
         try {
             if (oversized) throw std::invalid_argument("request exceeds 16 MiB");
+            if (binaryrat::detail::json_nests_deeper_than(line, binaryrat::detail::maximum_json_depth))
+                throw std::invalid_argument("request nests deeper than 64 levels");
             const auto request = json::parse(line);
             if (!request.is_object()) throw std::invalid_argument("request must be an object");
             id = string_field(request, "id");

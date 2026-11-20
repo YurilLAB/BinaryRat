@@ -458,7 +458,8 @@ def check_stack_strings(headless: Path, script_directory: Path, destination: Pat
     parsed = load_stack_strings_report(report_path)
     texts = sorted(item.text for item in parsed.strings)
     if len(parsed.strings) != int(passed[0][0]) or texts != sorted(
-            ["ABCD", "fromrodata12345", "keys", "abcdXXXX", "wide", "secret", "hello", "efgh", "AAAA", "BBBB"]):
+            ["ABCD", "fromrodata12345", "keys", "abcdXXXX", "wide", "secret", "hello", "efgh", "AAAA", "BBBB",
+             "kernel32.dll", "efgh", "user"]):
         raise RuntimeError(f"stack-string report does not match the proof; see {report_path}")
     return {"passed": True, "strings": len(parsed.strings), "cancellation_checks": int(passed[0][1]),
             "table": passed[0][2] == "true", "log": log.name, "wall_seconds": measured["wall_seconds"]}

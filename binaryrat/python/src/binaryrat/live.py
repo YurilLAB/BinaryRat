@@ -362,27 +362,35 @@ class ProgramView:
         if not isinstance(name, str) or not name or len(name) > 2000 or not name.isprintable():
             raise ValueError("function name must be a printable string of 1 to 2000 characters")
         self._validate_page(0, limit)
-        simple = name.rsplit("::", 1)[-1]
-        if not simple:
+        if name.endswith("::"):
             raise ValueError("function name must not end with '::'")
+        # A function's own name can contain "::" (template arguments such as make<ns::T>), so
+        # the symbol to look up is the whole name or what follows any of its "::".
+        simples = dict.fromkeys(
+            [name] + [name[index + 2:] for index in range(len(name)) if name.startswith("::", index)])
         from ghidra.program.model.symbol import SymbolType
 
         with self._read() as program:
             manager = program.getFunctionManager()
-            matches = []
-            for symbol in _iter_java(program.getSymbolTable().getSymbols(simple)):
-                _check_cancel(self._cancel)
-                if symbol.getSymbolType() != SymbolType.FUNCTION or symbol.isExternal():
-                    continue
-                function = manager.getFunctionAt(symbol.getAddress())
-                if function is None or function.isExternal():
-                    continue
-                if name not in (str(function.getName()), str(function.getName(True))):
-                    continue
-                if len(matches) == limit:
-                    return Page(tuple(sorted(matches, key=lambda f: f.entry)), None, truncated=True)
-                matches.append(_function(function))
-            return Page(tuple(sorted(matches, key=lambda f: f.entry)), None)
+            matches: dict[Address, ProgramFunction] = {}
+            for simple in simples:
+                for symbol in _iter_java(program.getSymbolTable().getSymbols(simple)):
+                    _check_cancel(self._cancel)
+                    if symbol.getSymbolType() != SymbolType.FUNCTION or symbol.isExternal():
+                        continue
+                    function = manager.getFunctionAt(symbol.getAddress())
+                    if function is None or function.isExternal():
+                        continue
+                    if name not in (str(function.getName()), str(function.getName(True))):
+                        continue
+                    found = _function(function)
+                    if found.entry in matches:
+                        continue
+                    if len(matches) == limit:
+                        return Page(tuple(sorted(matches.values(), key=lambda f: f.entry)), None,
+                                    truncated=True)
+                    matches[found.entry] = found
+            return Page(tuple(sorted(matches.values(), key=lambda f: f.entry)), None)
 
     def xrefs_to(
         self, target: Address, *, offset: int = 0, limit: int = 100
@@ -798,11 +806,15 @@ def open_program(
     from ghidra.util import PropertyFile
     from ghidra.util.exception import CancelledException
     from java.lang import Object
+    from jpype import JException
 
     locator = ProjectLocator(str(marker.parent), marker.name)
     # Ghidra 12.2 stores project properties under this name. Detect SERVER even
     # when a damaged shared project has no repository name.
-    properties = PropertyFile(locator.getProjectDir(), "project")
+    try:
+        properties = PropertyFile(locator.getProjectDir(), "project")
+    except JException as cause:
+        raise LiveProgramError(f"Could not read the Ghidra project: {cause}") from cause
     if properties.getString(DefaultProjectData.SERVER_NAME, None) is not None:
         raise LiveProgramError("Live access requires a local Ghidra project")
     # DefaultProjectData creates the version store if absent, even on a read.
@@ -813,9 +825,16 @@ def open_program(
     with ExitStack() as cleanup:
         # pyghidra.open_project and program_context request writable ownership.
         # Use the underlying read-only storage and release the exact consumer.
-        project = DefaultProjectData(locator, False, False)
+        # A damaged project, or a Program saved by a newer Ghidra, fails in Java here.
+        try:
+            project = DefaultProjectData(locator, False, False)
+        except JException as cause:
+            raise LiveProgramError(f"Could not open the Ghidra project: {cause}") from cause
         cleanup.callback(project.close)
-        file = project.getFile(program_path, DomainFileFilter.NON_LINKED_FILE_FILTER)
+        try:
+            file = project.getFile(program_path, DomainFileFilter.NON_LINKED_FILE_FILTER)
+        except JException as cause:
+            raise LiveProgramError(f"Could not read {program_path}: {cause}") from cause
         if file is None:
             raise FileNotFoundError(f"No saved Program at {program_path}")
         if not Program.class_.isAssignableFrom(file.getDomainObjectClass()):
@@ -828,6 +847,8 @@ def open_program(
                 cleanup.callback(program.release, consumer)
         except CancelledException as cause:
             raise CancelledError("Ghidra Program open cancelled") from cause
+        except JException as cause:
+            raise LiveProgramError(f"Could not open {program_path}: {cause}") from cause
         view = ProgramView(program, program_path, cancel, scheduled_service)
         cleanup.callback(view._invalidate)
         yield view

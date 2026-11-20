@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <binaryrat/cache.hpp>
 
+#include "json_depth.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -150,6 +152,10 @@ std::optional<nlohmann::json> ArtifactCache::read_record(
     input.read(content.data(), static_cast<std::streamsize>(content.size()));
     if (input.gcount() != static_cast<std::streamsize>(content.size()) ||
         input.peek() != std::char_traits<char>::eof()) {
+        return std::nullopt;
+    }
+    // A record nests two levels deeper than the request that stored it.
+    if (detail::json_nests_deeper_than(content, detail::maximum_json_depth + 2)) {
         return std::nullopt;
     }
     try {

@@ -13,6 +13,7 @@ import re
 import sys
 from typing import BinaryIO, Iterator, Literal, TypedDict
 
+from ._console import tolerant_output
 from .exports import ExportError, parse_export
 from .models import Address, Decompilation
 
@@ -220,6 +221,7 @@ def _print_text(report: DiffReport) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    tolerant_output()
     parser = argparse.ArgumentParser(
         prog="binaryrat-diff",
         description="Compare two BinaryRat decompiler exports of the same executable SHA-256.",

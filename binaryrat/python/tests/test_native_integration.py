@@ -7,11 +7,29 @@ import os
 import tempfile
 import unittest
 
-from binaryrat import EngineClient
+from binaryrat import EngineClient, EngineError
 
 
 @unittest.skipUnless(os.environ.get("BINARYRAT_ENGINE"), "set BINARYRAT_ENGINE to the built native executable")
 class NativeIntegrationTests(unittest.TestCase):
+    def test_a_request_the_engine_cannot_read_is_an_engine_error_and_the_client_stays_usable(self):
+        key = dict(schema_version=2, ghidra_version="12.2", kind="decompile", program_id="program",
+                   address_space="ram", address="1000", options_digest="b" * 64)
+        deep = "leaf"
+        for _ in range(80):
+            deep = [deep]
+        with tempfile.TemporaryDirectory() as directory:
+            with EngineClient(os.environ["BINARYRAT_ENGINE"], cache_dir=directory) as engine:
+                # A lone surrogate is not text and 80 levels pass the nesting limit: the engine
+                # refuses each line without reading its ID.
+                for value in ({"c": "broken \ud800 name"}, {"c": deep}):
+                    with self.subTest(value=str(value)[:24]), self.assertRaises(EngineError) as refused:
+                        engine.cache_put(key, value)
+                    self.assertEqual(refused.exception.code, "invalid_request")
+                    self.assertEqual(engine.ping()["name"], "BinaryRat")
+                self.assertFalse(engine.cache_get(key)["hit"])
+                self.assertTrue(engine.cache_put(key, {"c": "return 0;"})["stored"])
+
     def test_cache_roundtrip_invalidation_and_layout_evidence(self):
         key = dict(schema_version=1, ghidra_version="12.2", program_id="program",
                    revision=1, address_space="ram", address="1000",

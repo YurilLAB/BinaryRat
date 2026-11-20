@@ -3,7 +3,9 @@
 Launch `binaryrat-engine serve --cache DIRECTORY`. One process exclusively owns
 each directory; a second owner fails, and OS locks release on process exit.
 Do not share it with direct library instances. The protocol runs over UTF-8
-stdin/stdout; diagnostics go to stderr. Input lines are limited to 16 MiB.
+stdin/stdout; diagnostics go to stderr. Input lines are limited to 16 MiB and
+to 64 levels of nested arrays and objects. Lines are bytes ended by one LF on
+every platform; a CR before it is ignored in requests and never written.
 End-of-input shuts down cleanly: queued leases are cancelled, running leases
 receive `lease.stop` with reason `shutdown`, and an attached process still
 running when `kill_grace_ms` expires is killed before the engine exits.
@@ -15,7 +17,10 @@ running when `kill_grace_ms` expires is killed before the engine exits.
 Success: `{"id":"1","ok":true,"protocol_version":1,"result":{...}}`.
 Error: `{"id":"1","ok":false,"protocol_version":1,"error":{"code":"...","message":"..."}}`.
 Malformed requests do not terminate the server. A malformed request without a
-usable ID returns a null ID. IDs and operations must be strings.
+usable ID returns a null ID: a line that is not UTF-8 JSON, is too long or
+nests too deeply is refused as `invalid_request` before its ID is read. Bytes
+that are not UTF-8 appear as U+FFFD in error messages. IDs and operations must
+be strings.
 
 Requests are read in order and every operation except `sched.acquire` answers
 before the next request is read. `sched.acquire` answers when its lease is

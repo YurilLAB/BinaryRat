@@ -43,6 +43,9 @@ public class BinaryRatStackStrings extends GhidraScript {
 		if (currentProgram == null) {
 			throw new IllegalStateException("Open an analyzed Program before listing stack strings");
 		}
+		// GhidraScript opens an implicit transaction; a read-only scan must not hold one open,
+		// or undo and other tools wait for as long as the scan takes.
+		end(true);
 		revision = currentProgram.getModificationNumber();
 		if (AutoAnalysisManager.getAnalysisManager(currentProgram).isAnalyzing()) {
 			throw new IllegalStateException("auto-analysis must finish before listing stack strings");

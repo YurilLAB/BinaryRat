@@ -13,6 +13,7 @@ import re
 import sys
 from typing import Sequence
 
+from ._console import tolerant_output
 from .call_sites import MAX_CALLERS, MAX_SITES, explain_call_sites
 from .live import LiveProgramError, ProgramFunction, ProgramView, open_program
 from .stack_strings import MAX_FUNCTIONS as MAX_STRING_FUNCTIONS, explain_stack_strings
@@ -112,6 +113,7 @@ def _bounded(name: str, high: int):
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    tolerant_output()
     parser = argparse.ArgumentParser(
         prog="binaryrat-decompile",
         description=__doc__.splitlines()[0],

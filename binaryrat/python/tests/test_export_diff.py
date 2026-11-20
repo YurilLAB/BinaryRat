@@ -4,9 +4,12 @@ from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import random
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -43,6 +46,22 @@ class ExportDiffTests(unittest.TestCase):
         with redirect_stdout(stdout), redirect_stderr(stderr):
             status = main([str(self.before), str(self.after), *options])
         return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_text_a_redirected_stream_cannot_encode_is_escaped_not_fatal(self):
+        # Windows redirects in the ANSI code page; a CJK string literal must not end the output.
+        self.write(self.before, [row()])
+        self.write(self.after, [row(c='void parse(void) { puts("\u65e5\u672c\ud83d"); }\n')])
+        source = Path(__file__).resolve().parents[1] / "src"
+        for options, expected in (("--patch",), 1), ((), 1):
+            with self.subTest(options=options):
+                done = subprocess.run(
+                    [sys.executable, "-m", "binaryrat.export_diff", str(self.before), str(self.after), *options],
+                    capture_output=True, timeout=60,
+                    env=os.environ | {"PYTHONIOENCODING": "cp1252", "PYTHONPATH": str(source)})
+                self.assertEqual((done.returncode, done.stderr), (expected, b""))
+                self.assertIn(b"changed ram:10", done.stdout)
+                if options:
+                    self.assertIn(b'puts("\\u65e5\\u672c\\ud83d")', done.stdout)
 
     def test_revision_order_address_format_and_range_order_do_not_change_a_function(self):
         first = [row(), row(address="fffffffffffffff0", address_space="overlay")]
