@@ -307,15 +307,15 @@ jobs:
           from zipfile import ZipFile
           windows = os.name == "nt"
           if windows:
-              filename = "OpenJDK25U-jdk_x64_windows_hotspot_25.0.5_8.zip"
-              expected = "636bdc13dc649ddc7d5921c5c7d23cca6e44fd19d662b45cc9c02135a6c96c42"
+              filename = "OpenJDK25U-jdk_x64_windows_hotspot_25.0.5.1_2.zip"
+              expected = "849d380ab0a64d9098e7d3a2de28beb73841c3b255c8284f019ccd8748c5eb5b"
           else:
-              filename = "OpenJDK25U-jdk_x64_linux_hotspot_25.0.5_8.tar.gz"
-              expected = "68982529869257d0ee6b824ec5aa270ff8b118bb438670da0b97ebdab178d7fb"
+              filename = "OpenJDK25U-jdk_x64_linux_hotspot_25.0.5.1_2.tar.gz"
+              expected = "760f91b22c3efc9bd1b64ff950598231be82928cc807e30691a0e7a2995a62c0"
           runtime = Path(os.environ["RUNNER_TEMP"]) / "binaryrat-jdk"
           runtime.mkdir(parents=True, exist_ok=True)
           archive = runtime / filename
-          url = "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/" + archive.name
+          url = "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5.1%2B2/" + archive.name
           subprocess.run(["curl.exe" if windows else "curl", "--fail", "--silent", "--show-error", "--location", "--retry", "3",
                           "--output", str(archive), url], check=True)
           with archive.open("rb") as source:
@@ -329,7 +329,7 @@ jobs:
               with tarfile.open(archive, "r:gz") as package:
                   package.extractall(runtime, filter="data")
           archive.unlink()
-          java_home = runtime / "jdk-25.0.5+8"
+          java_home = runtime / "jdk-25.0.5.1+2"
           javac = "javac.exe" if windows else "javac"
           if not (java_home / "bin" / javac).is_file():
               raise SystemExit("Pinned Temurin archive did not contain javac")
@@ -439,8 +439,8 @@ jobs:
                              if os.name == "nt" else
                              ["cc", "-std=c11", "-O0", "-s", "-rdynamic", "-o", str(example), str(walkthrough)])
           subprocess.run(compile_example, cwd=example_dir, check=True)
-          source = Path("build") / "OpenJDK25U-jdk-sources_25.0.5_8.tar.gz"
-          url = "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/" + source.name
+          source = Path("build") / "OpenJDK25U-jdk-sources_25.0.5.1_2.tar.gz"
+          url = "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5.1%2B2/" + source.name
           curl = "curl.exe" if os.name == "nt" else "curl"
           subprocess.run([curl, "--fail", "--silent", "--show-error", "--location", "--retry", "3",
                           "--output", str(source), url], check=True)

@@ -18,8 +18,7 @@ import unittest
 from zipfile import ZipFile, ZipInfo
 
 from build_bundle import (
-    HERE, JVM_MITIGATIONS, LINUX, WINDOWS, Writer, add_tree, archive_entries, checked_path, executable_format,
-    mitigated_launch_properties,
+    HERE, LINUX, WINDOWS, Writer, add_tree, archive_entries, checked_path, executable_format,
 )
 from verify_bundle import extract, verify
 
@@ -77,21 +76,6 @@ class ArchiveTests(unittest.TestCase):
             noise = generator.randbytes(generator.randrange(4080))
             for host in (LINUX, WINDOWS):
                 self.assertFalse(executable_format(noise, host))
-
-    def test_launch_properties_gain_each_jvm_mitigation_once(self):
-        self.assertIn("-XX:-UseBASE64Intrinsics", JVM_MITIGATIONS)
-        for newline in ("\n", "\r\n"):
-            with self.subTest(newline=repr(newline)):
-                original = newline.join(["# Ghidra launch properties", "VMARGS=-Dfile.encoding=UTF8", ""]).encode()
-                patched = mitigated_launch_properties(original)
-                self.assertTrue(patched.startswith(original))
-                lines = patched.decode().split(newline)
-                for flag in JVM_MITIGATIONS:
-                    self.assertEqual(lines.count(f"VMARGS={flag}"), 1)
-                if newline == "\r\n":
-                    self.assertNotRegex(patched, rb"[^\r]\n")
-                self.assertEqual(mitigated_launch_properties(patched), patched)
-        self.assertTrue(mitigated_launch_properties(b"VMARGS=-Da=b").startswith(b"VMARGS=-Da=b\n"))
 
     def test_writer_is_repeatable_and_extraction_keeps_executable_bits(self):
         def archive():

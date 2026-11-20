@@ -16,7 +16,7 @@ import tempfile
 from zipfile import BadZipFile, ZipFile
 
 from build_bundle import (
-    EXTENSION_ROOT, JDK_SOURCE_NAME, JDK_SOURCE_SHA256, JDK_VERSION, JVM_MITIGATIONS, LAUNCH_PROPERTIES,
+    EXTENSION_ROOT, JDK_SOURCE_NAME, JDK_SOURCE_SHA256, JDK_VERSION,
     PREFIX, WORKSPACE_JAR, archive_entries, current_host, digest, read_properties,
 )
 from install_workspace import edit_workspace_jar
@@ -87,11 +87,6 @@ def verify(archive: Path, output: Path, extract_dir: Path) -> None:
     workspace = (root / "ghidra" / WORKSPACE_JAR).read_bytes()
     if edit_workspace_jar(workspace) != workspace:
         raise ValueError("packaged workspace does not include the BinaryRat plugins")
-    launch_lines = {line.strip() for line in
-                    (root / "ghidra" / LAUNCH_PROPERTIES).read_text(encoding="utf-8").splitlines()}
-    if (manifest.get("jvm_mitigations") != list(JVM_MITIGATIONS) or
-            any(f"VMARGS={flag}" not in launch_lines for flag in JVM_MITIGATIONS)):
-        raise ValueError("packaged launch.properties lacks the bundled JVM mitigations")
 
     desktop = root / ("binaryrat" + host.suffix)
     headless = root / ("binaryrat-headless" + host.suffix)
@@ -124,12 +119,6 @@ def verify(archive: Path, output: Path, extract_dir: Path) -> None:
                            output / "java-version.log", fresh, env)
         if f"Temurin-{JDK_VERSION}" not in java_version:
             raise RuntimeError("bundled Java did not report the tested Temurin build")
-        flags = run([str(jdk / "bin" / ("java" + host.java_suffix)), *JVM_MITIGATIONS,
-                     "-XX:+PrintFlagsFinal", "-version"], output / "java-flags.log", fresh, env)
-        for flag in JVM_MITIGATIONS:
-            name = flag.removeprefix("-XX:-")
-            if not re.search(rf"^\s*bool\s+{re.escape(name)}\s+=\s+false\b", flags, re.MULTILINE):
-                raise RuntimeError(f"bundled Java does not apply {flag}")
         engine_version = run([str(engine), "--version"], output / "engine-version.log", fresh, env)
         if not re.fullmatch(r"BinaryRat [^()]+ \(Ghidra " + re.escape(manifest["ghidra_version"]) +
                             r"; protocol \d+\)\s*", engine_version):
@@ -172,7 +161,6 @@ def verify(archive: Path, output: Path, extract_dir: Path) -> None:
         "archive_sha256": archive_hash,
         "revision": manifest["revision"],
         "jdk": manifest["jdk"],
-        "jvm_mitigations": manifest["jvm_mitigations"],
         "platform": host.name,
         "engine": engine_version.strip(),
         "headless_sample": sample["name"],

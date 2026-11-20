@@ -27,17 +27,13 @@ from install_workspace import edit_workspace_jar
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 PREFIX = "BinaryRat/"
-JDK_VERSION = "25.0.5+8"
-JDK_SOURCE_NAME = "OpenJDK25U-jdk-sources_25.0.5_8.tar.gz"
-JDK_SOURCE_SHA256 = "f331d870d998f9c144c361c220960f8ad2de169dc1b1c4dc4145291c501c2341"
+# Temurin 25.0.5.1+2 carries the fixes from the OpenJDK advisory of 2026-11-17 (CVE-2026-114938
+# to CVE-2026-114947), so the bundle no longer needs JVM flags to work around the Base64 intrinsic.
+JDK_VERSION = "25.0.5.1+2"
+JDK_SOURCE_NAME = "OpenJDK25U-jdk-sources_25.0.5.1_2.tar.gz"
+JDK_SOURCE_SHA256 = "3fb4af3a690f6c0f47462f3f813a8f09dc4a237f0c6ab462a764f15bc15313a7"
 WORKSPACE_JAR = "Ghidra/Configurations/Public_Release/lib/Public_Release.jar"
 LAUNCH_PROPERTIES = "support/launch.properties"
-# CVE-2026-114938 (OpenJDK advisory 2026-11-17): on x86-64 CPUs with AVX-512 VBMI the
-# C2 Base64 decoding intrinsic of JDK 17 to 27 builds up to 25.0.5 can write past its
-# output array. The pinned Temurin predates the fix, so every JVM the bundle starts
-# (desktop, headless and PyGhidra all read launch.properties) runs without the Base64
-# intrinsics. Drop this when JDK_VERSION moves to a fixed Temurin build.
-JVM_MITIGATIONS = ("-XX:-UseBASE64Intrinsics",)
 EXTENSION_ROOT = "ghidra/Ghidra/Extensions/BinaryRat/"
 STORED_SUFFIXES = frozenset({".jar", ".zip", ".gz", ".whl", ".png", ".jpg", ".gif", ".xz"})
 DEVICE_NAME = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$", re.IGNORECASE)
@@ -129,21 +125,6 @@ def read_properties(raw: bytes) -> dict[str, str]:
         if equals and not key.lstrip().startswith("#"):
             properties[key.strip()] = value.strip().strip('"')
     return properties
-
-
-def mitigated_launch_properties(raw: bytes) -> bytes:
-    """Append the bundle's JVM mitigations to Ghidra's launch.properties, once each."""
-    text = raw.decode("utf-8")
-    newline = "\r\n" if "\r\n" in text else "\n"
-    present = {line.strip() for line in text.splitlines()}
-    missing = [f"VMARGS={flag}" for flag in JVM_MITIGATIONS if f"VMARGS={flag}" not in present]
-    if not missing:
-        return raw
-    if text and not text.endswith("\n"):
-        text += newline
-    lines = ["", "# BinaryRat bundle: the pinned JDK runs without the intrinsics affected by CVE-2026-114938.",
-             *missing, ""]
-    return (text + newline.join(lines)).encode("utf-8")
 
 
 def read_small(archive: ZipFile, path: str, limit: int = 8 << 20) -> bytes:
@@ -274,8 +255,6 @@ def add_ghidra(writer: Writer, archive: ZipFile, entries: dict[str, ZipInfo], ro
         path = name.removeprefix(root)
         if path == WORKSPACE_JAR:
             writer.bytes("ghidra/" + path, edit_workspace_jar(read_small(archive, name)))
-        elif path == LAUNCH_PROPERTIES:
-            writer.bytes("ghidra/" + path, mitigated_launch_properties(read_small(archive, name)))
         else:
             with archive.open(entry) as stream:
                 writer.stream("ghidra/" + path, stream, entry.file_size, bool(entry.external_attr >> 16 & 0o111))
@@ -343,7 +322,6 @@ def build(args: argparse.Namespace, host: Host) -> Path:
                     "extension_archive_sha256": digest(args.extension),
                     "jdk": properties["IMPLEMENTOR_VERSION"],
                     "jdk_source_sha256": JDK_SOURCE_SHA256,
-                    "jvm_mitigations": list(JVM_MITIGATIONS),
                     "example": example_name,
                     "example_sha256": digest(args.example),
                     "python_wheel": args.wheel.name if args.wheel else None,
