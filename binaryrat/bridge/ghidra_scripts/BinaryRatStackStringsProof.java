@@ -364,12 +364,16 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 		catch (InvocationTargetException failure) {
 			throw new IOException("stack-string table rows failed", failure.getCause());
 		}
-		require(rows.size() == 10, "table rows");
+		// One row per reported string, in report order (whole() pins that list).
+		require(rows.size() == report.getAsJsonArray("strings").size(),
+			"table rows: " + rows.size() + " for " + report.getAsJsonArray("strings").size() + " strings");
 		String hello = String.valueOf(rows.get(6));
 		String wide = String.valueOf(rows.get(4));
+		String reused = String.valueOf(rows.get(rows.size() - 1));
 		require(hello.contains("text=\"hello\"") && hello.contains("stackOffset=-0x10") &&
 			hello.contains("encoding=ASCII") && hello.contains("terminated=yes") &&
-			wide.contains("encoding=UTF-16"), "table formatting: " + rows);
+			wide.contains("encoding=UTF-16") && reused.contains("text=\"user\"") &&
+			reused.contains("stackOffset=-0x38"), "table formatting: " + rows);
 		return true;
 	}
 
