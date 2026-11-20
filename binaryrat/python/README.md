@@ -149,6 +149,20 @@ saved file. A report changed after recovery, a missing extension, or a
 recovery the service refuses raises `StaleProgramError`, `LiveProgramError` or
 `LayoutRecoveryError`.
 
+`view.call_sites(entry, max_sites=64, max_callers=32, timeout_seconds=30)`
+lists every call to a function through the extension's Java `binaryrat.CallSites`
+service, the same code as `BinaryRatCallSites.java`. Calls through thunks of
+the function count as calls to it, and each caller is decompiled once under a
+memory-watched lease. Each `CallSite` carries the caller's C statement and its
+arguments: a value the decompiler proved constant, or a pointer to a defined
+string or labelled address with that string or symbol, or the name of the
+variable passed. `argument.render()` writes the value as a C call shows it.
+Calls the decompiled code does not show, calls outside any function, callers
+that fail to decompile and callers past `max_callers` keep their address and a
+status with the reason. Validation and errors follow `solve_layout`;
+`load_call_sites_report(path)` reads a saved report and a refused listing raises
+`CallSitesError`.
+
 ## Decompile from the CLI
 
 `binaryrat-decompile` is available after installing the wheel. With PyGhidra
@@ -159,6 +173,7 @@ binaryrat-decompile workspace.gpr /program ram:0x401000 --json
 binaryrat-decompile workspace.gpr /program parse_header
 binaryrat-decompile workspace.gpr /program 0x401a2c
 binaryrat-decompile workspace.gpr /program --list --match parse
+binaryrat-decompile workspace.gpr /program parse_header --call-sites
 ```
 
 The CLI requires the shared scheduler by default. Pass `--install-dir` to
@@ -169,10 +184,12 @@ omit the address space to use the Program's image-base space. A name that is
 also valid hexadecimal, such as `add`, needs the `name:` prefix. A shared name
 is refused with the matching entries. `--list` prints each function's entry
 and signature without decompiling, and `--match` keeps names that contain the
-text. By default the command writes C on success. The JSON form includes
-the backend, cache status and decompiler flags. Exit status is 0 on success,
-1 for an incomplete decompilation, 2 for invalid input or an unavailable
-Program or backend, and 130 on interruption.
+text. `--call-sites` prints each call to the function with its caller, C
+statement and constant arguments (`--max-sites`, `--max-callers`), or the
+validated report with `--json`. By default the command writes C on success. The
+JSON form includes the backend, cache status and decompiler flags. Exit status is
+0 on success, 1 for an incomplete decompilation or a function with no calls, 2
+for invalid input or an unavailable Program or backend, and 130 on interruption.
 
 ## Read a Program already open in PyGhidra
 
@@ -218,6 +235,8 @@ and passes a maximum 60-second function timeout to Ghidra. Exact-address and typ
 available independently of the listing offset. `client.solve_layout(entry)` returns the same
 validated report as `view.solve_layout`, at most 64 summaries per request; give the client a
 timeout that covers the whole recovery. A refused recovery is the error `layout_failed`.
+`client.call_sites(entry)` returns the same report as `view.call_sites`, at most 256 sites
+and 64 decompiled callers per request; a refused listing is the error `call_sites_failed`.
 The daemon starts with a 1,024 MiB JVM heap ceiling. Use `--max-heap-mb`
 to configure it.
 It closes its Program and listener after the idle interval or on Ctrl+C.

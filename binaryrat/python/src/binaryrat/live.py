@@ -13,6 +13,13 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any, Generic, Literal, TypeVar
 
+from .call_sites import (
+    MAX_CALLERS as _MAX_CALL_SITE_CALLERS,
+    MAX_SITES as _MAX_CALL_SITES,
+    MAX_TIMEOUT_SECONDS as _MAX_CALL_SITE_TIMEOUT_SECONDS,
+    CallSitesReport,
+    decode_call_sites_report,
+)
 from .models import Address
 from .summary_layout import SummaryLayoutReport, decode_summary_report
 
@@ -38,6 +45,10 @@ class LiveProgramError(RuntimeError):
 
 class LayoutRecoveryError(LiveProgramError):
     """The Java summary layout service refused or failed a recovery."""
+
+
+class CallSitesError(LiveProgramError):
+    """The Java call-site service refused or failed a recovery."""
 
 
 class StaleProgramError(LiveProgramError):
@@ -556,6 +567,51 @@ class ProgramView:
         if report.revision != self._info.revision or (
                 digest is not None and report.program_id != "sha256:" + digest.lower()):
             raise StaleProgramError("summary layout report does not describe this Program revision")
+        return report
+
+    def call_sites(
+        self, entry: Address, *, max_sites: int = 64, max_callers: int = 32, timeout_seconds: int = 30,
+    ) -> CallSitesReport:
+        """List every call to a function with its decompiled statement and constant arguments.
+
+        Runs the extension's Java ``binaryrat.CallSites`` service in this JVM, the same code as
+        ``BinaryRatCallSites.java``: calls through thunks of the function count as calls to it,
+        and each caller is decompiled once under a memory-watched lease. Arguments the decompiler
+        proved constant carry their value; a value that points at a defined string or a labelled
+        address carries the string or symbol. Read-only. Requires the BinaryRat extension.
+        """
+        for name, value, low, high in (("max_sites", max_sites, 1, _MAX_CALL_SITES),
+                                       ("max_callers", max_callers, 1, _MAX_CALL_SITE_CALLERS),
+                                       ("timeout_seconds", timeout_seconds, 1,
+                                        _MAX_CALL_SITE_TIMEOUT_SECONDS)):
+            if type(value) is not int or not low <= value <= high:
+                raise ValueError(f"{name} must be an integer from {low} to {high}")
+        if self._scheduled_service is None:
+            raise LiveProgramError("Call sites require the BinaryRat extension")
+        from ghidra.util.exception import CancelledException
+        from jpype import JClass, JException
+
+        with self._read() as program:
+            function = program.getFunctionManager().getFunctionAt(
+                self._native_address(program, entry)
+            )
+            if function is None:
+                raise LookupError(f"no function at {entry}")
+            with _monitor(self._cancel) as monitor:
+                try:
+                    text = str(JClass("binaryrat.CallSites").recoverJson(
+                        program, function, timeout_seconds, max_sites, max_callers, monitor))
+                except CancelledException as cause:
+                    raise CancelledError("BinaryRat call-site listing cancelled") from cause
+                except JException as cause:
+                    if program.isClosed() or int(program.getModificationNumber()) != self._info.revision:
+                        raise StaleProgramError("Ghidra Program changed while listing call sites") from cause
+                    raise CallSitesError(f"BinaryRat call sites failed: {cause}") from cause
+        report = decode_call_sites_report(text)
+        digest = self._info.executable_sha256
+        if report.revision != self._info.revision or (
+                digest is not None and report.program_id != "sha256:" + digest.lower()):
+            raise StaleProgramError("call-site report does not describe this Program revision")
         return report
 
 

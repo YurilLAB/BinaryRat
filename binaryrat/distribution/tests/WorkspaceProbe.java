@@ -271,7 +271,56 @@ public final class WorkspaceProbe implements GhidraLaunchable {
             return null;
         });
         await("evidence table dismissed", () -> table.isShowing() ? null : Boolean.TRUE);
+        inspectCallSites(tool, program, revision);
         inspectCorrections(tool, program, function, revision);
+    }
+
+    /** Call Sites with Arguments on measurement_bias: main passes 0, measurement_area its area. */
+    private static void inspectCallSites(PluginTool tool, Program program, long revision) throws Exception {
+        var globals = program.getSymbolTable().getGlobalSymbols("measurement_bias");
+        require(globals.size() == 1, "Expected one measurement_bias symbol");
+        var bias = program.getFunctionManager().getFunctionAt(globals.getFirst().getAddress());
+        require(bias != null, "Example measurement_bias was not analyzed");
+        goTo(tool, program, bias.getEntryPoint());
+        var listCalls = await("enabled call-site action", () -> {
+            var candidate = action(tool, "BinaryRatWorkspacePlugin", "Call Sites with Arguments");
+            return candidate.isEnabled() ? candidate : null;
+        });
+        SwingUtilities.invokeLater(() -> listCalls.actionPerformed(new DefaultActionContext()));
+        var table = await("call-site table", () -> dialog("BinaryRat Call Sites — " + bias.getName(true)));
+        await("call rows with statements and the constant argument", () -> {
+            var rows = descendants(table).filter(JTable.class::isInstance).map(JTable.class::cast)
+                .findFirst().orElse(null);
+            if (rows == null || rows.getRowCount() < 2) {
+                return null;
+            }
+            var columns = rows.getColumnModel();
+            int caller = columns.getColumnIndex("Caller");
+            int statement = columns.getColumnIndex("Statement");
+            int arguments = columns.getColumnIndex("Arguments");
+            int status = columns.getColumnIndex("Status");
+            boolean fromArea = false;
+            boolean constant = false;
+            for (int row = 0; row < rows.getRowCount(); row++) {
+                if (!String.valueOf(rows.getValueAt(row, status)).equals("decompiled") ||
+                        !String.valueOf(rows.getValueAt(row, statement)).contains(bias.getName() + "(")) {
+                    return null;
+                }
+                fromArea |= String.valueOf(rows.getValueAt(row, caller)).equals("measurement_area");
+                constant |= String.valueOf(rows.getValueAt(row, arguments)).equals("0");
+            }
+            return fromArea && constant ? Boolean.TRUE : null;
+        });
+        require(!program.isChanged() && program.getModificationNumber() == revision,
+            "Listing call sites changed the Program");
+        swing(() -> {
+            snapshot(table, WorkspaceProbe.evidence.resolve("callsites.png"));
+            descendants(table).filter(JButton.class::isInstance).map(JButton.class::cast)
+                .filter(button -> button.getText().equals("Dismiss")).findFirst().orElseThrow().doClick();
+            return null;
+        });
+        await("call-site table dismissed", () -> table.isShowing() ? null : Boolean.TRUE);
+        System.out.println("BINARYRAT_WORKSPACE_CALL_SITES_OK");
     }
 
     private static void inspectCorrections(PluginTool tool, Program program, Function function,

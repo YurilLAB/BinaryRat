@@ -66,6 +66,10 @@ See the [engine protocol](protocol/README.md) and [Python service](python/README
 - An installable extension with the native engine, CodeBrowser decompilation
   exports, layout recovery at the cursor and a navigable field evidence table.
   [Build and install](bridge/README.md#install-the-extension)
+- Call sites with arguments: every call to a function, including through its thunks,
+  as the caller's decompiled statement with the values the decompiler proved constant
+  and the strings or symbols they point to. In CodeBrowser, PyGhidra, the CLI and the
+  live service. [Call sites](bridge/README.md#call-sites-with-arguments)
 - Typed Python access to functions, references, datatypes, and decompilation in
   saved Programs. Separate local clients can share one read-only Ghidra JVM.
   [Python API](python/README.md)

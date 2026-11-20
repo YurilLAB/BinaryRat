@@ -712,6 +712,85 @@ class LiveGhidraTests(unittest.TestCase):
             process.stdout.close()
         self.assertEqual(before, self.snapshot())
 
+    def test_call_sites_through_the_shared_service(self):
+        from ghidra.framework import Application
+
+        before = self.snapshot()
+        if Application.getModuleRootDir("BinaryRat") is None:
+            with open_program(self.marker, self.program_path) as view:
+                with self.assertRaisesRegex(LiveProgramError, "require the BinaryRat extension"):
+                    view.call_sites(self.target)
+            self.skipTest("call sites require the BinaryRat extension")
+        with open_program(self.marker, self.program_path) as view:
+            report = view.call_sites(self.target)
+            self.assertEqual((report.root_function, report.revision), (self.target, view.info.revision))
+            self.assertEqual([(site.site, site.caller, site.status) for site in report.sites],
+                             [(self.entry, self.entry, "decompiled")])
+            self.assertIn("answer(", report.sites[0].statement)
+            self.assertEqual((report.decompiled_callers, report.truncated), (1, False))
+            uncalled = view.call_sites(self.entry)
+            self.assertEqual((uncalled.sites, uncalled.decompiled_callers), ((), 0))
+            for bad in (dict(max_sites=0), dict(max_sites=1025), dict(max_callers=0), dict(max_callers=257),
+                        dict(timeout_seconds=601), dict(max_sites=True), dict(timeout_seconds="30")):
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
+                    view.call_sites(self.target, **bad)
+            with self.assertRaises(LookupError):
+                view.call_sites(Address("ram", self.target.offset + 1))
+        with open_program(self.marker, self.layout_path) as view:
+            read = view.call_sites(self.reader)
+            self.assertEqual([(site.site, site.caller) for site in read.sites], [(self.holder_call, self.holder)])
+            walk = view.call_sites(self.walker)
+            self.assertEqual([(site.caller, site.status) for site in walk.sites], [(self.walker, "decompiled")])
+            self.assertEqual([argument.render() for argument in walk.sites[0].arguments], ["param_1"])
+        self.assertEqual(before, self.snapshot())
+
+        executable = shutil.which("binaryrat-decompile")
+        program = [*([executable] if executable is not None else [sys.executable, "-m", "binaryrat.decompile_cli"]),
+                   str(self.marker), self.program_path]
+        options = ["--call-sites", "--install-dir", str(self.install)]
+        command = [*program, "answer", *options]
+        listed = subprocess.run(command, encoding="utf-8", capture_output=True, timeout=180)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(listed.stdout.splitlines()[0], f"Calls to answer at {self.target}: 1 site in 1 caller")
+        as_json = subprocess.run([*command, "--json"], encoding="utf-8", capture_output=True, timeout=180)
+        self.assertEqual(as_json.returncode, 0, as_json.stderr)
+        self.assertEqual(json.loads(as_json.stdout), report.document)
+        none = subprocess.run([*program, "dispatch", *options], encoding="utf-8", capture_output=True,
+                              timeout=180)
+        self.assertEqual(none.returncode, 1, none.stderr)
+        self.assertEqual(before, self.snapshot())
+
+        runner = [shutil.which("binaryrat-live") or sys.executable]
+        if runner[0] == sys.executable:
+            runner.extend(["-m", "binaryrat.live_service"])
+        process = subprocess.Popen(
+            [*runner, str(self.marker), self.program_path, "--install-dir", str(self.install),
+             "--idle-timeout", "30", "--max-heap-mb", "512"],
+            stdout=subprocess.PIPE, text=True, encoding="utf-8",
+        )
+        try:
+            line = process.stdout.readline()
+            while line and not line.startswith(READY_PREFIX):
+                line = process.stdout.readline()
+            client = LiveClient(LiveEndpoint.from_ready_line(line), timeout=300)
+            self.assertEqual(client.call_sites(self.target), report)
+            for bad in (dict(max_sites=257), dict(max_callers=65), dict(timeout_seconds=61), dict(max_sites="8")):
+                with self.subTest(bad=bad), self.assertRaisesRegex(LiveRequestError, "bad_request"):
+                    client.call_sites(self.target, **bad)
+            with self.assertRaisesRegex(LiveRequestError, "bad_request"):
+                client._request("call_sites", entry=dict(space="ram", offset=self.target.offset), depth=2)
+            with self.assertRaisesRegex(LiveRequestError, "not_found"):
+                client.call_sites(Address("ram", self.target.offset + 1))
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            process.stdout.close()
+        self.assertEqual(before, self.snapshot())
+
     def test_live_service_reuses_jvm_across_independent_clients(self):
         from ghidra.framework import Application
 

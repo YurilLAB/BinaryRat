@@ -18,8 +18,10 @@ from socketserver import BaseRequestHandler, TCPServer
 from time import monotonic
 from typing import Any, TypeVar
 
+from .call_sites import CallSitesReport, parse_call_sites_report
 from .live import (
     _MAX_PAGE_OFFSET,
+    CallSitesError,
     CrossReference,
     DataTypeInfo,
     LayoutRecoveryError,
@@ -45,6 +47,9 @@ _IO_TIMEOUT = 5.0
 _MAX_DECOMPILE_SECONDS = 60
 # A service request decompiles at most this many function parameters.
 _MAX_SERVICE_SUMMARIES = 64
+# Call-site reports carry statements; these keep a reply well under the response limit.
+_MAX_SERVICE_SITES = 256
+_MAX_SERVICE_CALLERS = 64
 _T = TypeVar("_T")
 
 
@@ -270,6 +275,18 @@ class LiveClient:
             max_summaries=max_summaries, timeout_seconds=timeout_seconds,
         ))
 
+    def call_sites(
+        self, entry: Address, *, max_sites: int = 64, max_callers: int = 32, timeout_seconds: int = 30,
+    ) -> CallSitesReport:
+        """Calls to a function in the served Program, validated before they are returned.
+
+        The whole listing must finish within this client's timeout.
+        """
+        return parse_call_sites_report(self._request(
+            "call_sites", entry=asdict(entry), max_sites=max_sites, max_callers=max_callers,
+            timeout_seconds=timeout_seconds,
+        ))
+
 
 class _Service(TCPServer):
     """Serial, bounded requests over IPv4 loopback."""
@@ -290,6 +307,7 @@ class _Service(TCPServer):
             "decompile": (view.decompile, "entry"),
             # The validated report document is sent unchanged.
             "solve_layout": (lambda **arguments: view.solve_layout(**arguments).document, "entry"),
+            "call_sites": (lambda **arguments: view.call_sites(**arguments).document, "entry"),
         }
         super().__init__((_HOST, 0), _Connection)
 
@@ -324,7 +342,7 @@ class _Service(TCPServer):
             if not isinstance(address, dict) or set(address) != {"space", "offset"}:
                 raise LiveRequestError("bad_request")
             arguments = arguments | {address_key: Address(**address)}
-        if method in ("decompile", "solve_layout"):
+        if method in ("decompile", "solve_layout", "call_sites"):
             timeout = arguments.get("timeout_seconds", 30)
             if type(timeout) is not int or not 1 <= timeout <= _MAX_DECOMPILE_SECONDS:
                 raise LiveRequestError("bad_request")
@@ -332,6 +350,12 @@ class _Service(TCPServer):
             summaries = arguments.get("max_summaries", 32)
             if (type(summaries) is not int or not 1 <= summaries <= _MAX_SERVICE_SUMMARIES or
                     not set(arguments) <= {"entry", "parameter_index", "max_summaries", "timeout_seconds"}):
+                raise LiveRequestError("bad_request")
+        if method == "call_sites":
+            sites, callers = arguments.get("max_sites", 64), arguments.get("max_callers", 32)
+            if (type(sites) is not int or not 1 <= sites <= _MAX_SERVICE_SITES or
+                    type(callers) is not int or not 1 <= callers <= _MAX_SERVICE_CALLERS or
+                    not set(arguments) <= {"entry", "max_sites", "max_callers", "timeout_seconds"}):
                 raise LiveRequestError("bad_request")
         result = operation(**arguments)
         if isinstance(result, ProgramDecompilation) and len(result.c) >= _MAX_RESPONSE:
@@ -367,6 +391,8 @@ class _Connection(BaseRequestHandler):
             response = _encode(version | {"error": "stale_program"}, _MAX_RESPONSE)
         except LayoutRecoveryError:
             response = _encode(version | {"error": "layout_failed"}, _MAX_RESPONSE)
+        except CallSitesError:
+            response = _encode(version | {"error": "call_sites_failed"}, _MAX_RESPONSE)
         except LiveProgramError:
             response = _encode(version | {"error": "program_unavailable"}, _MAX_RESPONSE)
         except LookupError:

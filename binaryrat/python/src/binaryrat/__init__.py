@@ -1,8 +1,19 @@
 """Experimental BinaryRat API. Apache-2.0; Copyright 2026 YurilLAB."""
 
+from .call_sites import (
+    CallArgument,
+    CallSite,
+    CallSitesReport,
+    CallSitesReportError,
+    CallTarget,
+    decode_call_sites_report,
+    load_call_sites_report,
+    parse_call_sites_report,
+)
 from .client import EngineClient, EngineError, ProtocolError
 from .exports import ExportError, load_export, parse_export
 from .live import (
+    CallSitesError,
     CrossReference,
     DataTypeInfo,
     DecompilationBackend,
@@ -39,5 +50,7 @@ __all__ = [
     "ProgramFunction", "ProgramInfo", "ProgramView", "StaleProgramError", "decompile_program", "open_program",
     "LayoutRecoveryError", "SummaryLayoutReport", "SummaryReportError", "decode_summary_report",
     "load_summary_report", "parse_summary_report",
+    "CallArgument", "CallSite", "CallSitesError", "CallSitesReport", "CallSitesReportError", "CallTarget",
+    "decode_call_sites_report", "load_call_sites_report", "parse_call_sites_report",
     "API_VERSION", "PROTOCOL_VERSION",
 ]

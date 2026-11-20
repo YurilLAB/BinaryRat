@@ -25,6 +25,7 @@ import psutil
 PROJECT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT / "binaryrat" / "python" / "src"))
 from binaryrat import load_export  # noqa: E402
+from binaryrat.call_sites import load_call_sites_report  # noqa: E402
 
 PHASE_NAME = r"(serial|parallel|scheduled)"
 PHASE = re.compile(r"BinaryRat export starting mode=" + PHASE_NAME)
@@ -412,6 +413,33 @@ def check_redirected_call_cache(headless: Path, script_directory: Path, destinat
     return {**proof, "wall_seconds": measured["wall_seconds"]}
 
 
+def check_call_sites(headless: Path, script_directory: Path, destination: Path, timeout: float,
+                     environment: dict[str, str]) -> dict:
+    """Run the call-site edge-case proof and parse its report with the Python decoder.
+
+    A checkout script directory has no BinaryRat.jar, so the proof reports table=false;
+    verify_extension.py runs the same proof against the installed table.
+    """
+    report_path = destination / "call-sites.json"
+    log = destination / "call-sites.log"
+    report_path.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory(prefix="call sites-", dir=destination) as directory:
+        measured = measured_run([
+            str(headless), directory, "fixture", "-deleteProject", "-scriptPath", str(script_directory),
+            "-preScript", "BinaryRatCallSitesProof.java", str(report_path)], log, timeout, environment)
+    content = log.read_text(encoding="utf-8", errors="replace")
+    passed = re.findall(r"BINARYRAT_CALL_SITES_OK sites=(\d+) statuses=6 .* checks=(\d+) .* "
+                        r"table=(true|false)", content)
+    if measured["returncode"] or "REPORT SCRIPT ERROR" in content or len(passed) != 1 or not report_path.is_file():
+        raise RuntimeError(f"call-site proof failed; see {log}")
+    parsed = load_call_sites_report(report_path)
+    if len(parsed.sites) != int(passed[0][0]) or len(parsed.sites) != 10:
+        raise RuntimeError(f"call-site report does not match the proof; see {report_path}")
+    return {"passed": True, "sites": len(parsed.sites), "cancellation_checks": int(passed[0][1]),
+            "statuses": sorted({site.status for site in parsed.sites}), "table": passed[0][2] == "true",
+            "log": log.name, "wall_seconds": measured["wall_seconds"]}
+
+
 def check_stock_verified(headless: Path, binary: Path, scripts: Path, destination: Path,
                          timeout: float, environment: dict[str, str]) -> dict:
     """Compare verified output with a separate stock pass and probe fail-closed behavior."""
@@ -542,6 +570,9 @@ def main() -> int:
                 headless, PROJECT / "binaryrat/bridge/ghidra_scripts",
                 destination, engine, args.timeout, environment)
             print("PASS live cache invalidation after editing an original call fixup", flush=True)
+            report["call_sites"] = check_call_sites(
+                headless, PROJECT / "binaryrat/bridge/ghidra_scripts", destination, args.timeout, environment)
+            print("PASS call sites: statuses, thunks, limits, cancellation and program changes", flush=True)
         for artifact in manifest["artifacts"]:
             binary = (corpus_root / artifact["binary"]).resolve()
             if corpus_root.resolve() not in binary.parents:

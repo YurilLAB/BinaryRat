@@ -36,6 +36,11 @@
   <li>The evidence table opens when the report is saved. Double-click a row to jump to its instruction. Reopen a saved report later with <b>Browse Layout Evidence</b>.</li>
 </ol>
 <p>The sample contains a structure with count, width and height fields. Its <a href="examples/walkthrough.c">source</a> is provided for reference.</p>
+<h2>List the calls to a function</h2>
+<ol>
+  <li>Put the cursor in <code>measurement_bias</code> and choose <b>Tools → BinaryRat → Call Sites with Arguments</b>.</li>
+  <li>Each row shows a caller, its decompiled statement and the arguments: <code>main</code> passes the constant 0, and <code>measurement_area</code> passes the computed area. Double-click a row to open the call in the Listing.</li>
+</ol>
 <h2>Correct a call prototype</h2>
 <ol>
   <li>With <b>Inspect Selected Function</b> open, select the call to <code>measurement_bias</code> inside <code>measurement_area</code> in the Listing.</li>
@@ -60,7 +65,8 @@
 <pre>python -m pip install --no-index --find-links python --find-links ghidra/Ghidra/Features/PyGhidra/pypkg/dist "binaryrat[live]"</pre>
 <p>Set <code>JAVA_HOME_OVERRIDE</code> to the full path to the bundled <code>jdk</code> directory. Use saved projects for scripting and supply the bundled Ghidra path:</p>
 <pre>binaryrat-decompile project.gpr /example measurement_area --install-dir ghidra
-binaryrat-decompile project.gpr /example --list --match measurement --install-dir ghidra</pre>
+binaryrat-decompile project.gpr /example --list --match measurement --install-dir ghidra
+binaryrat-decompile project.gpr /example measurement_area --call-sites --install-dir ghidra</pre>
 <p>Select a function by name or by any address inside it, as shown in CodeBrowser. Add <code>--json</code> for the result with its backend and cache status.</p>
 </body>
 </html>

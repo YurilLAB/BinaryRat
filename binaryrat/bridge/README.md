@@ -236,6 +236,30 @@ one native undoable transaction. It rejects overlaps, variable-offset evidence,
 and existing destination names. This action creates the type for later use
 in the project.
 
+## Call sites with arguments
+
+**Tools → BinaryRat → Call Sites with Arguments** lists every call to the
+function at the cursor, including calls through its thunks. Each row shows the
+caller, the caller's decompiled C statement and the arguments: values the
+decompiler proved constant, strings at defined data or at a labelled address,
+symbols, or the name of the variable passed. Double-click a row to open the
+call in the Listing; the table closes when the Program changes. Rows that the
+decompiled code cannot explain keep their address and a status: no containing
+function, an unsupported caller (thunk, external, uninitialized or above
+64 KiB), a failed decompilation, a call the decompiler does not show, or a
+caller past the decompile limit.
+
+Headless, `BinaryRatCallSites.java OUTPUT_JSON ENTRY_HEX|name:FUNCTION
+[TIMEOUT_SECONDS] [MAX_SITES=64] [MAX_CALLERS=32]` writes the report
+(`analysis_mode` `read_only_call_sites`) without replacing a file. Each caller
+is decompiled once under a memory-watched lease, the Program revision is
+checked around every step, and the reference, site, caller and argument limits
+are reported rather than silently applied. The script, PyGhidra
+(`ProgramView.call_sites`), `binaryrat-decompile --call-sites` and the
+`binaryrat-live` service share one Java service, `binaryrat.CallSites`.
+`BinaryRatCallSitesProof.java` checks the statuses, thunks, limits,
+cancellation and Program changes on a disposable x86-64 Program.
+
 ## Scheduled decompilation
 
 Every scheduled cache miss takes a lease from the engine's scheduler first. The

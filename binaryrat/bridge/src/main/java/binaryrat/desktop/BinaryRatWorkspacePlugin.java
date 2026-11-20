@@ -19,7 +19,7 @@ import ghidra.program.util.ProgramLocation;
     packageName = BinaryRatPluginPackage.NAME,
     category = "Analysis",
     shortDescription = "BinaryRat workspace actions",
-    description = "Export, recover and inspect BinaryRat evidence from CodeBrowser.",
+    description = "Export, recover and inspect BinaryRat evidence and call sites from CodeBrowser.",
     servicesRequired = { GhidraScriptService.class }
 )
 public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
@@ -27,6 +27,7 @@ public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
     private final DockingAction export;
     private final DockingAction recover;
     private final DockingAction browse;
+    private final DockingAction callSites;
     private final DockingAction profile;
 
     public BinaryRatWorkspacePlugin(PluginTool tool) {
@@ -39,6 +40,7 @@ public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
         export = scriptAction("Export Decompilation", "BinaryRatExport.java", "2_evidence");
         recover = scriptAction("Recover Layout at Cursor", "BinaryRatRecoverLayouts.java", "2_evidence");
         browse = scriptAction("Browse Layout Evidence", "BinaryRatBrowseLayout.java", "2_evidence");
+        callSites = scriptAction("Call Sites with Arguments", "BinaryRatCallSites.java", "2_evidence");
         profile = scriptAction("Analyze with Profile", "BinaryRatProfile.java", "1_analysis");
     }
 
@@ -53,6 +55,7 @@ public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
         export.setEnabled(open);
         recover.setEnabled(open && location != null);
         browse.setEnabled(open);
+        callSites.setEnabled(open && location != null);
         profile.setEnabled(open);
     }
 

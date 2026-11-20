@@ -16,7 +16,8 @@ import tempfile
 from zipfile import ZipFile
 
 from verify_analysis_profiles import verify_profiles
-from verify_ghidra import PROJECT, check_persistent_cache, measured_run, saved_project_hashes, sha256
+from verify_ghidra import (PROJECT, check_call_sites, check_persistent_cache, measured_run,
+                           saved_project_hashes, sha256)
 from verify_layout_parser import verify_parser
 from verify_plugin_compatibility import jdk
 from verify_type_accuracy import json_file, verified_fields
@@ -110,6 +111,7 @@ def main() -> None:
                 {name for name in names if name.endswith(".java") and
                  name.count("/") == 2} != {
                      "BinaryRat/ghidra_scripts/BinaryRatBrowseLayout.java",
+                     "BinaryRat/ghidra_scripts/BinaryRatCallSites.java",
                      "BinaryRat/ghidra_scripts/BinaryRatExport.java",
                      "BinaryRat/ghidra_scripts/BinaryRatProfile.java",
                      "BinaryRat/ghidra_scripts/BinaryRatRecoverLayouts.java",
@@ -125,7 +127,9 @@ def main() -> None:
                     "binaryrat/analysis/AnalysisProfiles.class",
                     "binaryrat/DecompilationSession.class",
                     "binaryrat/RttiEvidence.class",
-                    "binaryrat/SummaryLayouts.class"} <= set(library.namelist()):
+                    "binaryrat/SummaryLayouts.class",
+                    "binaryrat/CallSites.class",
+                    "binaryrat/desktop/CallSitesTable.class"} <= set(library.namelist()):
                 raise RuntimeError("extension is missing a shared Java service")
             if (library.read("images/binaryrat/logo.png") !=
                     (PROJECT / "binaryrat/docs/assets/logo.png").read_bytes()):
@@ -189,6 +193,15 @@ def main() -> None:
             raise RuntimeError(f"packaged call-site correction proof failed (see {correction_log})")
         correction_proof = {"passed": True, "malformed_signature_cases": int(correction_cases[0]),
                             "log": correction_log.name, "wall_seconds": correction["wall_seconds"]}
+        # The same proof as the checkout run, compiled against the installed BinaryRat.jar
+        # (no bridge -scriptPath) so it also checks the desktop table's rows.
+        proof_scripts = root / "call-site scripts"
+        proof_scripts.mkdir()
+        (proof_scripts / "BinaryRatCallSitesProof.java").write_bytes(
+            (PROJECT / "binaryrat/bridge/ghidra_scripts/BinaryRatCallSitesProof.java").read_bytes())
+        call_sites_proof = check_call_sites(headless, proof_scripts, output, 300, environment)
+        if not call_sites_proof["table"]:
+            raise RuntimeError("installed call-site proof did not reach the desktop table")
 
         proof = check_persistent_cache(headless, fixture, None, "installed", output, 2, 300,
                                        environment)
@@ -298,7 +311,7 @@ def main() -> None:
               "packaged_layout_browser": browse_proof, "layout_parser": parser_proof,
               "protected_layout_writeback": writeback_proof, "shared_decompilation": service_proof,
               "interactive_admission": admission_proof, "analysis_profiles": profiles_proof,
-              "call_site_correction": correction_proof}
+              "call_site_correction": correction_proof, "call_sites": call_sites_proof}
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Installed BinaryRat extension passed stock parity and persistence: {report_path}")
 

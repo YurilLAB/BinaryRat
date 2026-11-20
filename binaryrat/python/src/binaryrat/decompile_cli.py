@@ -1,4 +1,4 @@
-"""Run one BinaryRat decompilation against a saved Ghidra Program.
+"""Run one BinaryRat decompilation, or list a function's call sites, against a saved Ghidra Program.
 
 Apache-2.0; Copyright 2026 YurilLAB.
 """
@@ -13,6 +13,7 @@ import re
 import sys
 from typing import Sequence
 
+from .call_sites import MAX_CALLERS, MAX_SITES, explain_call_sites
 from .live import LiveProgramError, ProgramFunction, ProgramView, open_program
 from .models import Address
 
@@ -97,6 +98,18 @@ def _list(view: ProgramView, match: str | None, as_json: bool) -> int:
     return 0 if shown else 1
 
 
+def _bounded(name: str, high: int):
+    def parse(value: str) -> int:
+        try:
+            number = int(value, 10)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{name} must be an integer") from None
+        if not 1 <= number <= high:
+            raise argparse.ArgumentTypeError(f"{name} must be from 1 to {high}")
+        return number
+    return parse
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="binaryrat-decompile",
@@ -104,7 +117,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         epilog="FUNCTION is an entry or any address inside a function ([SPACE:][0x]HEX, using the "
                "image-base space by default), or a function name (ns::f for a qualified name). "
                "Use name:NAME for a name that is also valid hexadecimal, such as name:add. "
-               "Exit 0 for C output, 1 for an incomplete decompilation or an empty listing, "
+               "--call-sites lists every call to FUNCTION (and to its thunks) with the caller's C "
+               "statement and the argument values the decompiler proved constant. "
+               "Exit 0 for C output or listed calls, 1 for an incomplete decompilation, an empty "
+               "listing or no calls, "
                "2 for invalid input or an unavailable backend, 130 when interrupted.",
     )
     parser.add_argument("project_file", metavar="PROJECT.gpr")
@@ -115,18 +131,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="list the program's functions (entry and signature) instead of decompiling")
     parser.add_argument("--match", metavar="TEXT",
                         help="with --list, keep functions whose qualified name contains TEXT (any case)")
+    parser.add_argument("--call-sites", action="store_true",
+                        help="list the calls to FUNCTION with their statements and constant arguments")
+    parser.add_argument("--max-sites", type=_bounded("--max-sites", MAX_SITES), default=None,
+                        help=f"with --call-sites, list at most this many calls (1-{MAX_SITES}, default 64)")
+    parser.add_argument("--max-callers", type=_bounded("--max-callers", MAX_CALLERS), default=None,
+                        help=f"with --call-sites, decompile at most this many callers (1-{MAX_CALLERS}, "
+                             "default 32)")
     parser.add_argument("--install-dir", metavar="GHIDRA_DIR")
     parser.add_argument("--backend", choices=("auto", "scheduled", "stock"), default="scheduled",
                         help="choose the Ghidra backend (default: scheduled)")
     parser.add_argument("--timeout-seconds", type=int, default=30)
     parser.add_argument("--max-heap-mb", type=int, default=1024)
     parser.add_argument("--json", action="store_true",
-                        help="emit the result and status as JSON, or one JSON object per listed function")
+                        help="emit the result and status as JSON, one JSON object per listed function, "
+                             "or the call-site report")
     args = parser.parse_args(argv)
     if args.list == (args.function is not None):
         parser.error("give either FUNCTION or --list")
     if args.match is not None and not args.list:
         parser.error("--match only applies to --list")
+    if args.call_sites and args.list:
+        parser.error("--call-sites needs FUNCTION, not --list")
+    if not args.call_sites and (args.max_sites is not None or args.max_callers is not None):
+        parser.error("--max-sites and --max-callers only apply to --call-sites")
     # Listing never decompiles, so it does not need the extension's scheduled backend.
     backend = "stock" if args.list else args.backend
     try:
@@ -137,6 +165,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.list:
                 return _list(view, args.match, args.json)
             function = _resolve(view, args.function)
+            if args.call_sites:
+                report = view.call_sites(function.entry, max_sites=args.max_sites or 64,
+                                         max_callers=args.max_callers or 32,
+                                         timeout_seconds=args.timeout_seconds)
+                if args.json:
+                    print(json.dumps(report.document, ensure_ascii=True))
+                else:
+                    print("\n".join(explain_call_sites(report)))
+                return 0 if report.sites else 1
             run = view.decompile_with_metrics(function.entry, timeout_seconds=args.timeout_seconds)
     except (CancelledError, KeyboardInterrupt):
         return 130
