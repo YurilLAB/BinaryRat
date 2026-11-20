@@ -16,6 +16,11 @@ running when `kill_grace_ms` expires is killed before the engine exits.
 
 Success: `{"id":"1","ok":true,"protocol_version":1,"result":{...}}`.
 Error: `{"id":"1","ok":false,"protocol_version":1,"error":{"code":"...","message":"..."}}`.
+A cache record the engine may not write or remove fails that request with
+`operation_failed` and a message naming the operation (`write cache record`,
+`replace cache record`, `remove cache record`) and the system's reason, never a
+path. At start-up a record that can be neither read nor deleted is skipped: it is
+never served, and a later write replaces it.
 Malformed requests do not terminate the server. A malformed request without a
 usable ID returns a null ID: a line that is not UTF-8 JSON, is too long or
 nests too deeply is refused as `invalid_request` before its ID is read. Bytes

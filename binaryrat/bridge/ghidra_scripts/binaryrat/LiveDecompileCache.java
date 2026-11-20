@@ -26,6 +26,12 @@ import ghidra.program.model.listing.Program;
  * what changed. An entry the engine cannot vouch for (a change of unknown reach, an
  * earlier session) is replayed against the current program before it is used, and is
  * removed if any answer differs.
+ *
+ * <p>The cache is optional: when the engine refuses a cache request (its disk is full, a
+ * scanner holds a record file) the decompilation is computed or kept uncached, and the
+ * refusal is reported, never thrown. Only a failed connection to the engine is thrown. If a
+ * refusal leaves an entry the engine vouched for that is known to be wrong, every entry is
+ * made unverified; if the engine refuses that too, this cache stops serving for the session.
  */
 public final class LiveDecompileCache {
 	public enum Kind {
@@ -52,6 +58,8 @@ public final class LiveDecompileCache {
 	private final ArrayBlockingQueue<TraceVerifier> verifiers = new ArrayBlockingQueue<>(64);
 	private final DecompileOptions options;
 	private volatile String registration;
+	// Why this cache no longer serves or stores anything, or null while it does.
+	private volatile String disabled;
 
 	public LiveDecompileCache(EngineClient engine, Program program, ChangeTracker tracker,
 			DecompileOptions options, String programId, String registration) {
@@ -96,13 +104,25 @@ public final class LiveDecompileCache {
 	 * with kind HIT: that would be a missed change, i.e. a stale result served.
 	 */
 	public Lookup lookup(Function function, boolean audit) throws IOException {
+		String off = disabled;
+		if (off != null) {
+			return new Lookup(Kind.MISS, null, 0, off);
+		}
 		long modification = program.getModificationNumber();
 		String registered = registration;
-		tracker.sync();
 		JsonObject lookupKey = key(function, registered);
-		JsonObject request = new JsonObject();
-		request.add("key", lookupKey);
-		JsonObject found = engine.call("cache.get", request);
+		JsonObject found;
+		try {
+			tracker.sync();
+			JsonObject request = new JsonObject();
+			request.add("key", lookupKey);
+			found = engine.call("cache.get", request);
+		}
+		catch (EngineClient.Refused refused) {
+			// Sequence 0 makes a later store of this function's fresh output pessimistic:
+			// any journaled change to what it read leaves that entry unverified.
+			return new Lookup(Kind.MISS, null, 0, refusal("cache.get", refused));
+		}
 		long seq = found.get("seq").getAsLong();
 		if (!unchanged(modification, registered)) {
 			return new Lookup(Kind.MISS, null, seq, "program or registration changed during lookup");
@@ -141,7 +161,13 @@ public final class LiveDecompileCache {
 			confirm.add("key", lookupKey);
 			confirm.addProperty("seq", seq);
 			confirm.addProperty("generation", found.get("generation").getAsLong());
-			JsonObject confirmed = engine.call("cache.confirm", confirm);
+			JsonObject confirmed;
+			try {
+				confirmed = engine.call("cache.confirm", confirm);
+			}
+			catch (EngineClient.Refused refused) {
+				return new Lookup(Kind.MISS, null, seq, refusal("cache.confirm", refused));
+			}
 			if (!confirmed.get("confirmed").getAsBoolean()) {
 				return new Lookup(Kind.MISS, null, seq, "cache generation changed during replay");
 			}
@@ -152,7 +178,18 @@ public final class LiveDecompileCache {
 		}
 		JsonObject evict = new JsonObject();
 		evict.add("key", lookupKey);
-		engine.call("cache.evict", evict);
+		try {
+			engine.call("cache.evict", evict);
+		}
+		catch (EngineClient.Refused refused) {
+			// The entry stays in the engine. Unverified, it is replayed again before any use
+			// and fails again. One the engine still vouches for would be served as it is by
+			// the next lookup without an audit, so the engine must stop vouching for anything.
+			why = why + "; " + refusal("cache.evict", refused);
+			if (vouched) {
+				distrustAll(why);
+			}
+		}
 		if (!unchanged(modification, registered)) {
 			return new Lookup(Kind.MISS, null, seq, "program or registration changed before replay rejection");
 		}
@@ -162,15 +199,57 @@ public final class LiveDecompileCache {
 		return new Lookup(vouched ? Kind.HIT : Kind.MISS, vouched ? output : null, seq, why);
 	}
 
+	/** Makes every entry unverified; if the engine refuses, stops using this cache. */
+	private void distrustAll(String why) throws IOException {
+		JsonObject all = new JsonObject();
+		all.addProperty("all", true);
+		try {
+			engine.call("cache.changed", all);
+		}
+		catch (EngineClient.Refused refused) {
+			disabled = "cache disabled for this session: " + why + "; " + refusal("cache.changed", refused);
+		}
+	}
+
+	private static String refusal(String operation, EngineClient.Refused refused) {
+		String detail = refused.detail();
+		return "engine refused " + operation + " (" + refused.code() + "): " +
+			(detail.length() <= 200 ? detail : detail.substring(0, 200) + "...");
+	}
+
+	/** Why this cache stopped serving for the session, or null while it serves. */
+	public String disabledReason() {
+		return disabled;
+	}
+
 	/**
 	 * Stores a finished decompilation. asOf is the seq from the lookup made before
 	 * decompiling; modification is the program's modification number at that time.
+	 * Returns whether the entry was stored; {@link #put} also says why not.
 	 */
 	public boolean store(Function function, DecompOutput output, Trace trace, long asOf,
 			long modification) throws IOException {
-		if (!output.cacheable() || !trace.replayable() ||
-			program.getModificationNumber() != modification) {
-			return false;
+		return put(function, output, trace, asOf, modification) == null;
+	}
+
+	/**
+	 * Stores a finished decompilation like {@link #store}. Returns null when it was stored,
+	 * otherwise why it was not; the output itself stays valid for the caller either way.
+	 */
+	public String put(Function function, DecompOutput output, Trace trace, long asOf,
+			long modification) throws IOException {
+		String off = disabled;
+		if (off != null) {
+			return off;
+		}
+		if (!output.cacheable()) {
+			return "output is not cacheable";
+		}
+		if (!trace.replayable()) {
+			return "trace is not replayable";
+		}
+		if (program.getModificationNumber() != modification) {
+			return "program changed during decompilation";
 		}
 		JsonObject value = new JsonObject();
 		value.add("output", output.toJson());
@@ -188,11 +267,17 @@ public final class LiveDecompileCache {
 		request.addProperty("as_of", asOf);
 		try {
 			engine.call("cache.put", request);
-			return true;
+			return null;
 		}
 		catch (EngineClient.FrameTooLarge oversized) {
 			// The completed decompilation is still usable by the caller.
-			return false;
+			return "entry exceeds the engine request size limit";
+		}
+		catch (EngineClient.Refused refused) {
+			// A failed write adds nothing the engine would serve: the old record and its
+			// dependencies stay as they were, or a replaced but unindexed record is dropped
+			// on its next read (live_cache.cpp put and get).
+			return refusal("cache.put", refused);
 		}
 	}
 

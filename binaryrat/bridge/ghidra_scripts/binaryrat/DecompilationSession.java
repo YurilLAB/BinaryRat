@@ -343,10 +343,9 @@ public final class DecompilationSession implements AutoCloseable {
 					rejection = "trace is not replayable";
 				}
 				else {
-					stored = cache.store(function, output, lease.traced().trace(), lookup.seq(), revision);
-					if (!stored) {
-						rejection = "cache entry exceeded storage limits or failed optimistic validation";
-					}
+					// A refused or oversized entry leaves this output valid; only the cache misses it.
+					rejection = cache.put(function, output, lease.traced().trace(), lookup.seq(), revision);
+					stored = rejection == null;
 				}
 			}
 			monitor.checkCancelled();

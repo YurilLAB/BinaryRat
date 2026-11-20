@@ -16,7 +16,8 @@ import tempfile
 from zipfile import ZipFile
 
 from verify_analysis_profiles import verify_profiles
-from verify_ghidra import (PROJECT, check_call_sites, check_persistent_cache, check_stack_strings,
+from verify_ghidra import (PROJECT, check_cache_edges, check_call_sites, check_persistent_cache,
+                           check_stack_strings,
                            measured_run, saved_project_hashes, sha256)
 from verify_layout_parser import verify_parser
 from verify_plugin_compatibility import jdk
@@ -200,11 +201,13 @@ def main() -> None:
         # (no bridge -scriptPath) so it also checks the desktop table's rows.
         proof_scripts = root / "call-site scripts"
         proof_scripts.mkdir()
-        for proof_script in ("BinaryRatCallSitesProof.java", "BinaryRatStackStringsProof.java"):
+        for proof_script in ("BinaryRatCallSitesProof.java", "BinaryRatStackStringsProof.java",
+                             "BinaryRatCacheEdgeProof.java"):
             (proof_scripts / proof_script).write_bytes(
                 (PROJECT / "binaryrat/bridge/ghidra_scripts" / proof_script).read_bytes())
         call_sites_proof = check_call_sites(headless, proof_scripts, output, 300, environment)
         stack_strings_proof = check_stack_strings(headless, proof_scripts, output, 300, environment)
+        cache_edges_proof = check_cache_edges(headless, proof_scripts, output, 300, environment)
         if not call_sites_proof["table"] or not stack_strings_proof["table"]:
             raise RuntimeError("an installed analyst-table proof did not reach its desktop table")
 
@@ -317,7 +320,7 @@ def main() -> None:
               "protected_layout_writeback": writeback_proof, "shared_decompilation": service_proof,
               "interactive_admission": admission_proof, "analysis_profiles": profiles_proof,
               "call_site_correction": correction_proof, "call_sites": call_sites_proof,
-              "stack_strings": stack_strings_proof}
+              "stack_strings": stack_strings_proof, "cache_edges": cache_edges_proof}
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Installed BinaryRat extension passed stock parity and persistence: {report_path}")
 

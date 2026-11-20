@@ -30,9 +30,11 @@ public:
         std::string id;  // key_digest of the record's key
         std::vector<std::string> dependencies;
     };
-    // Every valid record. Corrupt artifact files are deleted, as invalidate() does.
+    // Every valid record. Corrupt artifact files are deleted, as invalidate() does; one
+    // that cannot be deleted (another process holds it) is skipped, never indexed.
     [[nodiscard]] std::vector<Stored> scan();
-    // Removes the record stored under this key digest. True when one was removed.
+    // Removes the record stored under this key digest. True when one was removed; throws
+    // std::system_error (whose message names no path) when it exists but cannot be removed.
     bool remove(const std::string& id);
 
     [[nodiscard]] static std::string key_digest(const nlohmann::json& key);

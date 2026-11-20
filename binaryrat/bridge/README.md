@@ -349,7 +349,12 @@ checks the refreshed result against stock decompilation.
 
 `binaryrat/ChangeTracker` turns every Program change record into the dependencies
 it touched and reports them to the engine, which removes the entries that read them.
-Changes it cannot map precisely (data types, memory blocks, externals, undo/redo
+Ghidra reports a byte write only where it was made, so the tracker also reports
+every address that shows those bytes (`binaryrat/MemoryAliases`): byte-mapped views
+of the written range under any byte mapping scheme, bit-mapped views, and blocks
+made from the same file bytes, including aliases of aliases. A write whose aliases
+cannot all be named within its limits is a change of unknown reach, and any change
+to the memory blocks rebuilds the alias index. Changes it cannot map precisely (data types, memory blocks, externals, undo/redo
 restores, anything unknown) are reported as changes of unknown reach: every entry
 becomes unverified and is replayed against the Program before use, then kept or
 removed. Ghidra raises the modification number once per change record, so the
@@ -360,6 +365,14 @@ On official Ghidra, native process history, including register-join allocation
 order, can still affect the bytes. Use stock verification when the ascending
 serial bytes are required. The source-built fork drops join records at each
 native flush ([core patch](../docs/core-patches/decompiler-join-flush.md)).
+
+The cache is optional: an engine that refuses a cache request (a record it may not
+write or delete, for example while a virus scanner holds it) turns that lookup into
+a miss and that store into a reported rejection, and decompilation and export go on.
+The reasons appear in the export's `store_diagnostics` and `lookup_diagnostics`.
+When the removal of an entry the engine vouched for is refused, every entry becomes
+unverified; if that report is refused too, the cache is off for the rest of the
+session. Only a lost engine connection stops the work.
 
 `cache-proof` edits the Program (use a throwaway project) and, after each change,
 looks every function up with auditing on and decompiles it fresh:
@@ -372,6 +385,17 @@ functions, a label, a flow override, editing a used data type, deleting a called
 function, a rename while the engine is down, and a negative control that hides one
 change from the cache and must be caught. The report (`OUTPUT`) holds counts per
 round and the time of fresh decompilation versus cache hits and replays.
+
+`BinaryRatCacheEdgeProof.java` (headless `-preScript`, builds its own program;
+`verify_ghidra.py --engine` and `verify_extension.py` run it) writes the source of
+1:1, 2:4 and bit-mapped views, one of two blocks sharing file bytes, a view created
+during the session, and through a view itself: each cached reader must miss and
+match a fresh decompilation, and a write outside every view must keep all entries.
+It then makes the engine refuse `cache.put`, `cache.get` and `cache.evict` on real
+files (a directory where a record belongs; an open handle on Windows or a read-only
+directory elsewhere): nothing stale may be served and work must go on. The
+persistent-cache check also runs a third JVM with every record blocked: its export
+must complete and match the first.
 
 For existing analyzed projects, use headless `-process PROGRAM -noanalysis
 -readOnly` instead of `-import`. Do not mistake `-noanalysis` for proof that a

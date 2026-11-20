@@ -139,8 +139,7 @@ public final class EngineClient implements AutoCloseable {
 					waiting.complete(result);
 				}
 				else {
-					waiting.completeExceptionally(
-						new IOException("engine refused request: " + message.get("error")));
+					waiting.completeExceptionally(Refused.of(message.get("error")));
 				}
 				pending.remove(responseId);
 			}
@@ -153,6 +152,47 @@ public final class EngineClient implements AutoCloseable {
 			waiting.completeExceptionally(ended);
 		}
 		pending.clear();
+	}
+
+	/**
+	 * The engine answered with an error: this request failed, but the connection is intact and
+	 * later requests are answered. Any other IOException from a call means the connection
+	 * itself failed or timed out.
+	 */
+	public static final class Refused extends IOException {
+		private final String code;
+		private final String detail;
+
+		private Refused(String code, String detail, String error) {
+			super("engine refused request: " + error);
+			this.code = code;
+			this.detail = detail;
+		}
+
+		static Refused of(JsonElement error) {
+			String code = "unknown";
+			String detail = String.valueOf(error);
+			if (error != null && error.isJsonObject()) {
+				JsonObject object = error.getAsJsonObject();
+				if (object.has("code") && object.get("code").isJsonPrimitive()) {
+					code = object.get("code").getAsString();
+				}
+				if (object.has("message") && object.get("message").isJsonPrimitive()) {
+					detail = object.get("message").getAsString();
+				}
+			}
+			return new Refused(code, detail, String.valueOf(error));
+		}
+
+		/** The protocol error code, such as {@code invalid_request} or {@code operation_failed}. */
+		public String code() {
+			return code;
+		}
+
+		/** The engine's own description of the failure. */
+		public String detail() {
+			return detail;
+		}
 	}
 
 	static final class FrameTooLarge extends IOException {

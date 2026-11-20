@@ -185,7 +185,7 @@ public final class TracingDecompiler extends DecompInterface {
 			DecompileCallback.class, DecompileResults.class, PrettyPrinter.class,
 			IllegalCharCppTransformer.class, DecompOutput.class, TracingDecompiler.class,
 			RecordingCallback.class, Trace.class, TraceVerifier.class, LiveDecompileCache.class,
-			ChangeTracker.class }) {
+			ChangeTracker.class, MemoryAliases.class }) {
 			includeImplementation(implementations, implementation);
 		}
 		for (Class<?> implementation : implementations.values()) {

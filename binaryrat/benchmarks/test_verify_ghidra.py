@@ -32,14 +32,16 @@ def evidence(prefix: Path, log: Path, state: str, revision: int = 4) -> dict:
     Path(str(prefix) + ".scheduled.jsonl").write_text(data, encoding="utf-8")
     log.write_text("BinaryRat exact serial/scheduled comparison passed:\n", encoding="utf-8")
     compute = 0 if state == "warm" else 2
+    refused = {verify_ghidra.REFUSED_PUT + "replace cache record: Is a directory": 2}
     cache = {"enabled": state != "disabled", "hits": 0,
              "replayed": 2 if state == "warm" else 0,
-             "misses": 2 if state == "cold" else 0,
+             "misses": 2 if state in ("cold", "refused") else 0,
              "lookup_rejected": 0, "stored": 2 if state == "cold" else 0,
-             "store_rejected": 0, "store_diagnostics": {}, "lookup_diagnostics": {}}
+             "store_rejected": 2 if state == "refused" else 0,
+             "store_diagnostics": refused if state == "refused" else {}, "lookup_diagnostics": {}}
     summary = {"cache": cache, "leases": compute,
                "lease_status_counts": {"completed": compute} if compute else {},
-               "traced_leases": compute if state == "cold" else 0,
+               "traced_leases": compute if state != "disabled" else 0,
                "engine_stats": {"peak_running": compute, "running": 0, "queued": 0},
                "engine_configuration": {"workers": 2, "memory_watch": True},
                "memory_watched_leases": compute, "max_peak_resident_bytes": 4096 if compute else 0}
@@ -214,14 +216,123 @@ class KnownStockFailureTests(unittest.TestCase):
 
 
 class ScheduledEvidenceTests(unittest.TestCase):
-    def test_disabled_cold_and_warm_account_for_every_function(self):
+    def test_disabled_cold_warm_and_refused_account_for_every_function(self):
         with tempfile.TemporaryDirectory() as directory:
-            for state, leases in (("disabled", 2), ("cold", 2), ("warm", 0)):
+            for state, leases in (("disabled", 2), ("cold", 2), ("warm", 0), ("refused", 2)):
                 prefix, log = Path(directory) / state, Path(directory) / (state + ".log")
                 evidence(prefix, log, state)
                 result = verify_ghidra.verify_scheduled(prefix, log, 2, state)
                 self.assertEqual(result["function_count"], 2)
                 self.assertEqual(result["compute_leases"], leases)
+
+    def test_refused_writes_must_be_decompiled_and_reported_per_function(self):
+        # Each change breaks one rule only, so every rule is shown to be needed.
+        def stored(cache):
+            cache["stored"] = 1
+
+        def overcounted(cache):
+            cache["store_rejected"] = 3
+
+        def foreign_reason(cache):
+            cache["store_diagnostics"] = {"program changed during decompilation": 2}
+
+        def short_count(cache):
+            cache["store_diagnostics"] = {verify_ghidra.REFUSED_PUT + "x": 1}
+
+        def served(cache):
+            cache.update(hits=1, misses=1)
+
+        def silent(cache):
+            cache.update(store_rejected=0, store_diagnostics={})
+
+        def rejected_lookup(cache):
+            cache["lookup_rejected"] = 1
+
+        def boolean_count(cache):
+            cache["store_diagnostics"] = {verify_ghidra.REFUSED_PUT + "x": True, verify_ghidra.REFUSED_PUT + "y": 1}
+
+        with tempfile.TemporaryDirectory() as directory:
+            for change in (stored, overcounted, foreign_reason, short_count, served, silent, rejected_lookup,
+                           boolean_count):
+                with self.subTest(change=change.__name__):
+                    prefix, log = Path(directory) / "refused", Path(directory) / "refused.log"
+                    summary = evidence(prefix, log, "refused")
+                    change(summary["cache"])
+                    Path(str(prefix) + ".scheduled.jsonl.schedule.json").write_text(json.dumps(summary))
+                    with self.assertRaisesRegex(RuntimeError, "refused cache writes|cover every"):
+                        verify_ghidra.verify_scheduled(prefix, log, 2, "refused")
+
+    def test_blocking_replaces_only_cache_records_with_occupied_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            with self.assertRaisesRegex(RuntimeError, "stored no cache records"):
+                verify_ghidra.block_cache_records(cache)
+            records = [cache / (("%064x" % index) + ".json") for index in (1, 2)]
+            for record in records:
+                record.write_text("{}", encoding="utf-8")
+            (cache / ".owner.lock").write_text("", encoding="utf-8")
+            (cache / ("A" * 64 + ".json")).write_text("{}", encoding="utf-8")
+            self.assertEqual(verify_ghidra.block_cache_records(cache), 2)
+            for record in records:
+                self.assertTrue(record.is_dir())
+                self.assertTrue(any(record.iterdir()))
+            self.assertTrue((cache / ".owner.lock").is_file())
+            self.assertTrue((cache / ("A" * 64 + ".json")).is_file())
+            with self.assertRaisesRegex(RuntimeError, "stored no cache records"):
+                verify_ghidra.block_cache_records(cache)
+
+    def test_cache_edge_proof_needs_every_case_and_its_marker(self):
+        kinds = ["byte-mapped 1:1", "byte-mapped 2:4", "bit-mapped", "shared file bytes",
+                 "write through the mirror", "view created during the session"]
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)
+            state = {}
+
+            def reset():
+                state.update(report={"passed": True, "aliases": [{"kind": kind, "lookup": "MISS"} for kind in kinds],
+                                     "refusals": [{"case": index} for index in range(5)]},
+                             # Counts follow the report, so each break below trips one rule only.
+                             marker="BINARYRAT_CACHE_EDGES_OK aliases={aliases} refusals={refusals} "
+                                    "pinning=open-handle "
+                                    "stale_served=0 export_safe=true", returncode=0)
+
+            def run(argv, log, timeout, env):
+                self.assertEqual(argv[argv.index("-preScript") + 1], "BinaryRatCacheEdgeProof.java")
+                self.assertIn(" ", argv[1])
+                Path(argv[-1]).write_text(json.dumps(state["report"]), encoding="utf-8")
+                marker = state["marker"].format(aliases=len(state["report"]["aliases"]),
+                                                refusals=len(state["report"]["refusals"]))
+                log.write_text(f"INFO\n{marker}\n", encoding="utf-8")
+                return {"returncode": state["returncode"], "wall_seconds": 0}
+
+            def check():
+                return verify_ghidra.check_cache_edges(Path("headless"), Path("scripts"), destination, 30, {})
+
+            breaks = {
+                "stale alias": lambda: state["report"]["aliases"][2].update(lookup="HIT"),
+                "missing kind": lambda: state["report"]["aliases"].pop(1),
+                "missing refusal": lambda: state["report"]["refusals"].pop(),
+                "not passed": lambda: state["report"].update(passed=False),
+                "marker count": lambda: state.update(marker=state["marker"].replace("{aliases}", "7")),
+                "no marker": lambda: state.update(marker="nothing"),
+                "unknown pinning": lambda: state.update(marker=state["marker"].replace("open-handle", "none")),
+                "script error": lambda: state.update(marker=state["marker"] + "\nREPORT SCRIPT ERROR: x"),
+                "exit code": lambda: state.update(returncode=1),
+            }
+            with patch.object(verify_ghidra, "measured_run", run):
+                reset()
+                result = check()
+                self.assertEqual((result["alias_cases"], result["refusal_cases"], result["pinning"]),
+                                 (6, 5, "open-handle"))
+                reset()
+                state["marker"] = state["marker"].replace("open-handle", "directory-permissions")
+                self.assertEqual(check()["pinning"], "directory-permissions")
+                for name, damage in breaks.items():
+                    with self.subTest(case=name):
+                        reset()
+                        damage()
+                        with self.assertRaisesRegex(RuntimeError, "cache-edge"):
+                            check()
 
     def test_uncached_run_rejects_unnecessary_traces(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -299,7 +410,18 @@ class ScheduledEvidenceTests(unittest.TestCase):
             def run(argv, log, timeout, env):
                 environments.append(env.copy())
                 commands.append(argv)
-                state = "cold" if "-import" in argv else "warm"
+                state = ("cold", "warm", "refused")[len(commands) - 1]
+                self.assertEqual("-import" in argv, state == "cold")
+                cache = Path(env["BINARYRAT_CACHE_DIR"])
+                if state == "cold":
+                    cache.mkdir()
+                    for index in (1, 2):
+                        (cache / (("%064x" % index) + ".json")).write_text("{}", encoding="utf-8")
+                else:
+                    records = [path for path in cache.iterdir() if path.name.endswith(".json")]
+                    self.assertEqual(len(records), 2)
+                    self.assertTrue(all(path.is_dir() if state == "refused" else path.is_file()
+                                        for path in records))
                 prefix = Path(argv[argv.index("-postScript") + 2])
                 evidence(prefix, log, state)
                 return {"returncode": 0}
@@ -309,18 +431,22 @@ class ScheduledEvidenceTests(unittest.TestCase):
                 report = verify_ghidra.check_persistent_cache(
                     Path("headless"), Path("fixture"), Path("scripts"), "fixture", destination,
                     2, 30, user_environment)
-            self.assertEqual(len(environments), 2)
-            self.assertEqual(environments[0], environments[1])
+            self.assertEqual(len(environments), 3)
+            self.assertTrue(environments[0] == environments[1] == environments[2])
             owned = Path(environments[0]["BINARYRAT_CACHE_DIR"])
             self.assertIn(" ", str(owned))
             self.assertFalse(owned.exists())
             self.assertEqual(commands[0][1:3], commands[1][1:3])
             self.assertNotIn("-deleteProject", commands[0])
             self.assertNotIn("-import", commands[1])
-            self.assertEqual(commands[1][3:7], ["-process", "fixture", "-noanalysis", "-readOnly"])
+            for command in commands[1:]:
+                self.assertEqual(command[3:7], ["-process", "fixture", "-noanalysis", "-readOnly"])
             self.assertEqual(user_environment["BINARYRAT_CACHE_DIR"], "untouched-user-cache")
             self.assertTrue(report["cache_directory_test_owned_and_removed"])
             self.assertTrue(report["saved_program_database_test_owned_reused_and_removed"])
+            self.assertEqual(report["fresh_jvms"], 3)
+            self.assertEqual(report["refused_writes"]["records_blocked"], 2)
+            self.assertEqual(report["runs"]["refused"]["compute_leases"], 2)
 
     def test_redirected_call_proof_rejects_stale_hit_or_missing_case(self):
         with tempfile.TemporaryDirectory() as directory:

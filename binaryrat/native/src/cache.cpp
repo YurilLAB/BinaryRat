@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -67,7 +68,10 @@ void replace_record(const std::filesystem::path& from,
                                 std::system_category(), "replace cache record");
     }
 #else
-    std::filesystem::rename(from, to);
+    // The error_code form keeps both paths out of the message the protocol returns.
+    std::error_code error;
+    std::filesystem::rename(from, to, error);
+    if (error) throw std::system_error(error, "replace cache record");
 #endif
 }
 
@@ -117,7 +121,13 @@ void ArtifactCache::put(const nlohmann::json& key, const nlohmann::json& value,
     const auto temp = temporary_path(root_, id);
     try {
         {
+            errno = 0;
             std::ofstream output(temp, std::ios::binary | std::ios::trunc);
+            if (!output) {
+                // A directory the engine may not write: name the operation, not the path.
+                const int code = errno;
+                throw std::system_error(code ? code : EIO, std::generic_category(), "write cache record");
+            }
             output.exceptions(std::ios::badbit | std::ios::failbit);
             output.write(serialized.data(), static_cast<std::streamsize>(serialized.size()));
             output.close();
@@ -204,8 +214,12 @@ std::vector<ArtifactCache::Stored> ArtifactCache::scan() {
         }
         const auto record = read_record(entry.path());
         if (!record) {
+            // One that cannot be removed (a scanner holds it) stays unindexed: a read of
+            // its key misses and a write replaces it, so it is never served. It must not
+            // keep the engine from starting.
             if (!entry.is_symlink() && entry.is_regular_file()) {
-                std::filesystem::remove(entry.path());
+                std::error_code ignored;
+                std::filesystem::remove(entry.path(), ignored);
             }
             continue;
         }
@@ -230,7 +244,9 @@ bool ArtifactCache::remove(const std::string& id) {
     if (error || !std::filesystem::is_regular_file(status)) {
         return false;
     }
-    return std::filesystem::remove(root_ / name);
+    const bool removed = std::filesystem::remove(root_ / name, error);
+    if (error) throw std::system_error(error, "remove cache record");
+    return removed;
 }
 
 std::size_t ArtifactCache::invalidate(const std::vector<std::string>& dependencies) {

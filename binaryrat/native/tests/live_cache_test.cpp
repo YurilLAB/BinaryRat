@@ -11,6 +11,7 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 // Inject a single failure when copying a long dependency in this test process.
 // Ordinary allocations, including JSON cleanup, remain unaffected.
@@ -156,8 +157,9 @@ void failed_disk_invalidation_requires_revalidation() {
     bool failed = false;
     try {
         live.changed({"affected"});
-    } catch (const std::filesystem::filesystem_error&) {
-        failed = true;
+    } catch (const std::system_error& error) {
+        failed = std::string(error.what()).find("remove cache record") != std::string::npos;
+        if (!failed) throw;
     }
     std::filesystem::permissions(directory.path(), dir_perms);
     if (std::filesystem::exists(path)) std::filesystem::permissions(path, file_perms);

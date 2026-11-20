@@ -201,11 +201,18 @@ def verify_pair(prefix: Path, log: Path, *, artifact_id: str | None = None) -> d
             "phases": phases}
 
 
+REFUSED_PUT = "engine refused cache.put (operation_failed): "
+
+
 def verify_scheduled(prefix: Path, log: Path, workers: int,
                      cache_expected: str = "disabled", *, artifact_id: str | None = None) -> dict:
-    """Engine-admitted decompilation must equal stock serial output byte for byte."""
-    if cache_expected not in {"disabled", "cold", "warm"}:
-        raise ValueError("cache_expected must be disabled, cold or warm")
+    """Engine-admitted decompilation must equal stock serial output byte for byte.
+
+    "refused" is a persistent cache whose engine fails every write: each function must still be
+    decompiled and exported, with every store reported as refused and nothing served.
+    """
+    if cache_expected not in {"disabled", "cold", "warm", "refused"}:
+        raise ValueError("cache_expected must be disabled, cold, warm or refused")
     serial = Path(str(prefix) + ".serial.jsonl")
     scheduled = Path(str(prefix) + ".scheduled.jsonl")
     content = log.read_text(encoding="utf-8", errors="replace")
@@ -230,7 +237,16 @@ def verify_scheduled(prefix: Path, log: Path, workers: int,
     else:
         if cache["hits"] + cache["replayed"] + cache["misses"] != records:
             raise RuntimeError(f"cache outcomes do not cover every exported function; see {log}")
-        if cache["lookup_rejected"] or cache["store_rejected"]:
+        if cache_expected == "refused":
+            reasons = cache.get("store_diagnostics")
+            if (not isinstance(reasons, dict) or cache["misses"] != records or cache["stored"] or
+                    cache["hits"] or cache["replayed"] or cache["lookup_rejected"] or
+                    cache["store_rejected"] != records or
+                    any(type(count) is not int or count < 1 for count in reasons.values()) or
+                    sum(reasons.values()) != records or
+                    not all(isinstance(reason, str) and reason.startswith(REFUSED_PUT) for reason in reasons)):
+                raise RuntimeError(f"refused cache writes were not decompiled and reported per function; see {log}")
+        elif cache["lookup_rejected"] or cache["store_rejected"]:
             raise RuntimeError(f"unchanged fixture could not reuse/store its cache entries; see {log}")
         compute_leases = cache["misses"]
         if cache_expected == "cold" and (
@@ -299,15 +315,21 @@ def check_persistent_cache(headless: Path, binary: Path, script_directory: Path 
     Independent imports may assign different private symbol/type identities even
     when their C text matches. Zero compute leases is therefore asserted for a
     reopened unchanged database, not for independently reconstructed analysis.
+    A third JVM finds a directory where every record was, so each engine write fails
+    (portably, without privileges): its export must still complete and match.
     """
     runs = {}
     exports = {}
+    blocked = 0
     with tempfile.TemporaryDirectory(prefix="persistent cache-", dir=destination) as directory:
         session = Path(directory)
         projects = session / "projects"
         projects.mkdir()
-        cache_env = environment | {"BINARYRAT_CACHE_DIR": str(session / "cache")}
-        for state in ("cold", "warm"):
+        cache = session / "cache"
+        cache_env = environment | {"BINARYRAT_CACHE_DIR": str(cache)}
+        for state in ("cold", "warm", "refused"):
+            if state == "refused":
+                blocked = block_cache_records(cache)
             name = f"{identity}-persistent-{state}"
             prefix, log = destination / name, destination / (name + ".log")
             for suffix in (".serial.jsonl", ".scheduled.jsonl", ".scheduled.jsonl.schedule.json"):
@@ -327,10 +349,55 @@ def check_persistent_cache(headless: Path, binary: Path, script_directory: Path 
             runs[state] = {**measured, **verify_scheduled(prefix, log, workers, state)}
             exports[state] = Path(str(prefix) + ".scheduled.jsonl")
         comparison = compare_fresh_jvm_exports(exports["cold"], exports["warm"])
-    return {"fresh_jvms": 2, "cache_directory_test_owned_and_removed": True,
+        refused = compare_fresh_jvm_exports(exports["cold"], exports["refused"])
+    return {"fresh_jvms": 3, "cache_directory_test_owned_and_removed": True,
             "saved_program_database_test_owned_reused_and_removed": True,
             "cache_directory_path_contains_space": True, "runs": runs,
-            "cross_jvm_comparison": comparison}
+            "cross_jvm_comparison": comparison,
+            "refused_writes": {"records_blocked": blocked, "export_matches_cold": refused}}
+
+
+def block_cache_records(cache: Path) -> int:
+    """Put a non-empty directory where each cache record is; returns how many."""
+    records = [path for path in cache.iterdir()
+               if re.fullmatch(r"[0-9a-f]{64}\.json", path.name) and path.is_file() and not path.is_symlink()]
+    if not records:
+        raise RuntimeError(f"the cold run stored no cache records in {cache}")
+    for record in records:
+        record.unlink()
+        record.mkdir()
+        (record / "occupied").write_text("a record cannot be written here", encoding="utf-8")
+    return len(records)
+
+
+def check_cache_edges(headless: Path, script_directory: Path, destination: Path, timeout: float,
+                      environment: dict[str, str]) -> dict:
+    """Run the live-cache alias and engine-refusal proof and check its report."""
+    report_path = destination / "cache-edges.json"
+    log = destination / "cache-edges.log"
+    report_path.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory(prefix="cache edges-", dir=destination) as directory:
+        measured = measured_run([
+            str(headless), directory, "fixture", "-deleteProject", "-scriptPath", str(script_directory),
+            "-preScript", "BinaryRatCacheEdgeProof.java", str(report_path)], log, timeout, environment)
+    content = log.read_text(encoding="utf-8", errors="replace")
+    passed = re.findall(r"BINARYRAT_CACHE_EDGES_OK aliases=(\d+) refusals=(\d+) pinning=([a-z-]+) ", content)
+    if measured["returncode"] or "REPORT SCRIPT ERROR" in content or len(passed) != 1 or not report_path.is_file():
+        raise RuntimeError(f"cache-edge proof failed; see {log}")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    aliases = report.get("aliases") if isinstance(report.get("aliases"), list) else []
+    refusals = report.get("refusals") if isinstance(report.get("refusals"), list) else []
+    kinds = {row.get("kind") for row in aliases if isinstance(row, dict)}
+    required = {"byte-mapped 1:1", "byte-mapped 2:4", "bit-mapped", "shared file bytes",
+                "view created during the session"}
+    if (report.get("passed") is not True or
+            (int(passed[0][0]), int(passed[0][1])) != (len(aliases), len(refusals)) or
+            not required <= kinds or len(refusals) != 5 or
+            any(not isinstance(row, dict) or row.get("lookup") != "MISS" for row in aliases) or
+            passed[0][2] not in ("open-handle", "directory-permissions")):
+        raise RuntimeError(f"cache-edge report does not match the proof; see {report_path}")
+    return {"passed": True, "alias_cases": len(aliases), "refusal_cases": len(refusals),
+            "pinning": passed[0][2], "log": log.name, "wall_seconds": measured["wall_seconds"]}
 
 
 def verify_stopped(output: Path, log: Path, expected: str) -> dict:
@@ -601,6 +668,10 @@ def main() -> int:
             report["stack_strings"] = check_stack_strings(
                 headless, PROJECT / "binaryrat/bridge/ghidra_scripts", destination, args.timeout, environment)
             print("PASS stack strings: stores, constants, joins, read-only loads and limits", flush=True)
+            report["cache_edges"] = check_cache_edges(
+                headless, PROJECT / "binaryrat/bridge/ghidra_scripts", destination, args.timeout, environment)
+            print("PASS live cache: writes through mapped and file-sharing blocks, refused engine requests",
+                  flush=True)
         for artifact in manifest["artifacts"]:
             binary = (corpus_root / artifact["binary"]).resolve()
             if corpus_root.resolve() not in binary.parents:
@@ -668,7 +739,8 @@ def main() -> int:
                         headless, binary, PROJECT / "binaryrat/bridge/ghidra_scripts", identity,
                         destination, workers, args.timeout, environment)
                     report["persistent_cache_checks"].append({"artifact_id": artifact["id"], **checked})
-                    print(f"PASS {artifact['id']} persistent cache cold/warm fresh JVMs", flush=True)
+                    print(f"PASS {artifact['id']} persistent cache cold/warm/refused-writes fresh JVMs",
+                          flush=True)
                 if "stock_verified" not in report:
                     report["stock_verified"] = check_stock_verified(
                         headless, binary, PROJECT / "binaryrat/bridge/ghidra_scripts",

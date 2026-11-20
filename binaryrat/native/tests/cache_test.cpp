@@ -10,6 +10,8 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <system_error>
 #include <vector>
 
 using binaryrat::ArtifactCache;
@@ -33,6 +35,49 @@ struct TemporaryDirectory {
              std::chrono::steady_clock::now().time_since_epoch().count()));
     TemporaryDirectory() { std::filesystem::create_directories(path); }
     ~TemporaryDirectory() { std::error_code e; std::filesystem::remove_all(path, e); }
+};
+
+// Holds records so they cannot be deleted or replaced, as a virus scanner or an indexer
+// can: open handles without delete sharing on Windows, a read-only directory elsewhere.
+// Not active when this process ignores file permissions (root).
+class Pin {
+public:
+    Pin(const std::filesystem::path& root, [[maybe_unused]] const std::vector<std::filesystem::path>& records)
+        : root_(root) {
+#ifdef _WIN32
+        held_.resize(records.size());
+        active_ = true;
+        for (std::size_t index = 0; index < records.size(); ++index) {
+            held_[index].open(records[index], std::ios::binary);
+            active_ = active_ && held_[index].is_open();
+        }
+#else
+        std::filesystem::permissions(root_, std::filesystem::perms::owner_read |
+                                                std::filesystem::perms::owner_exec);
+        const auto probe = root_ / "probe";
+        { std::ofstream output(probe); active_ = !output; }
+        std::error_code ignored;
+        if (!active_) std::filesystem::remove(probe, ignored);
+#endif
+    }
+    Pin(const Pin&) = delete;
+    Pin& operator=(const Pin&) = delete;
+    ~Pin() {
+#ifdef _WIN32
+        for (auto& handle : held_) handle.close();
+#else
+        std::error_code ignored;
+        std::filesystem::permissions(root_, std::filesystem::perms::owner_all, ignored);
+#endif
+    }
+    [[nodiscard]] bool active() const { return active_; }
+
+private:
+    std::filesystem::path root_;
+    bool active_ = false;
+#ifdef _WIN32
+    std::vector<std::ifstream> held_;
+#endif
 };
 
 json key(int id) {
@@ -134,6 +179,59 @@ void corruption_limits_and_paths() {
     }
 }
 
+// A record the engine cannot write or delete must fail that one request with a message
+// that names the operation but no path, keep the old record, and never stop a scan.
+void records_that_cannot_be_changed() {
+    TemporaryDirectory directory;
+    ArtifactCache cache(directory.path);
+    const auto unique_name = directory.path.filename().string();
+    const auto refused = [&](auto action, const char* operation) {
+        try {
+            action();
+        } catch (const std::system_error& error) {
+            const std::string text = error.what();
+            require(text.find(operation) != std::string::npos, "the refusal names the operation");
+            require(text.find(unique_name) == std::string::npos, "the refusal names no cache path");
+            return;
+        }
+        throw std::runtime_error(std::string("expected a refused ") + operation);
+    };
+
+    // A directory where a record belongs: the write fails everywhere, without privileges.
+    const auto squatted = directory.path / (ArtifactCache::key_digest(key(1)) + ".json");
+    std::filesystem::create_directory(squatted);
+    { std::ofstream output(squatted / "occupied"); output << "x"; }
+    refused([&] { cache.put(key(1), "value"); }, "replace cache record");
+    require(!cache.get(key(1)), "a refused write stores nothing");
+    require(cache.scan().empty(), "a directory is never indexed");
+    require(!cache.remove(ArtifactCache::key_digest(key(1))), "a directory is not a record to remove");
+    for (const auto& entry : std::filesystem::directory_iterator(directory.path)) {
+        require(entry.path() == squatted, "a refused write leaves no temporary file");
+    }
+    std::filesystem::remove_all(squatted);
+
+    cache.put(key(2), "kept", {"f:2"});
+    const auto id = ArtifactCache::key_digest(key(2));
+    const auto corrupt = directory.path / (ArtifactCache::key_digest(key(3)) + ".json");
+    { std::ofstream output(corrupt); output << "{partial"; }
+    {
+        Pin pin(directory.path, {directory.path / (id + ".json"), corrupt});
+        if (!pin.active()) {
+            std::cout << "cache pinning skipped: this process ignores file permissions" << std::endl;
+            return;
+        }
+        refused([&] { cache.remove(id); }, "remove cache record");
+        refused([&] { cache.put(key(2), "changed", {"f:2"}); }, "cache record");
+        const auto stored = cache.scan();
+        require(stored.size() == 1 && stored[0].id == id, "a corrupt record that cannot be deleted is skipped");
+        require(std::filesystem::exists(corrupt), "the held corrupt record is left in place");
+        require(cache.get(key(2)).value() == "kept", "a refused update keeps the old record");
+    }
+    require(cache.scan().size() == 1 && !std::filesystem::exists(corrupt),
+            "a released corrupt record is deleted by the next scan");
+    require(cache.remove(id) && !cache.get(key(2)), "a released record can be removed");
+}
+
 void concurrent_access() {
     TemporaryDirectory directory;
     ArtifactCache cache(directory.path);
@@ -158,6 +256,7 @@ int main() {
         identity_and_restart();
         dependency_invalidation();
         corruption_limits_and_paths();
+        records_that_cannot_be_changed();
         concurrent_access();
         std::cout << "cache tests passed\n";
         return 0;

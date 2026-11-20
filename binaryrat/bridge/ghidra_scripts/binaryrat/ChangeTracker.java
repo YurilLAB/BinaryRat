@@ -29,6 +29,10 @@ import ghidra.program.util.ProgramEvent;
  * <p>Ghidra increments the program's modification number once per change record it
  * fires, so {@link #sync()} can prove that every change made so far has been reported
  * before a cached result is trusted without verification.
+ *
+ * <p>Ghidra reports a byte write only where it was written. A write also changes what
+ * byte-mapped, bit-mapped and file-sharing blocks show elsewhere ({@link MemoryAliases}),
+ * so those addresses are reported too.
  */
 public final class ChangeTracker implements DomainObjectListener, AutoCloseable {
 	private static final EnumSet<ProgramEvent> IGNORED = EnumSet.of(
@@ -89,6 +93,9 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 	private long delivered;
 	private long seq;
 	private boolean blind;
+	// The memory map's aliases, or null until needed again. Every change to the blocks has
+	// unknown reach, which drops it, so it never describes an older map than the event.
+	private MemoryAliases aliases;
 
 	public ChangeTracker(Program program, EngineClient engine) {
 		this.program = program;
@@ -133,6 +140,7 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 				counts.ignored++;
 			}
 			else if (outcome == Outcome.UNKNOWN) {
+				aliases = null;
 				counts.unknownReach++;
 				counts.unknownByEvent.merge(String.valueOf(record.getEventType()), 1L, Long::sum);
 				unknown = true;
@@ -196,6 +204,8 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 					return;
 				}
 				if (System.nanoTime() > deadline) {
+					// Changes nobody saw may include the memory map.
+					aliases = null;
 					counts.resyncs++;
 					if (!blind) {
 						report(Set.of(), true);
@@ -248,7 +258,7 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 		return true;
 	}
 
-	private static Outcome map(DomainObjectChangeRecord record, Set<String> keys) {
+	private Outcome map(DomainObjectChangeRecord record, Set<String> keys) {
 		EventType type = record.getEventType();
 		if (!(type instanceof ProgramEvent event)) {
 			return type == DomainObjectEvent.SAVED || type == DomainObjectEvent.CLOSED ?
@@ -264,7 +274,11 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 			return reference(change, keys);
 		}
 		if (RANGED.contains(event)) {
-			return lines(keys, change.getStart(), change.getEnd()) ? Outcome.PRECISE : Outcome.UNKNOWN;
+			if (!lines(keys, change.getStart(), change.getEnd())) {
+				return Outcome.UNKNOWN;
+			}
+			return event != ProgramEvent.MEMORY_BYTES_CHANGED ||
+				aliases(keys, change.getStart(), change.getEnd()) ? Outcome.PRECISE : Outcome.UNKNOWN;
 		}
 		if (event == ProgramEvent.FUNCTION_ADDED) {
 			// Queries anywhere in the new body now find this function.
@@ -284,6 +298,20 @@ public final class ChangeTracker implements DomainObjectListener, AutoCloseable 
 		// image base, property maps added or removed, source archives, and any event
 		// added later: reach unknown.
 		return Outcome.UNKNOWN;
+	}
+
+	/** Adds what a byte write to [start, end] also changes through mapped or file-sharing blocks. */
+	private boolean aliases(Set<String> keys, Address start, Address end) {
+		try {
+			if (aliases == null) {
+				aliases = MemoryAliases.of(program.getMemory());
+			}
+			return aliases.addAliasLines(keys, start, end);
+		}
+		catch (RuntimeException unreadable) {
+			aliases = null;
+			return false;
+		}
 	}
 
 	private static Outcome reference(ProgramChangeRecord change, Set<String> keys) {
