@@ -46,6 +46,7 @@ Operations:
 | `sched.stats` | none | workers, queued, running, peaks, per-status counts |
 | `types.recover` | `observations` (see below), optional `maximum_extent` | `layouts` (fields and `union_candidates`), `rejected`, `score_kind` |
 | `types.solve` | `summaries`, `edges`, `roots` (1 to 16), optional `maximum_extent`, `maximum_states`, `maximum_derived` (each at most 65536) | `components`, `roots` (`states`, `derived`, `layout`, `rejected`, completeness), `score_kind` |
+| `strings.stack` | `groups` (`id`, `writes`), optional `minimum_length` (1 to 64, default 4) | `groups` (`id`, `strings`), `minimum_length` |
 
 ## Scheduler
 
@@ -140,3 +141,21 @@ each reached access at its object offset (`state`, `access` index, `offset`,
 `maximum_states` (default 4096) or `maximum_derived` (default 16384) gives
 status `state_limit` or `derived_limit` and no partial output. Results do not
 depend on input order; duplicate edges collapse onto the lowest index.
+
+## Stack strings
+
+`strings.stack` assembles text from constant stores to a stack frame. Each group
+(a unique nonempty `id`) holds `writes`: a signed stack `offset`, `bytes` (1 to
+64 bytes of lowercase hex in memory order) and an unsigned `order`. Writes apply
+in ascending `order`, ties in input order, so each stack byte keeps its last
+value. The written bytes split into contiguous runs, and each run is scanned
+from its lowest offset: a UTF-16LE string of at least `minimum_length`
+printable ASCII code units is taken first, otherwise an ASCII string of at
+least `minimum_length` bytes. Printable means 0x20 to 0x7e, tab, newline or
+carriage return. A string also consumes the NUL terminator that follows it
+(two zero bytes for UTF-16) and is then `terminated`. Each string reports
+`offset`, `byte_length` (text only), `encoding` (`ascii` or `utf16le`), `text`
+and the `orders` of the writes behind its text and terminator, ascending. A
+group holds at most 65536 writes over at most 1 MiB of distinct bytes, a request
+at most 65536 groups and 1048576 writes, and a range that passes the largest
+signed 64-bit offset is refused.

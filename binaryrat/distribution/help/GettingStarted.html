@@ -41,6 +41,11 @@
   <li>Put the cursor in <code>measurement_bias</code> and choose <b>Tools → BinaryRat → Call Sites with Arguments</b>.</li>
   <li>Each row shows a caller, its decompiled statement and the arguments: <code>main</code> passes the constant 0, and <code>measurement_area</code> passes the computed area. Double-click a row to open the call in the Listing.</li>
 </ol>
+<h2>Find strings built on the stack</h2>
+<ol>
+  <li>Choose <b>Tools → BinaryRat → Stack Strings</b>. BinaryRat reads every function's constant stores to its stack, without the decompiler.</li>
+  <li><code>main</code> builds <code>"square units"</code> one character at a time, so no string appears in the program's data. Double-click its row to open the first store in the Listing.</li>
+</ol>
 <h2>Correct a call prototype</h2>
 <ol>
   <li>With <b>Inspect Selected Function</b> open, select the call to <code>measurement_bias</code> inside <code>measurement_area</code> in the Listing.</li>

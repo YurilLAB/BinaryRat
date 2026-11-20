@@ -210,6 +210,23 @@ class EngineClient:
                 fields[name] = value
         return self._object_request("types.solve", **fields)
 
+    def stack_strings(
+        self, groups: Iterable[Mapping[str, Any]], *, minimum_length: int | None = None,
+    ) -> Mapping[str, Any]:
+        """Assemble strings from constant stack writes (op ``strings.stack``).
+
+        ``groups`` are ``{"id", "writes": [{"offset", "bytes", "order"}]}``: ``bytes`` is 1 to 64
+        bytes of lowercase hex in memory order and a write with a higher ``order`` replaces
+        earlier bytes. Each group's result lists ``{"offset", "byte_length", "encoding",
+        "text", "terminated", "orders"}``; ``minimum_length`` (1 to 64, default 4) counts
+        characters.
+        """
+        fields: dict[str, Any] = dict(groups=[
+            dict(group, writes=[dict(write) for write in group["writes"]]) for group in groups])
+        if minimum_length is not None:
+            fields["minimum_length"] = minimum_length
+        return self._object_request("strings.stack", **fields)
+
     def close(self) -> None:
         with self._lock:
             if not self._stop.is_set():

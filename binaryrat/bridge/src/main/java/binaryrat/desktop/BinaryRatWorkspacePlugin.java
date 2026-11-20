@@ -19,7 +19,7 @@ import ghidra.program.util.ProgramLocation;
     packageName = BinaryRatPluginPackage.NAME,
     category = "Analysis",
     shortDescription = "BinaryRat workspace actions",
-    description = "Export, recover and inspect BinaryRat evidence and call sites from CodeBrowser.",
+    description = "Export, recover and inspect BinaryRat evidence, call sites and stack strings from CodeBrowser.",
     servicesRequired = { GhidraScriptService.class }
 )
 public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
@@ -28,6 +28,7 @@ public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
     private final DockingAction recover;
     private final DockingAction browse;
     private final DockingAction callSites;
+    private final DockingAction stackStrings;
     private final DockingAction profile;
 
     public BinaryRatWorkspacePlugin(PluginTool tool) {
@@ -41,6 +42,7 @@ public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
         recover = scriptAction("Recover Layout at Cursor", "BinaryRatRecoverLayouts.java", "2_evidence");
         browse = scriptAction("Browse Layout Evidence", "BinaryRatBrowseLayout.java", "2_evidence");
         callSites = scriptAction("Call Sites with Arguments", "BinaryRatCallSites.java", "2_evidence");
+        stackStrings = scriptAction("Stack Strings", "BinaryRatStackStrings.java", "2_evidence");
         profile = scriptAction("Analyze with Profile", "BinaryRatProfile.java", "1_analysis");
     }
 
@@ -56,6 +58,7 @@ public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
         recover.setEnabled(open && location != null);
         browse.setEnabled(open);
         callSites.setEnabled(open && location != null);
+        stackStrings.setEnabled(open);
         profile.setEnabled(open);
     }
 

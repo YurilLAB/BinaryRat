@@ -16,8 +16,8 @@ import tempfile
 from zipfile import ZipFile
 
 from verify_analysis_profiles import verify_profiles
-from verify_ghidra import (PROJECT, check_call_sites, check_persistent_cache, measured_run,
-                           saved_project_hashes, sha256)
+from verify_ghidra import (PROJECT, check_call_sites, check_persistent_cache, check_stack_strings,
+                           measured_run, saved_project_hashes, sha256)
 from verify_layout_parser import verify_parser
 from verify_plugin_compatibility import jdk
 from verify_type_accuracy import json_file, verified_fields
@@ -117,7 +117,8 @@ def main() -> None:
                      "BinaryRat/ghidra_scripts/BinaryRatRecoverLayouts.java",
                      "BinaryRat/ghidra_scripts/BinaryRatRecoverRtti.java",
                      "BinaryRat/ghidra_scripts/BinaryRatReviewLayout.java",
-                     "BinaryRat/ghidra_scripts/BinaryRatSolveLayouts.java"}):
+                     "BinaryRat/ghidra_scripts/BinaryRatSolveLayouts.java",
+                     "BinaryRat/ghidra_scripts/BinaryRatStackStrings.java"}):
             raise RuntimeError("unexpected extension contents")
         with ZipFile(io.BytesIO(package.read("BinaryRat/lib/BinaryRat.jar"))) as library:
             if not {"binaryrat/writeback/ProtectedLayoutWriteBack.class",
@@ -129,7 +130,9 @@ def main() -> None:
                     "binaryrat/RttiEvidence.class",
                     "binaryrat/SummaryLayouts.class",
                     "binaryrat/CallSites.class",
-                    "binaryrat/desktop/CallSitesTable.class"} <= set(library.namelist()):
+                    "binaryrat/desktop/CallSitesTable.class",
+                    "binaryrat/StackStrings.class",
+                    "binaryrat/desktop/StackStringsTable.class"} <= set(library.namelist()):
                 raise RuntimeError("extension is missing a shared Java service")
             if (library.read("images/binaryrat/logo.png") !=
                     (PROJECT / "binaryrat/docs/assets/logo.png").read_bytes()):
@@ -197,11 +200,13 @@ def main() -> None:
         # (no bridge -scriptPath) so it also checks the desktop table's rows.
         proof_scripts = root / "call-site scripts"
         proof_scripts.mkdir()
-        (proof_scripts / "BinaryRatCallSitesProof.java").write_bytes(
-            (PROJECT / "binaryrat/bridge/ghidra_scripts/BinaryRatCallSitesProof.java").read_bytes())
+        for proof_script in ("BinaryRatCallSitesProof.java", "BinaryRatStackStringsProof.java"):
+            (proof_scripts / proof_script).write_bytes(
+                (PROJECT / "binaryrat/bridge/ghidra_scripts" / proof_script).read_bytes())
         call_sites_proof = check_call_sites(headless, proof_scripts, output, 300, environment)
-        if not call_sites_proof["table"]:
-            raise RuntimeError("installed call-site proof did not reach the desktop table")
+        stack_strings_proof = check_stack_strings(headless, proof_scripts, output, 300, environment)
+        if not call_sites_proof["table"] or not stack_strings_proof["table"]:
+            raise RuntimeError("an installed analyst-table proof did not reach its desktop table")
 
         proof = check_persistent_cache(headless, fixture, None, "installed", output, 2, 300,
                                        environment)
@@ -311,7 +316,8 @@ def main() -> None:
               "packaged_layout_browser": browse_proof, "layout_parser": parser_proof,
               "protected_layout_writeback": writeback_proof, "shared_decompilation": service_proof,
               "interactive_admission": admission_proof, "analysis_profiles": profiles_proof,
-              "call_site_correction": correction_proof, "call_sites": call_sites_proof}
+              "call_site_correction": correction_proof, "call_sites": call_sites_proof,
+              "stack_strings": stack_strings_proof}
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Installed BinaryRat extension passed stock parity and persistence: {report_path}")
 

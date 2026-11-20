@@ -70,6 +70,9 @@ See the [engine protocol](protocol/README.md) and [Python service](python/README
   as the caller's decompiled statement with the values the decompiler proved constant
   and the strings or symbols they point to. In CodeBrowser, PyGhidra, the CLI and the
   live service. [Call sites](bridge/README.md#call-sites-with-arguments)
+- Stack strings: text a function builds on its stack with constant stores, read without
+  the decompiler and assembled by the engine, with the instructions that wrote it.
+  [Stack strings](bridge/README.md#stack-strings)
 - Typed Python access to functions, references, datatypes, and decompilation in
   saved Programs. Separate local clients can share one read-only Ghidra JVM.
   [Python API](python/README.md)

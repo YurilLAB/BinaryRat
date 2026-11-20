@@ -272,7 +272,45 @@ public final class WorkspaceProbe implements GhidraLaunchable {
         });
         await("evidence table dismissed", () -> table.isShowing() ? null : Boolean.TRUE);
         inspectCallSites(tool, program, revision);
+        inspectStackStrings(tool, program, revision);
         inspectCorrections(tool, program, function, revision);
+    }
+
+    /** Stack Strings: main builds "square units" one character at a time. */
+    private static void inspectStackStrings(PluginTool tool, Program program, long revision) throws Exception {
+        var scan = await("enabled stack-string action", () -> {
+            var candidate = action(tool, "BinaryRatWorkspacePlugin", "Stack Strings");
+            return candidate.isEnabled() ? candidate : null;
+        });
+        SwingUtilities.invokeLater(() -> scan.actionPerformed(new DefaultActionContext()));
+        var table = await("stack-string table", () -> dialog("BinaryRat Stack Strings"));
+        await("the sample's stack string", () -> {
+            var rows = descendants(table).filter(JTable.class::isInstance).map(JTable.class::cast)
+                .findFirst().orElse(null);
+            if (rows == null || rows.getRowCount() < 1) {
+                return null;
+            }
+            var columns = rows.getColumnModel();
+            int text = columns.getColumnIndex("Text");
+            int terminated = columns.getColumnIndex("Terminated");
+            for (int row = 0; row < rows.getRowCount(); row++) {
+                if (String.valueOf(rows.getValueAt(row, text)).equals("\"square units\"") &&
+                        String.valueOf(rows.getValueAt(row, terminated)).equals("yes")) {
+                    return Boolean.TRUE;
+                }
+            }
+            return null;
+        });
+        require(!program.isChanged() && program.getModificationNumber() == revision,
+            "Listing stack strings changed the Program");
+        swing(() -> {
+            snapshot(table, WorkspaceProbe.evidence.resolve("stackstrings.png"));
+            descendants(table).filter(JButton.class::isInstance).map(JButton.class::cast)
+                .filter(button -> button.getText().equals("Dismiss")).findFirst().orElseThrow().doClick();
+            return null;
+        });
+        await("stack-string table dismissed", () -> table.isShowing() ? null : Boolean.TRUE);
+        System.out.println("BINARYRAT_WORKSPACE_STACK_STRINGS_OK");
     }
 
     /** Call Sites with Arguments on measurement_bias: main passes 0, measurement_area its area. */

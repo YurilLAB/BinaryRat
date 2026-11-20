@@ -21,6 +21,8 @@ from .call_sites import (
     decode_call_sites_report,
 )
 from .models import Address
+from .stack_strings import MAX_FUNCTIONS as _MAX_STACK_STRING_FUNCTIONS
+from .stack_strings import StackStringsReport, decode_stack_strings_report
 from .summary_layout import SummaryLayoutReport, decode_summary_report
 
 _T = TypeVar("_T")
@@ -49,6 +51,10 @@ class LayoutRecoveryError(LiveProgramError):
 
 class CallSitesError(LiveProgramError):
     """The Java call-site service refused or failed a recovery."""
+
+
+class StackStringsError(LiveProgramError):
+    """The Java stack-string service refused or failed a scan."""
 
 
 class StaleProgramError(LiveProgramError):
@@ -612,6 +618,50 @@ class ProgramView:
         if report.revision != self._info.revision or (
                 digest is not None and report.program_id != "sha256:" + digest.lower()):
             raise StaleProgramError("call-site report does not describe this Program revision")
+        return report
+
+    def stack_strings(
+        self, entry: Address | None = None, *, minimum_length: int = 4, max_functions: int = 10_000,
+    ) -> StackStringsReport:
+        """Strings that functions build on the stack with constant stores, read-only.
+
+        Runs the extension's Java ``binaryrat.StackStrings`` service in this JVM, the same code
+        as ``BinaryRatStackStrings.java``: each function's instructions are read without the
+        decompiler, register constants are followed through straight-line code, and the
+        engine assembles the stores Ghidra's stack analysis marked as stack writes. Scans one
+        function, or every function (up to ``max_functions``) when ``entry`` is None.
+        Requires the BinaryRat extension.
+        """
+        for name, value, low, high in (("minimum_length", minimum_length, 1, 64),
+                                       ("max_functions", max_functions, 1, _MAX_STACK_STRING_FUNCTIONS)):
+            if type(value) is not int or not low <= value <= high:
+                raise ValueError(f"{name} must be an integer from {low} to {high}")
+        if self._scheduled_service is None:
+            raise LiveProgramError("Stack strings require the BinaryRat extension")
+        from ghidra.util.exception import CancelledException
+        from jpype import JClass, JException
+
+        with self._read() as program:
+            function = None
+            if entry is not None:
+                function = program.getFunctionManager().getFunctionAt(self._native_address(program, entry))
+                if function is None:
+                    raise LookupError(f"no function at {entry}")
+            with _monitor(self._cancel) as monitor:
+                try:
+                    text = str(JClass("binaryrat.StackStrings").recoverJson(
+                        program, function, minimum_length, max_functions, monitor))
+                except CancelledException as cause:
+                    raise CancelledError("BinaryRat stack-string scan cancelled") from cause
+                except JException as cause:
+                    if program.isClosed() or int(program.getModificationNumber()) != self._info.revision:
+                        raise StaleProgramError("Ghidra Program changed while listing stack strings") from cause
+                    raise StackStringsError(f"BinaryRat stack strings failed: {cause}") from cause
+        report = decode_stack_strings_report(text)
+        digest = self._info.executable_sha256
+        if report.revision != self._info.revision or (
+                digest is not None and report.program_id != "sha256:" + digest.lower()):
+            raise StaleProgramError("stack-string report does not describe this Program revision")
         return report
 
 

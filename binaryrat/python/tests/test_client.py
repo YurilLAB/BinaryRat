@@ -67,6 +67,14 @@ class ClientTests(unittest.TestCase):
         self.assertNotIn("maximum_derived", sent)
         self.assertNotIn("maximum_extent", sent)
 
+    def test_stack_strings_sends_groups_and_only_a_given_minimum(self):
+        with EngineClient("binaryrat-engine") as client:
+            groups = [dict(id="f/1", writes=[dict(offset=-16, bytes="68656c6c6f00", order=1)])]
+            sent = client.stack_strings(groups)["received"]
+            self.assertEqual((sent["op"], sent["groups"]), ("strings.stack", groups))
+            self.assertNotIn("minimum_length", sent)
+            self.assertEqual(client.stack_strings(groups, minimum_length=2)["received"]["minimum_length"], 2)
+
     def test_persistent_process_and_precise_argument_boundaries(self):
         with EngineClient("engine with spaces", cache_dir="cache with spaces") as client:
             first = client.cache_put({"function": "ram:10"}, {"c": "return 1;"}, ["type:a"])

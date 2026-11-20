@@ -131,6 +131,35 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(response["error"]["code"], "invalid_request")
         self.assertTrue(responses[5]["ok"])
 
+    def test_stack_strings_response_shape_and_refusals(self):
+        writes = [dict(offset=-32, bytes="58585858", order=1), dict(offset=-32, bytes="68656c6c", order=2),
+                  dict(offset=-28, bytes="6f00", order=3), dict(offset=-8, bytes="41004200430044000000", order=4)]
+        request = dict(id="strings", op="strings.stack", groups=[dict(id="f", writes=writes),
+                                                                  dict(id="empty", writes=[])])
+        refusals = [dict(request, id="duplicate", groups=[dict(id="f", writes=[])] * 2),
+                    dict(request, id="upper", groups=[dict(id="f", writes=[dict(offset=0, bytes="4A", order=0)])]),
+                    dict(request, id="wide", groups=[dict(id="f", writes=[dict(offset=0, bytes="41" * 65, order=0)])]),
+                    dict(request, id="overflow", groups=[dict(id="f", writes=[
+                        dict(offset=2**63 - 1, bytes="4142", order=0)])]),
+                    dict(request, id="minimum", minimum_length=65),
+                    dict(request, id="after", op="ping")]
+        with tempfile.TemporaryDirectory() as root:
+            responses = self.run_requests(root, [request, dict(request, id="short", minimum_length=1)] + refusals)
+        result = responses[0]["result"]
+        self.assertEqual(sorted(result), ["groups", "minimum_length"])
+        self.assertEqual(result["minimum_length"], 4)
+        self.assertEqual(result["groups"], [
+            dict(id="f", strings=[
+                dict(offset=-32, byte_length=5, encoding="ascii", text="hello", terminated=True, orders=[2, 3]),
+                dict(offset=-8, byte_length=8, encoding="utf16le", text="ABCD", terminated=True, orders=[4])]),
+            dict(id="empty", strings=[])])
+        self.assertEqual(responses[1]["result"]["minimum_length"], 1)
+        for response in responses[2:7]:
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["error"]["code"], "invalid_request")
+        self.assertTrue(responses[7]["ok"])
+        self.assertIn("stack-strings", responses[7]["result"]["capabilities"])
+
     def test_numeric_overflow_is_rejected_at_protocol_boundary(self):
         observation = dict(object_id="object", offset=2**63, width=4,
                            evidence_id="x", object_start_known=True)

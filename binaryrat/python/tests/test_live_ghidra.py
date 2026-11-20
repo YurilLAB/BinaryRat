@@ -262,6 +262,33 @@ class LiveGhidraTests(unittest.TestCase):
                         raise AssertionError(f"layout fixture {name} was not created")
             results.save(pyghidra.task_monitor())
 
+        # builds_text: push rbp; mov rbp,rsp; mov dword [rbp-8], "live"; mov byte [rbp-4], 0;
+        # pop rbp; ret. Ghidra's stack analysis puts [rbp-8] at stack offset -0x10.
+        from ghidra.app.cmd.function import NewFunctionStackAnalysisCmd
+
+        cls.strings_path = "/strings"
+        strings_file = cls.marker.with_name("strings.raw")
+        strings_file.write_bytes(bytes.fromhex("554889e5 c745f86c697665 c645fc00 5dc3"))
+        with ExitStack() as cleanup:
+            project = pyghidra.open_project(cls.marker.parent, cls.marker.stem)
+            cleanup.callback(project.close)
+            results = (pyghidra.program_loader().source(str(strings_file)).name("strings")
+                       .loaders(BinaryLoader.class_).language("x86:LE:64:default").compiler("gcc")
+                       .project(project).projectFolderPath("/").load())
+            cleanup.callback(results.close)
+            consumer = Object()
+            program = results.getPrimaryDomainObject(consumer)
+            cleanup.callback(program.release, consumer)
+            flat = FlatProgramAPI(program)
+            entry = program.getMinAddress()
+            cls.strings_entry = Address("ram", int(entry.getOffset()))
+            with pyghidra.transaction(program, "Create stack-string fixture"):
+                if not flat.disassemble(entry) or not flat.createFunction(entry, "builds_text"):
+                    raise AssertionError("stack-string fixture was not created")
+                if not NewFunctionStackAnalysisCmd(entry, True).applyTo(program, pyghidra.task_monitor()):
+                    raise AssertionError("stack-string fixture stack analysis failed")
+            results.save(pyghidra.task_monitor())
+
     def snapshot(self):
         directory = self.marker.with_suffix(".rep")
         return {
@@ -789,6 +816,51 @@ class LiveGhidraTests(unittest.TestCase):
                 process.kill()
                 process.wait(timeout=5)
             process.stdout.close()
+        self.assertEqual(before, self.snapshot())
+
+    def test_stack_strings_through_the_shared_service(self):
+        from ghidra.framework import Application
+
+        before = self.snapshot()
+        if Application.getModuleRootDir("BinaryRat") is None:
+            with open_program(self.marker, self.strings_path) as view:
+                with self.assertRaisesRegex(LiveProgramError, "require the BinaryRat extension"):
+                    view.stack_strings()
+            self.skipTest("stack strings require the BinaryRat extension")
+        with open_program(self.marker, self.strings_path) as view:
+            whole = view.stack_strings()
+            self.assertEqual((whole.revision, whole.functions_scanned), (view.info.revision, 1))
+            self.assertEqual([(item.function, item.stack_offset, item.text, item.terminated, item.render())
+                              for item in whole.strings], [(self.strings_entry, -16, "live", True, '"live"')])
+            one = view.stack_strings(self.strings_entry)
+            self.assertEqual((one.function, one.strings), (self.strings_entry, whole.strings))
+            self.assertEqual(view.stack_strings(minimum_length=5).strings, ())
+            for bad in (dict(minimum_length=0), dict(minimum_length=65), dict(max_functions=0),
+                        dict(max_functions=200_001), dict(minimum_length=True)):
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
+                    view.stack_strings(**bad)
+            with self.assertRaises(LookupError):
+                view.stack_strings(Address("ram", self.strings_entry.offset + 1))
+        with open_program(self.marker, self.program_path) as view:
+            self.assertEqual(view.stack_strings().strings, ())
+        self.assertEqual(before, self.snapshot())
+
+        executable = shutil.which("binaryrat-decompile")
+        base = [*([executable] if executable is not None else [sys.executable, "-m", "binaryrat.decompile_cli"]),
+                str(self.marker)]
+        options = ["--stack-strings", "--install-dir", str(self.install)]
+        listed = subprocess.run([*base, self.strings_path, *options], encoding="utf-8", capture_output=True,
+                                timeout=180)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(listed.stdout.splitlines(), [
+            "Stack strings in 1 function: 1", f'{Address("ram", self.strings_entry.offset + 4)}  builds_text  stack -0x10  "live"'])
+        as_json = subprocess.run([*base, self.strings_path, "builds_text", *options, "--json"], encoding="utf-8",
+                                 capture_output=True, timeout=180)
+        self.assertEqual(as_json.returncode, 0, as_json.stderr)
+        self.assertEqual(json.loads(as_json.stdout), one.document)
+        empty = subprocess.run([*base, self.program_path, *options], encoding="utf-8", capture_output=True,
+                               timeout=180)
+        self.assertEqual(empty.returncode, 1, empty.stderr)
         self.assertEqual(before, self.snapshot())
 
     def test_live_service_reuses_jvm_across_independent_clients(self):

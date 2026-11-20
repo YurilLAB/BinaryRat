@@ -26,6 +26,7 @@ PROJECT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT / "binaryrat" / "python" / "src"))
 from binaryrat import load_export  # noqa: E402
 from binaryrat.call_sites import load_call_sites_report  # noqa: E402
+from binaryrat.stack_strings import load_stack_strings_report  # noqa: E402
 
 PHASE_NAME = r"(serial|parallel|scheduled)"
 PHASE = re.compile(r"BinaryRat export starting mode=" + PHASE_NAME)
@@ -440,6 +441,29 @@ def check_call_sites(headless: Path, script_directory: Path, destination: Path, 
             "log": log.name, "wall_seconds": measured["wall_seconds"]}
 
 
+def check_stack_strings(headless: Path, script_directory: Path, destination: Path, timeout: float,
+                        environment: dict[str, str]) -> dict:
+    """Run the stack-string edge-case proof and parse its report with the Python decoder."""
+    report_path = destination / "stack-strings.json"
+    log = destination / "stack-strings.log"
+    report_path.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory(prefix="stack strings-", dir=destination) as directory:
+        measured = measured_run([
+            str(headless), directory, "fixture", "-deleteProject", "-scriptPath", str(script_directory),
+            "-preScript", "BinaryRatStackStringsProof.java", str(report_path)], log, timeout, environment)
+    content = log.read_text(encoding="utf-8", errors="replace")
+    passed = re.findall(r"BINARYRAT_STACK_STRINGS_OK strings=(\d+) checks=(\d+) .* table=(true|false)", content)
+    if measured["returncode"] or "REPORT SCRIPT ERROR" in content or len(passed) != 1 or not report_path.is_file():
+        raise RuntimeError(f"stack-string proof failed; see {log}")
+    parsed = load_stack_strings_report(report_path)
+    texts = sorted(item.text for item in parsed.strings)
+    if len(parsed.strings) != int(passed[0][0]) or texts != sorted(
+            ["ABCD", "fromrodata12345", "keys", "abcdXXXX", "wide", "secret", "hello", "efgh", "AAAA", "BBBB"]):
+        raise RuntimeError(f"stack-string report does not match the proof; see {report_path}")
+    return {"passed": True, "strings": len(parsed.strings), "cancellation_checks": int(passed[0][1]),
+            "table": passed[0][2] == "true", "log": log.name, "wall_seconds": measured["wall_seconds"]}
+
+
 def check_stock_verified(headless: Path, binary: Path, scripts: Path, destination: Path,
                          timeout: float, environment: dict[str, str]) -> dict:
     """Compare verified output with a separate stock pass and probe fail-closed behavior."""
@@ -573,6 +597,9 @@ def main() -> int:
             report["call_sites"] = check_call_sites(
                 headless, PROJECT / "binaryrat/bridge/ghidra_scripts", destination, args.timeout, environment)
             print("PASS call sites: statuses, thunks, limits, cancellation and program changes", flush=True)
+            report["stack_strings"] = check_stack_strings(
+                headless, PROJECT / "binaryrat/bridge/ghidra_scripts", destination, args.timeout, environment)
+            print("PASS stack strings: stores, constants, joins, read-only loads and limits", flush=True)
         for artifact in manifest["artifacts"]:
             binary = (corpus_root / artifact["binary"]).resolve()
             if corpus_root.resolve() not in binary.parents:

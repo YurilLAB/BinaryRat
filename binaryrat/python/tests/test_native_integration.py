@@ -66,6 +66,24 @@ class NativeIntegrationTests(unittest.TestCase):
         callee_state = next(s for s in root["states"] if s["summary"] == "callee")
         self.assertEqual((callee_state["offset"], callee_state["edge"], callee_state["parent"]), (24, 0, 0))
 
+    def test_stack_strings_assemble_pieces_and_refuse_bad_hex(self):
+        from binaryrat import EngineError
+
+        groups = [dict(id="f/1", writes=[dict(offset=-32, bytes="68656c6c", order=1),
+                                         dict(offset=-28, bytes="6f00", order=2),
+                                         dict(offset=-16, bytes="77006900640065000000", order=3)])]
+        with tempfile.TemporaryDirectory() as directory:
+            with EngineClient(os.environ["BINARYRAT_ENGINE"], cache_dir=directory) as engine:
+                self.assertIn("stack-strings", engine.ping()["capabilities"])
+                found = engine.stack_strings(groups)
+                with self.assertRaises(EngineError) as refused:
+                    engine.stack_strings([dict(id="x", writes=[dict(offset=0, bytes="4A", order=0)])])
+        self.assertEqual(refused.exception.code, "invalid_request")
+        self.assertEqual(found["minimum_length"], 4)
+        strings = found["groups"][0]["strings"]
+        self.assertEqual([(s["offset"], s["text"], s["encoding"], s["terminated"], s["orders"]) for s in strings],
+                         [(-32, "hello", "ascii", True, [1, 2]), (-16, "wide", "utf16le", True, [3])])
+
 
 if __name__ == "__main__":
     unittest.main()

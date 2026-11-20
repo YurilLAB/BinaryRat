@@ -163,6 +163,15 @@ status with the reason. Validation and errors follow `solve_layout`;
 `load_call_sites_report(path)` reads a saved report and a refused listing raises
 `CallSitesError`.
 
+`view.stack_strings(entry=None, minimum_length=4, max_functions=10_000)` lists
+text built on the stack with constant stores, in one function or in every
+function, through the extension's Java `binaryrat.StackStrings` service and the
+engine's `strings.stack` op. Each `StackString` has its function, stack offset,
+encoding (`ascii` or `utf16le`), text, terminator and the instructions that
+wrote it; `render()` quotes it as a C literal. `load_stack_strings_report(path)`
+reads a saved report and a refused scan raises `StackStringsError`. The engine
+client exposes the op directly as `EngineClient.stack_strings(groups)`.
+
 ## Decompile from the CLI
 
 `binaryrat-decompile` is available after installing the wheel. With PyGhidra
@@ -174,6 +183,7 @@ binaryrat-decompile workspace.gpr /program parse_header
 binaryrat-decompile workspace.gpr /program 0x401a2c
 binaryrat-decompile workspace.gpr /program --list --match parse
 binaryrat-decompile workspace.gpr /program parse_header --call-sites
+binaryrat-decompile workspace.gpr /program --stack-strings
 ```
 
 The CLI requires the shared scheduler by default. Pass `--install-dir` to
@@ -186,9 +196,11 @@ is refused with the matching entries. `--list` prints each function's entry
 and signature without decompiling, and `--match` keeps names that contain the
 text. `--call-sites` prints each call to the function with its caller, C
 statement and constant arguments (`--max-sites`, `--max-callers`), or the
-validated report with `--json`. By default the command writes C on success. The
+validated report with `--json`. `--stack-strings` lists strings built on the
+stack in FUNCTION or, without it, in every function (`--min-length`,
+`--max-functions`). By default the command writes C on success. The
 JSON form includes the backend, cache status and decompiler flags. Exit status is
-0 on success, 1 for an incomplete decompilation or a function with no calls, 2
+0 on success, 1 for an incomplete decompilation, no calls or no strings, 2
 for invalid input or an unavailable Program or backend, and 130 on interruption.
 
 ## Read a Program already open in PyGhidra

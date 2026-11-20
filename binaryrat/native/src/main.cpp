@@ -5,6 +5,7 @@
 #include <binaryrat/live_cache.hpp>
 #include <binaryrat/ownership.hpp>
 #include <binaryrat/scheduler.hpp>
+#include <binaryrat/strings.hpp>
 #include <binaryrat/summaries.hpp>
 #include <binaryrat/types.hpp>
 #include <nlohmann/json.hpp>
@@ -17,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -209,6 +211,59 @@ std::size_t bounded_limit(const json& request, const char* name, std::size_t fal
 }
 
 // Interprocedural propagation of per-parameter summaries (see summaries.hpp).
+// Stack strings: groups of constant stack writes in, assembled text out.
+constexpr std::size_t maximum_string_groups = 65'536;
+constexpr std::size_t maximum_string_writes = 1 << 20;
+
+std::vector<std::uint8_t> hex_bytes(const json& object, const char* name) {
+    const auto text = string_field(object, name);
+    if (text.empty() || text.size() % 2 != 0 || text.size() > 2 * binaryrat::strings::maximum_write_bytes)
+        throw std::invalid_argument(std::string(name) + " must be 1 to 64 bytes of lowercase hex");
+    const auto digit = [&](char value) -> std::uint8_t {
+        if (value >= '0' && value <= '9') return static_cast<std::uint8_t>(value - '0');
+        if (value >= 'a' && value <= 'f') return static_cast<std::uint8_t>(value - 'a' + 10);
+        throw std::invalid_argument(std::string(name) + " must be 1 to 64 bytes of lowercase hex");
+    };
+    std::vector<std::uint8_t> bytes;
+    for (std::size_t index = 0; index < text.size(); index += 2)
+        bytes.push_back(static_cast<std::uint8_t>(digit(text[index]) << 4 | digit(text[index + 1])));
+    return bytes;
+}
+
+json stack_strings(const json& request) {
+    namespace strings = binaryrat::strings;
+    strings::StackStringOptions options;
+    if (const auto minimum = optional_unsigned(request, "minimum_length")) {
+        if (*minimum < 1 || *minimum > strings::maximum_minimum_length)
+            throw std::invalid_argument("minimum_length must be 1 to 64");
+        options.minimum_length = static_cast<std::size_t>(*minimum);
+    }
+    const auto& groups = array_field(request, "groups");
+    if (groups.size() > maximum_string_groups) throw std::invalid_argument("too many string groups");
+    std::set<std::string> seen;
+    std::size_t total = 0;
+    json result = json::array();
+    for (const auto& group : groups) {
+        auto id = string_field(group, "id");
+        if (id.empty() || !seen.insert(id).second)
+            throw std::invalid_argument("group IDs must be unique nonempty strings");
+        std::vector<strings::StackWrite> writes;
+        for (const auto& item : array_field(group, "writes")) {
+            if (++total > maximum_string_writes) throw std::invalid_argument("too many stack writes");
+            writes.push_back({signed_value(item.at("offset"), "offset"), hex_bytes(item, "bytes"),
+                              unsigned_value(item.at("order"), "order")});
+        }
+        json found = json::array();
+        for (const auto& text : strings::recover_stack_strings(writes, options)) {
+            found.push_back({{"offset", text.offset}, {"byte_length", text.byte_length},
+                             {"encoding", strings::encoding_name(text.encoding)}, {"text", text.text},
+                             {"terminated", text.terminated}, {"orders", text.orders}});
+        }
+        result.push_back({{"id", std::move(id)}, {"strings", std::move(found)}});
+    }
+    return {{"groups", std::move(result)}, {"minimum_length", options.minimum_length}};
+}
+
 json solve_types(const json& request) {
     namespace types = binaryrat::types;
     std::vector<types::ParameterSummary> summaries;
@@ -312,11 +367,12 @@ public:
         if (op == "ping") return json{{"name", "BinaryRat"}, {"version", "0.1.0"},
             {"ghidra_version", "12.2"},
             {"capabilities", {"artifact-cache", "layout-proposals", "lease-scheduler", "live-cache",
-                              "summary-solver"}}};
+                              "stack-strings", "summary-solver"}}};
         if (op.starts_with("cache.")) return cache(op, request);
         if (op.starts_with("sched.")) return sched(op, request, id);
         if (op == "types.recover") return recover_types(request);
         if (op == "types.solve") return solve_types(request);
+        if (op == "strings.stack") return stack_strings(request);
         throw std::invalid_argument("unknown operation: " + op);
     }
 

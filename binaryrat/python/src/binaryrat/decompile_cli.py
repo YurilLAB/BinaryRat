@@ -1,4 +1,4 @@
-"""Run one BinaryRat decompilation, or list a function's call sites, against a saved Ghidra Program.
+"""Run one BinaryRat decompilation, or list call sites or stack strings, against a saved Ghidra Program.
 
 Apache-2.0; Copyright 2026 YurilLAB.
 """
@@ -15,6 +15,7 @@ from typing import Sequence
 
 from .call_sites import MAX_CALLERS, MAX_SITES, explain_call_sites
 from .live import LiveProgramError, ProgramFunction, ProgramView, open_program
+from .stack_strings import MAX_FUNCTIONS as MAX_STRING_FUNCTIONS, explain_stack_strings
 from .models import Address
 
 _ENTRY = re.compile(r"(?:(?P<space>[^:\s]+):)?(?P<prefix>0[xX])?(?P<offset>[0-9a-fA-F]{1,16})")
@@ -118,9 +119,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                "image-base space by default), or a function name (ns::f for a qualified name). "
                "Use name:NAME for a name that is also valid hexadecimal, such as name:add. "
                "--call-sites lists every call to FUNCTION (and to its thunks) with the caller's C "
-               "statement and the argument values the decompiler proved constant. "
-               "Exit 0 for C output or listed calls, 1 for an incomplete decompilation, an empty "
-               "listing or no calls, "
+               "statement and the argument values the decompiler proved constant. --stack-strings lists "
+               "strings built on the stack with constant stores, in FUNCTION or, without it, in every "
+               "function. "
+               "Exit 0 for C output, listed calls or strings, 1 for an incomplete decompilation, an "
+               "empty listing, no calls or no strings, "
                "2 for invalid input or an unavailable backend, 130 when interrupted.",
     )
     parser.add_argument("project_file", metavar="PROJECT.gpr")
@@ -135,6 +138,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="list the calls to FUNCTION with their statements and constant arguments")
     parser.add_argument("--max-sites", type=_bounded("--max-sites", MAX_SITES), default=None,
                         help=f"with --call-sites, list at most this many calls (1-{MAX_SITES}, default 64)")
+    parser.add_argument("--stack-strings", action="store_true",
+                        help="list strings built on the stack in FUNCTION, or in every function")
+    parser.add_argument("--min-length", type=_bounded("--min-length", 64), default=None,
+                        help="with --stack-strings, the shortest string in characters (1-64, default 4)")
+    parser.add_argument("--max-functions", type=_bounded("--max-functions", MAX_STRING_FUNCTIONS), default=None,
+                        help="with --stack-strings and no FUNCTION, scan at most this many functions "
+                             "(default 10000)")
     parser.add_argument("--max-callers", type=_bounded("--max-callers", MAX_CALLERS), default=None,
                         help=f"with --call-sites, decompile at most this many callers (1-{MAX_CALLERS}, "
                              "default 32)")
@@ -147,7 +157,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="emit the result and status as JSON, one JSON object per listed function, "
                              "or the call-site report")
     args = parser.parse_args(argv)
-    if args.list == (args.function is not None):
+    if args.stack_strings and (args.list or args.call_sites):
+        parser.error("--stack-strings cannot be combined with --list or --call-sites")
+    if not args.stack_strings and (args.min_length is not None or args.max_functions is not None):
+        parser.error("--min-length and --max-functions only apply to --stack-strings")
+    if args.stack_strings and args.function is not None and args.max_functions is not None:
+        parser.error("--max-functions applies when no FUNCTION is given")
+    if not args.stack_strings and args.list == (args.function is not None):
         parser.error("give either FUNCTION or --list")
     if args.match is not None and not args.list:
         parser.error("--match only applies to --list")
@@ -164,6 +180,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         ) as view:
             if args.list:
                 return _list(view, args.match, args.json)
+            if args.stack_strings:
+                entry = _resolve(view, args.function).entry if args.function is not None else None
+                strings = view.stack_strings(entry, minimum_length=args.min_length or 4,
+                                             max_functions=args.max_functions or 10_000)
+                print(json.dumps(strings.document, ensure_ascii=True) if args.json else
+                      "\n".join(explain_stack_strings(strings)))
+                return 0 if strings.strings else 1
             function = _resolve(view, args.function)
             if args.call_sites:
                 report = view.call_sites(function.entry, max_sites=args.max_sites or 64,

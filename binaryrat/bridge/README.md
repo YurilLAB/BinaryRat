@@ -260,6 +260,30 @@ are reported rather than silently applied. The script, PyGhidra
 `BinaryRatCallSitesProof.java` checks the statuses, thunks, limits,
 cancellation and Program changes on a disposable x86-64 Program.
 
+## Stack strings
+
+**Tools → BinaryRat → Stack Strings** lists text that functions build on their
+stack with constant stores, which the decompiler shows only as scattered
+assignments. It reads each function's instructions without decompiling,
+follows register constants through straight-line code (moves, extensions,
+constant arithmetic such as an XOR with a key, and loads from read-only
+memory), and records each store that Ghidra's stack analysis marked as a stack
+write with a known value. A run ends at a jump target or after a jump, and a
+call clears registers, so values from different paths never mix. The engine's
+`strings.stack` op then replays the stores (a later store replaces earlier
+bytes) and reports ASCII and UTF-16LE text of at least the minimum length,
+with its stack offset, terminator and the instructions that wrote it.
+Double-click a row to open the first store. Loads from writable memory, values
+pushed with `push`, and text decoded in a loop are not followed.
+
+Headless, `BinaryRatStackStrings.java OUTPUT_JSON [all|ENTRY_HEX|name:FUNCTION
+[MINIMUM_LENGTH=4 [MAX_FUNCTIONS=10000]]]` writes the report (`analysis_mode`
+`read_only_stack_strings`) without replacing a file. The script, PyGhidra
+(`ProgramView.stack_strings`) and `binaryrat-decompile --stack-strings` share
+one Java service, `binaryrat.StackStrings`. `BinaryRatStackStringsProof.java`
+checks stores of every width, joins, calls, read-only and writable loads,
+limits, cancellation and Program changes on a disposable x86-64 Program.
+
 ## Scheduled decompilation
 
 Every scheduled cache miss takes a lease from the engine's scheduler first. The

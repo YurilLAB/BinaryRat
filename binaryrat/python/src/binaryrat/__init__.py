@@ -25,11 +25,20 @@ from .live import (
     ProgramFunction,
     ProgramInfo,
     ProgramView,
+    StackStringsError,
     StaleProgramError,
     decompile_program,
     open_program,
 )
 from .models import Address, Decompilation, Function, TypeProposal
+from .stack_strings import (
+    StackString,
+    StackStringsReport,
+    StackStringsReportError,
+    decode_stack_strings_report,
+    load_stack_strings_report,
+    parse_stack_strings_report,
+)
 from .summary_layout import (
     SummaryLayoutReport,
     SummaryReportError,
@@ -52,5 +61,7 @@ __all__ = [
     "load_summary_report", "parse_summary_report",
     "CallArgument", "CallSite", "CallSitesError", "CallSitesReport", "CallSitesReportError", "CallTarget",
     "decode_call_sites_report", "load_call_sites_report", "parse_call_sites_report",
+    "StackString", "StackStringsError", "StackStringsReport", "StackStringsReportError",
+    "decode_stack_strings_report", "load_stack_strings_report", "parse_stack_strings_report",
     "API_VERSION", "PROTOCOL_VERSION",
 ]
