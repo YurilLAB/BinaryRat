@@ -507,8 +507,8 @@ jobs:
           rm -f bfd_arch.cc loadimage_bfd.cc codedata.cc analyzesigs.cc
           sed -i 's/\r$//' ../datatests/*.xml
           make -j2 decomp_test_dbg BFDLIB=
-          # The exit code is the number of failed tests.
-          ./decomp_test_dbg -sleighpath "$GITHUB_WORKSPACE" -path ../datatests | tee "$GITHUB_WORKSPACE/build/reports/decompiler-tests.log"
+          # The exit code is the number of failed tests; the unit-test summary goes to stderr.
+          ./decomp_test_dbg -sleighpath "$GITHUB_WORKSPACE" -path ../datatests 2>&1 | tee "$GITHUB_WORKSPACE/build/reports/decompiler-tests.log"
           grep -Eq '^([1-9][0-9]*)/\1 tests passed\.$' "$GITHUB_WORKSPACE/build/reports/decompiler-tests.log"
           grep -Eq '^Total tests applied = [1-9]' "$GITHUB_WORKSPACE/build/reports/decompiler-tests.log"
       - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
