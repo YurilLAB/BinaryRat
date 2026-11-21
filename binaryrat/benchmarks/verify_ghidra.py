@@ -512,23 +512,39 @@ def check_stack_strings(headless: Path, script_directory: Path, destination: Pat
                         environment: dict[str, str]) -> dict:
     """Run the stack-string edge-case proof and parse its report with the Python decoder."""
     report_path = destination / "stack-strings.json"
+    overlay_path = destination / "stack-strings.json.overlays.json"
     log = destination / "stack-strings.log"
     report_path.unlink(missing_ok=True)
+    overlay_path.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="stack strings-", dir=destination) as directory:
         measured = measured_run([
             str(headless), directory, "fixture", "-deleteProject", "-scriptPath", str(script_directory),
             "-preScript", "BinaryRatStackStringsProof.java", str(report_path)], log, timeout, environment)
     content = log.read_text(encoding="utf-8", errors="replace")
-    passed = re.findall(r"BINARYRAT_STACK_STRINGS_OK strings=(\d+) checks=(\d+) .* table=(true|false)", content)
-    if measured["returncode"] or "REPORT SCRIPT ERROR" in content or len(passed) != 1 or not report_path.is_file():
+    passed = re.findall(
+        r"BINARYRAT_STACK_STRINGS_OK strings=(\d+) checks=(\d+) .* overlays=true table=(true|false)", content)
+    if (measured["returncode"] or "REPORT SCRIPT ERROR" in content or len(passed) != 1 or
+            not report_path.is_file() or not overlay_path.is_file()):
         raise RuntimeError(f"stack-string proof failed; see {log}")
     parsed = load_stack_strings_report(report_path)
     texts = sorted(item.text for item in parsed.strings)
-    if len(parsed.strings) != int(passed[0][0]) or texts != sorted(
-            ["ABCD", "fromrodata12345", "keys", "abcdXXXX", "wide", "secret", "hello", "efgh", "AAAA", "BBBB",
-             "kernel32.dll", "efgh", "user"]):
+    expected = ["ABCD", "fromrodata12345", "keys", "abcdXXXX", "wide", "secret", "hello", "efgh", "AAAA", "BBBB",
+                "kernel32.dll", "efgh", "user"]
+    if len(parsed.strings) != int(passed[0][0]) or texts != sorted(expected):
         raise RuntimeError(f"stack-string report does not match the proof; see {report_path}")
+    # Overlay banks repeat the builder's offset 0x1000 in two more spaces: one string each, credited
+    # to that bank's function, while the default-space strings stay as they were.
+    overlay = load_stack_strings_report(overlay_path)
+    banked = {item.text: item for item in overlay.strings if item.text in ("north", "south")}
+    builder = next(item.function for item in parsed.strings if item.function_name == "builder")
+    if (sorted(item.text for item in overlay.strings) != sorted(expected + ["north", "south"]) or
+            len(banked) != 2 or builder.offset != 0x1000 or
+            len({builder, *(item.function for item in banked.values())}) != 3 or
+            any(item.function.offset != builder.offset or item.site.space != item.function.space or
+                item.function_name != "banked_" + item.text for item in banked.values())):
+        raise RuntimeError(f"overlay-space stack strings were merged or misattributed; see {overlay_path}")
     return {"passed": True, "strings": len(parsed.strings), "cancellation_checks": int(passed[0][1]),
+            "overlay_spaces": sorted(item.function.space for item in banked.values()),
             "table": passed[0][2] == "true", "log": log.name, "wall_seconds": measured["wall_seconds"]}
 
 

@@ -17,10 +17,10 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 import binaryrat.CallSites;
+import binaryrat.EntryAddress;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.script.GhidraScript;
 import ghidra.framework.plugintool.PluginTool;
-import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.Symbol;
@@ -75,7 +75,7 @@ public class BinaryRatCallSites extends GhidraScript {
 		String[] args = getScriptArgs();
 		if (args.length < 2 || args.length > 5) {
 			throw new IllegalArgumentException("Use as a headless postScript: BinaryRatCallSites.java " +
-				"OUTPUT_JSON ENTRY_HEX|name:FUNCTION [TIMEOUT_SECONDS [MAX_SITES [MAX_CALLERS]]]");
+				"OUTPUT_JSON ENTRY_HEX|SPACE:HEX|name:FUNCTION [TIMEOUT_SECONDS [MAX_SITES [MAX_CALLERS]]]");
 		}
 		int timeout = args.length >= 3 ? Integer.parseInt(args[2]) : 30;
 		int sites = args.length >= 4 ? Integer.parseInt(args[3]) : CallSites.DEFAULT_SITES;
@@ -182,7 +182,7 @@ public class BinaryRatCallSites extends GhidraScript {
 				}
 				// A thunk and the function it reaches have the same call sites.
 				if (match != null && !root(match).getEntryPoint().equals(root(candidate).getEntryPoint())) {
-					throw new IOException("ambiguous function name; select a function entry");
+					throw new IOException("ambiguous function name; select a function entry (SPACE:HEX in an overlay)");
 				}
 				match = match == null || match.isThunk() ? candidate : match;
 			}
@@ -191,15 +191,11 @@ public class BinaryRatCallSites extends GhidraScript {
 			}
 		}
 		else {
-			if (!selector.matches("[a-fA-F0-9]{1,16}")) {
-				throw new IllegalArgumentException("function entry must be hexadecimal");
+			if (!EntryAddress.matches(selector)) {
+				throw new IllegalArgumentException("function entry must be HEX, SPACE:HEX or name:FUNCTION");
 			}
-			long offset = Long.parseUnsignedLong(selector, 16);
-			Address address = currentProgram.getAddressFactory().getDefaultAddressSpace().getAddress(offset);
-			if (address.getOffset() != offset) {
-				throw new IllegalArgumentException("function entry does not fit the default address space");
-			}
-			Function match = currentProgram.getFunctionManager().getFunctionAt(address);
+			Function match = currentProgram.getFunctionManager().getFunctionAt(
+				EntryAddress.parse(currentProgram, selector));
 			if (match != null) {
 				return match;
 			}

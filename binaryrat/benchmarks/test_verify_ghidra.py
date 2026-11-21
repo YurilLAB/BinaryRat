@@ -334,6 +334,83 @@ class ScheduledEvidenceTests(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, "cache-edge"):
                             check()
 
+    def test_stack_string_proof_keeps_overlay_banks_apart(self):
+        plain = [("ram", 0x1000, "builder", text) for text in
+                 ("ABCD", "fromrodata12345", "keys", "abcdXXXX", "wide", "secret", "hello")] + \
+                [("ram", 0x1100, "clobbered", "efgh"), ("ram", 0x1200, "brancher", "AAAA"),
+                 ("ram", 0x1200, "brancher", "BBBB")] + \
+                [("ram", 0x1310, "reuser", text) for text in ("kernel32.dll", "efgh", "user")]
+        banks = [("bankA", 0x1000, "banked_north", "north"), ("bankB", 0x1000, "banked_south", "south")]
+
+        def report(strings):
+            records = []
+            for index, (space, entry, name, text) in enumerate(strings):
+                site = {"address_space": space, "address": f"{entry + 4 + index:x}"}
+                records.append({"function": {"address_space": space, "address": f"{entry:x}", "name": name},
+                                **site, "stack_offset": -24, "byte_length": len(text), "encoding": "ascii",
+                                "text": text, "text_truncated": False, "terminated": True, "writes": [site]})
+            return {"schema_version": 1, "analysis_mode": "read_only_stack_strings", "revision": 7,
+                    "program_id": None, "language_id": "x86:LE:64:default", "compiler_spec_id": "gcc",
+                    "function": None, "minimum_length": 4, "function_limit": 10000,
+                    "functions_scanned": len({(s[0], s[1]) for s in strings}), "functions_skipped": 1,
+                    "functions_partial": 0, "stack_writes": 64, "truncated": False, "strings": records}
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)
+            state = {}
+
+            def reset():
+                state.update(overlay=report(plain + banks), write_overlay=True,
+                             marker="BINARYRAT_STACK_STRINGS_OK strings=13 checks=87 joins=true "
+                                    "deterministic=true overlays=true table=false")
+
+            def run(argv, log, timeout, env):
+                self.assertEqual(argv[argv.index("-preScript") + 1], "BinaryRatStackStringsProof.java")
+                Path(argv[-1]).write_text(json.dumps(report(plain)), encoding="utf-8")
+                if state["write_overlay"]:
+                    Path(argv[-1] + ".overlays.json").write_text(json.dumps(state["overlay"]), encoding="utf-8")
+                log.write_text(f"INFO\n{state['marker']}\n", encoding="utf-8")
+                return {"returncode": 0, "wall_seconds": 0}
+
+            def check():
+                return verify_ghidra.check_stack_strings(Path("headless"), Path("scripts"), destination, 30, {})
+
+            # Each case breaks one rule only, so every rule is shown to be needed.
+            def merged():
+                state["overlay"] = report(plain + [banks[0], ("bankA", 0x1000, "banked_south", "south")])
+
+            def other_bank_name():
+                state["overlay"] = report(plain + [banks[0], ("bankB", 0x1000, "banked_north", "south")])
+
+            def credited_to_builder():
+                state["overlay"] = report(plain + [banks[0], ("ram", 0x1000, "builder", "south")])
+
+            def other_offset():
+                state["overlay"] = report(plain + [banks[0], ("bankB", 0x1010, "banked_south", "south")])
+
+            def lost_plain_string():
+                state["overlay"] = report(plain[1:] + banks)
+
+            breaks = {
+                "banks merged into one space": merged,
+                "bank string credited to the other bank's function": other_bank_name,
+                "bank string credited to the default space": credited_to_builder,
+                "bank function not at the shared offset": other_offset,
+                "default-space string lost": lost_plain_string,
+                "overlay check missing from the marker": lambda: state.update(
+                    marker=state["marker"].replace(" overlays=true", "")),
+                "overlay report missing": lambda: state.update(write_overlay=False),
+            }
+            with patch.object(verify_ghidra, "measured_run", run):
+                reset()
+                self.assertEqual(check()["overlay_spaces"], ["bankA", "bankB"])
+                for name, damage in breaks.items():
+                    with self.subTest(case=name):
+                        reset()
+                        damage()
+                        with self.assertRaisesRegex(RuntimeError, "stack-string|overlay-space"):
+                            check()
+
     def test_uncached_run_rejects_unnecessary_traces(self):
         with tempfile.TemporaryDirectory() as directory:
             prefix, log = Path(directory) / "uncached", Path(directory) / "uncached.log"

@@ -16,6 +16,7 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
+import binaryrat.EntryAddress;
 import binaryrat.StackStrings;
 import ghidra.app.cmd.function.NewFunctionStackAnalysisCmd;
 import ghidra.app.script.GhidraScript;
@@ -52,8 +53,11 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 		}
 		String[] args = getScriptArgs();
 		Path output = args.length == 1 ? Path.of(args[0]).toAbsolutePath().normalize() : null;
-		if (args.length > 1 || output != null && Files.exists(output, LinkOption.NOFOLLOW_LINKS)) {
-			throw new IllegalArgumentException("optional argument: a new REPORT_JSON path");
+		// The overlay-bank report goes beside it, for the Python decoder to check as well.
+		Path overlayOutput = output == null ? null : output.resolveSibling(output.getFileName() + ".overlays.json");
+		if (args.length > 1 || output != null && (Files.exists(output, LinkOption.NOFOLLOW_LINKS) ||
+			Files.exists(overlayOutput, LinkOption.NOFOLLOW_LINKS))) {
+			throw new IllegalArgumentException("optional argument: a new REPORT_JSON path (and no REPORT_JSON.overlays.json)");
 		}
 		var language = DefaultLanguageService.getLanguageService().getLanguage(new LanguageID("x86:LE:64:default"));
 		program = new ProgramDB("BinaryRat disposable stack-string fixture", language,
@@ -75,13 +79,15 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 			require(checks > 20, "too few cancellation checks: " + checks);
 			cancellation(checks);
 			programChange(checks);
+			JsonObject overlay = overlays(report);
 			if (output != null) {
-				Files.writeString(output, new GsonBuilder().serializeNulls().setPrettyPrinting().create()
-					.toJson(report) + "\n", StandardCharsets.UTF_8);
+				var gson = new GsonBuilder().serializeNulls().setPrettyPrinting().create();
+				Files.writeString(output, gson.toJson(report) + "\n", StandardCharsets.UTF_8);
+				Files.writeString(overlayOutput, gson.toJson(overlay) + "\n", StandardCharsets.UTF_8);
 			}
 			println("BINARYRAT_STACK_STRINGS_OK strings=" + report.getAsJsonArray("strings").size() +
 				" checks=" + checks + " joins=true calls=true read_only=true limits=true cancellation=true" +
-				" program_change=true deterministic=true table=" + table);
+				" program_change=true deterministic=true overlays=true table=" + table);
 		}
 		finally {
 			program.release(this);
@@ -345,6 +351,124 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 			changing.cancelInstead = false;
 			expect(IllegalStateException.class, () -> StackStrings.recover(program, null, 4, 100, changing));
 		}
+	}
+
+	/**
+	 * Overlay spaces hold the same offsets as each other and as the default space: builder at
+	 * ram:1000, bankA::1000 and bankB::1000 must be three separate engine groups in one batch,
+	 * each string credited to its own function and space. Runs last: it adds two functions.
+	 */
+	private JsonObject overlays(JsonObject plain) throws Exception {
+		var flat = new FlatProgramAPI(program, monitor);
+		var ram = program.getAddressFactory().getDefaultAddressSpace();
+		String[] texts = { "north", "south" };
+		Function[] banked = new Function[texts.length];
+		int transaction = program.startTransaction("Add overlay banks at the builder's offset");
+		boolean commit = false;
+		try {
+			for (int index = 0; index < texts.length; index++) {
+				var block = program.getMemory().createInitializedBlock("bank" + (char) ('A' + index),
+					ram.getAddress(0x1000), 0x40, (byte) 0xcc, monitor, true);
+				block.setExecute(true);
+				Address entry = block.getStart();
+				require(block.isOverlay() && entry.getOffset() == builder.getEntryPoint().getOffset() &&
+					!entry.getAddressSpace().equals(ram), "bank " + index + " is not an overlay at 0x1000: " + entry);
+				byte[] text = texts[index].getBytes(StandardCharsets.US_ASCII);
+				program.getMemory().setBytes(entry, HexFormat.of().parseHex(
+					"554889e5" +                                                   // push rbp; mov rbp,rsp
+					"c745f0" + HexFormat.of().formatHex(text, 0, 4) +             // mov dword [rbp-0x10]
+					"66c745f4" + HexFormat.of().formatHex(text, 4, 5) + "00" +    // mov word [rbp-0x0c], "h\0"
+					"5dc3"));                                                      // pop rbp; ret
+				require(flat.disassemble(entry), "could not disassemble bank " + index);
+				banked[index] = flat.createFunction(entry, "banked_" + texts[index]);
+				require(banked[index] != null &&
+					new NewFunctionStackAnalysisCmd(entry, true).applyTo(program, monitor),
+					"could not create the function in bank " + index);
+			}
+			commit = true;
+		}
+		finally {
+			program.endTransaction(transaction, commit);
+		}
+		// The headless scripts' entry selector: HEX is the default space, SPACE:HEX (or SPACE::HEX,
+		// as Ghidra shows overlay addresses) any memory space; banked code may repeat names too.
+		String bankA = banked[0].getEntryPoint().getAddressSpace().getName();
+		String bankB = banked[1].getEntryPoint().getAddressSpace().getName();
+		var functions = program.getFunctionManager();
+		require(functions.getFunctionAt(EntryAddress.parse(program, "1000")) == builder &&
+			functions.getFunctionAt(EntryAddress.parse(program, ram.getName() + ":0x1000")) == builder &&
+			functions.getFunctionAt(EntryAddress.parse(program, bankA + ":1000")) == banked[0] &&
+			functions.getFunctionAt(EntryAddress.parse(program, bankA + "::00001000")) == banked[0] &&
+			functions.getFunctionAt(EntryAddress.parse(program, bankB + ":0X1000")) == banked[1] &&
+			EntryAddress.parse(program, "ffffffffffffffff").getOffset() == -1L,
+			"entry selectors in overlay spaces");
+		for (String bad : new String[] { "nosuch:1000", "register:0", "unique:1000", bankA + ":", ":1000",
+			bankA + ":1000:", bankA + ":::1000", "bank A:1000", "10000000000000000", "name:x", "", "0x" }) {
+			expect(IllegalArgumentException.class, () -> EntryAddress.parse(program, bad));
+		}
+		JsonObject report = StackStrings.recover(program, null, 4, StackStrings.DEFAULT_FUNCTIONS, monitor);
+		require(report.get("functions_scanned").getAsInt() == plain.get("functions_scanned").getAsInt() + 2,
+			"overlay functions not scanned: " + report.get("functions_scanned"));
+		require(StackStrings.recover(program, null, 4, StackStrings.DEFAULT_FUNCTIONS, monitor).equals(report),
+			"a second overlay run gave a different report");
+		List<String> found = strings(report);
+		require(found.containsAll(strings(plain)) && found.size() == strings(plain).size() + texts.length,
+			"overlay functions changed the default-space strings: " + found);
+		for (int index = 0; index < texts.length; index++) {
+			String space = banked[index].getEntryPoint().getAddressSpace().getName();
+			int matches = 0;
+			for (JsonElement element : report.getAsJsonArray("strings")) {
+				JsonObject item = element.getAsJsonObject();
+				if (!item.get("text").getAsString().equals(texts[index])) {
+					continue;
+				}
+				matches++;
+				JsonObject function = item.getAsJsonObject("function");
+				require(function.get("name").getAsString().equals("banked_" + texts[index]) &&
+					function.get("address_space").getAsString().equals(space) &&
+					function.get("address").getAsString().equals("1000") &&
+					item.get("address_space").getAsString().equals(space) &&
+					item.get("address").getAsString().equals("1004") && item.get("terminated").getAsBoolean(),
+					"\"" + texts[index] + "\" credited to the wrong function or space: " + item);
+				for (JsonElement write : item.getAsJsonArray("writes")) {
+					require(write.getAsJsonObject().get("address_space").getAsString().equals(space),
+						"\"" + texts[index] + "\" cites a write outside " + space + ": " + item);
+				}
+			}
+			require(matches == 1, "\"" + texts[index] + "\" found " + matches + " times");
+			JsonObject one = StackStrings.recover(program, banked[index], 4, 1, monitor);
+			require(one.getAsJsonObject("function").get("address_space").getAsString().equals(space) &&
+				strings(one).equals(List.of("banked_" + texts[index] + " -24 " + texts[index] + " ascii true")),
+				"selected overlay function " + index + ": " + strings(one));
+		}
+		// The installed table resolves each row's address in the string's own space.
+		Class<?> table;
+		try {
+			table = Class.forName(TABLE, true, ClassLoader.getSystemClassLoader());
+		}
+		catch (ClassNotFoundException missing) {
+			return report;
+		}
+		List<?> rows;
+		try {
+			rows = (List<?>) table.getMethod("rows", Program.class, JsonObject.class).invoke(null, program, report);
+		}
+		catch (InvocationTargetException failure) {
+			throw new IOException("overlay table rows failed", failure.getCause());
+		}
+		for (int index = 0; index < texts.length; index++) {
+			Address expected = banked[index].getEntryPoint().add(4);
+			int matches = 0;
+			for (Object row : rows) {
+				if (String.valueOf(row).contains("text=\"" + texts[index] + "\"")) {
+					matches++;
+					require(row.getClass().getMethod("address").invoke(row).equals(expected),
+						"overlay table row at the wrong address: " + row);
+				}
+			}
+			require(matches == 1, "overlay table rows for \"" + texts[index] + "\": " + matches);
+		}
+		return report;
 	}
 
 	/** Checks the desktop formatting when BinaryRat.jar is installed; a checkout run has no table. */

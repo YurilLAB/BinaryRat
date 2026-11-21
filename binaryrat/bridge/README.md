@@ -156,8 +156,11 @@ in ascending address order. [LLVM harness and evidence](../docs/evidence/llvm19-
 
 ### Read-only layout evidence
 
-Run `BinaryRatRecoverLayouts.java OUTPUT_JSON ENTRY_HEX|name:FUNCTION PARAM_INDEX
-[TIMEOUT_SECONDS] [FOLLOW_DEPTH=0]` as a headless postScript after auto-analysis. The zero-based
+Run `BinaryRatRecoverLayouts.java OUTPUT_JSON ENTRY_HEX|SPACE:HEX|name:FUNCTION PARAM_INDEX
+[TIMEOUT_SECONDS] [FOLLOW_DEPTH=0]` as a headless postScript after auto-analysis.
+`ENTRY_HEX` is in the default address space; `SPACE:HEX` (or Ghidra's `SPACE::HEX`)
+selects a function in another, such as an overlay bank whose function names
+repeat. The other headless scripts below take the same selector. The zero-based
 parameter selection declares the object base to analyze. The extractor
 decompiles under a CPU and memory lease and follows supported pointer
 expressions to high p-code loads and stores. Each proposed byte range carries
@@ -177,7 +180,7 @@ keeps all equally short incoming call paths, and bounds the total decompiles,
 p-code operations, and evidence. At depths above 1 the call records include the
 caller and hop for reconstruction.
 
-`BinaryRatSolveLayouts.java OUTPUT_JSON ENTRY_HEX|name:FUNCTION PARAM_INDEX
+`BinaryRatSolveLayouts.java OUTPUT_JSON ENTRY_HEX|SPACE:HEX|name:FUNCTION PARAM_INDEX
 [TIMEOUT_SECONDS] [MAX_SUMMARIES=32]` replaces the depth limit with summaries.
 It decompiles each reached function parameter once and records direct calls
 that pass the parameter plus an exact constant, matching a CALL input's
@@ -249,7 +252,7 @@ function, an unsupported caller (thunk, external, uninitialized or above
 64 KiB), a failed decompilation, a call the decompiler does not show, or a
 caller past the decompile limit.
 
-Headless, `BinaryRatCallSites.java OUTPUT_JSON ENTRY_HEX|name:FUNCTION
+Headless, `BinaryRatCallSites.java OUTPUT_JSON ENTRY_HEX|SPACE:HEX|name:FUNCTION
 [TIMEOUT_SECONDS] [MAX_SITES=64] [MAX_CALLERS=32]` writes the report
 (`analysis_mode` `read_only_call_sites`) without replacing a file. Each caller
 is decompiled once under a memory-watched lease, the Program revision is
@@ -279,14 +282,17 @@ minimum length, with its stack offset, terminator and the instructions that
 wrote it. Double-click a row to open the first store. Loads from writable
 memory, values pushed with `push`, text decoded in a loop, and stores through
 a pointer that Ghidra did not resolve to the stack are not followed.
+Functions in overlay spaces are scanned too. Overlays repeat the offsets of
+other spaces, so every address in the report names its space.
 
-Headless, `BinaryRatStackStrings.java OUTPUT_JSON [all|ENTRY_HEX|name:FUNCTION
+Headless, `BinaryRatStackStrings.java OUTPUT_JSON [all|ENTRY_HEX|SPACE:HEX|name:FUNCTION
 [MINIMUM_LENGTH=4 [MAX_FUNCTIONS=10000]]]` writes the report (`analysis_mode`
 `read_only_stack_strings`) without replacing a file. The script, PyGhidra
 (`ProgramView.stack_strings`) and `binaryrat-decompile --stack-strings` share
 one Java service, `binaryrat.StackStrings`. `BinaryRatStackStringsProof.java`
 checks stores of every width, joins, calls, read-only and writable loads,
-limits, cancellation and Program changes on a disposable x86-64 Program.
+limits, cancellation, Program changes, and functions at the same offset in two
+overlay spaces and the default space on a disposable x86-64 Program.
 
 ## Scheduled decompilation
 

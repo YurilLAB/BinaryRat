@@ -26,6 +26,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
 import binaryrat.EngineClient;
+import binaryrat.EntryAddress;
 import binaryrat.LayoutEvidence;
 import binaryrat.ScheduledDecompiler;
 import generic.hash.HashUtilities;
@@ -177,7 +178,7 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 		String[] args = getScriptArgs();
 		if (args.length < 3 || args.length > 5) {
 			throw new IllegalArgumentException("Use as a headless postScript: " +
-				"BinaryRatRecoverLayouts.java OUTPUT_JSON ENTRY_HEX|name:FUNCTION " +
+				"BinaryRatRecoverLayouts.java OUTPUT_JSON ENTRY_HEX|SPACE:HEX|name:FUNCTION " +
 				"PARAM_INDEX [TIMEOUT_SECONDS [FOLLOW_DEPTH]]");
 		}
 		int index = Integer.parseInt(args[2]);
@@ -327,7 +328,7 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 				Function candidate = currentProgram.getFunctionManager().getFunctionAt(symbol.getAddress());
 				if (candidate != null) {
 					if (match != null && !match.getEntryPoint().equals(candidate.getEntryPoint())) {
-						throw new IOException("ambiguous function name; select a function entry");
+						throw new IOException("ambiguous function name; select a function entry (SPACE:HEX in an overlay)");
 					}
 					match = candidate;
 				}
@@ -337,15 +338,11 @@ public class BinaryRatRecoverLayouts extends GhidraScript {
 			}
 		}
 		else {
-			if (!selector.matches("[a-fA-F0-9]{1,16}")) {
-				throw new IllegalArgumentException("function entry must be hexadecimal");
+			if (!EntryAddress.matches(selector)) {
+				throw new IllegalArgumentException("function entry must be HEX, SPACE:HEX or name:FUNCTION");
 			}
-			long offset = Long.parseUnsignedLong(selector, 16);
-			Address address = currentProgram.getAddressFactory().getDefaultAddressSpace().getAddress(offset);
-			if (address.getOffset() != offset) {
-				throw new IllegalArgumentException("function entry does not fit the default address space");
-			}
-			Function match = currentProgram.getFunctionManager().getFunctionAt(address);
+			Function match = currentProgram.getFunctionManager().getFunctionAt(
+				EntryAddress.parse(currentProgram, selector));
 			if (match != null) {
 				return match;
 			}

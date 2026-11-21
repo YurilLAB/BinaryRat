@@ -81,6 +81,35 @@ class StackStringsReportTests(unittest.TestCase):
         with self.assertRaisesRegex(StackStringsReportError, "one-function"):
             parse_stack_strings_report(document)
 
+    def test_overlay_spaces_sharing_an_offset_stay_apart(self):
+        # BinaryRatStackStringsProof's overlay banks: bankA::1000 and bankB::1000 beside ram:1000.
+        def banked(space: str, text: str) -> dict:
+            item = _string({"address_space": space, "address": "1000", "name": "banked_" + text}, 0x1004, -24, text)
+            item["address_space"] = item["writes"][0]["address_space"] = space
+            return item
+
+        document = _report()
+        document["strings"] += [banked("bankA", "north"), banked("bankB", "south")]
+        report = parse_stack_strings_report(document)
+        builder, north, south = report.strings[0], report.strings[-2], report.strings[-1]
+        self.assertEqual([item.function for item in (builder, north, south)],
+                         [Address("ram", 0x1000), Address("bankA", 0x1000), Address("bankB", 0x1000)])
+        self.assertEqual(len({item.function for item in (builder, north, south)}), 3)
+        self.assertEqual((north.site, north.writes), (Address("bankA", 0x1004), (Address("bankA", 0x1004),)))
+        lines = explain_stack_strings(report)
+        self.assertIn('bankA:1004  banked_north  stack -0x18  "north"', lines)
+        self.assertIn('bankB:1004  banked_south  stack -0x18  "south"', lines)
+
+        # A one-function report for bankA::1000 must not accept a string from ram:1000.
+        one = _report()
+        one["function"] = {"address_space": "bankA", "address": "1000", "name": "banked_north"}
+        one["functions_scanned"], one["functions_skipped"] = 1, 0
+        one["strings"] = [banked("bankA", "north")]
+        self.assertEqual(parse_stack_strings_report(one).function, Address("bankA", 0x1000))
+        one["strings"].append(_report()["strings"][0])
+        with self.assertRaisesRegex(StackStringsReportError, "one-function"):
+            parse_stack_strings_report(one)
+
     def test_truncated_text(self):
         document = _report()
         item = document["strings"][0]

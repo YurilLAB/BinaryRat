@@ -316,7 +316,9 @@ public final class StackStrings {
 
 		private void finish(Function function, Address start, List<Write> writes, List<Group> groups) {
 			if (start != null && !writes.isEmpty()) {
-				groups.add(new Group(hex(function.getEntryPoint()) + "/" + hex(start), function, writes));
+				// The position in the scan's one list: unique by construction. Offsets are not:
+				// overlay spaces repeat the same ones (ram:1000, bankA::1000, bankB::1000).
+				groups.add(new Group(Integer.toString(groups.size()), function, writes));
 			}
 		}
 
@@ -520,7 +522,11 @@ public final class StackStrings {
 						byId.clear();
 						batchWrites = 0;
 					}
-					byId.put(group.id(), group);
+					// A repeated id would silently replace a group here and pin its strings on
+					// another function; the engine refuses one too, failing the whole scan.
+					if (byId.putIfAbsent(group.id(), group) != null) {
+						throw new IllegalStateException("two stack-string groups share the id " + group.id());
+					}
 					batch.add(groupRequest(group));
 					batchWrites += group.writes().size();
 				}

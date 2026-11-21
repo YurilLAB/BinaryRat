@@ -16,11 +16,11 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
+import binaryrat.EntryAddress;
 import binaryrat.StackStrings;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.script.GhidraScript;
 import ghidra.framework.plugintool.PluginTool;
-import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.Symbol;
@@ -68,7 +68,7 @@ public class BinaryRatStackStrings extends GhidraScript {
 		String[] args = getScriptArgs();
 		if (args.length < 1 || args.length > 4) {
 			throw new IllegalArgumentException("Use as a headless postScript: BinaryRatStackStrings.java " +
-				"OUTPUT_JSON [all|ENTRY_HEX|name:FUNCTION [MINIMUM_LENGTH [MAX_FUNCTIONS]]]");
+				"OUTPUT_JSON [all|ENTRY_HEX|SPACE:HEX|name:FUNCTION [MINIMUM_LENGTH [MAX_FUNCTIONS]]]");
 		}
 		Function function = args.length >= 2 && !args[1].equals("all") ? selectFunction(args[1]) : null;
 		int minimum = args.length >= 3 ? Integer.parseInt(args[2]) : StackStrings.DEFAULT_MINIMUM_LENGTH;
@@ -165,7 +165,7 @@ public class BinaryRatStackStrings extends GhidraScript {
 				Function candidate = currentProgram.getFunctionManager().getFunctionAt(symbol.getAddress());
 				if (candidate != null && !candidate.isExternal()) {
 					if (match != null && !match.getEntryPoint().equals(candidate.getEntryPoint())) {
-						throw new IOException("ambiguous function name; select a function entry");
+						throw new IOException("ambiguous function name; select a function entry (SPACE:HEX in an overlay)");
 					}
 					match = candidate;
 				}
@@ -175,15 +175,11 @@ public class BinaryRatStackStrings extends GhidraScript {
 			}
 		}
 		else {
-			if (!selector.matches("[a-fA-F0-9]{1,16}")) {
-				throw new IllegalArgumentException("function entry must be hexadecimal, name:FUNCTION or all");
+			if (!EntryAddress.matches(selector)) {
+				throw new IllegalArgumentException("function entry must be HEX, SPACE:HEX, name:FUNCTION or all");
 			}
-			long offset = Long.parseUnsignedLong(selector, 16);
-			Address address = currentProgram.getAddressFactory().getDefaultAddressSpace().getAddress(offset);
-			if (address.getOffset() != offset) {
-				throw new IllegalArgumentException("function entry does not fit the default address space");
-			}
-			Function match = currentProgram.getFunctionManager().getFunctionAt(address);
+			Function match = currentProgram.getFunctionManager().getFunctionAt(
+				EntryAddress.parse(currentProgram, selector));
 			if (match != null) {
 				return match;
 			}
