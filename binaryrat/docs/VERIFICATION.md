@@ -48,6 +48,26 @@ Linux and Windows. Besides the native tests and the integration checks above:
 - The Linux and Windows fork builds check that every function prints as a new
   official decompiler process prints it, in any order.
   [Core patch](core-patches/decompiler-join-flush.md)
+- The Linux fork build compiles upstream's own decompiler test program from the
+  patched sources and requires all of its unit tests and data tests to pass,
+  including the test-only Toy processor's join tests.
+
+### How CI stays reliable
+
+- Each job builds and downloads first. Every check after that runs even when an
+  earlier check failed, so one failure never hides another. A check that reads
+  another check's output, such as the analyst commands reading the parity
+  exports, runs only when that check passed.
+- Every command has its own time limit, so a hang fails in its own step.
+- Downloads are pinned by SHA-256 and retried with growing waits
+  (`binaryrat/tools/pinned_download.py`). The Gradle distribution is fetched
+  once with retries before the first build. Tests are never retried.
+- Every job uses the hash-pinned Temurin JDK that the application bundle ships
+  (`binaryrat/tools/install_jdk.py`).
+- `binaryrat/tools/test_ci_workflow.py` fails when CI stops running a verifier,
+  a Python test folder or a native test. It also fails when an action is not
+  pinned to a commit, a command has no time limit, a download skips the pinned
+  helper, or a check can be skipped by an unrelated failure.
 
 ## Timing and memory
 

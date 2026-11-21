@@ -15,9 +15,16 @@ concurrency:
   group: binaryrat-${{ github.run_id }}
   cancel-in-progress: false
 
+# Each job builds and downloads first, then marks itself ready. Every check after
+# that runs even if another check failed, so one red step never hides the rest.
+# Every command has its own timeout, so a hang fails in its own step.
+# Downloads are hash-pinned and retried (binaryrat/tools/pinned_download.py), and
+# binaryrat/tools/test_ci_workflow.py fails if CI stops running a BinaryRat check.
+
 jobs:
   commits:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       revisions: ${{ steps.revisions.outputs.revisions }}
     steps:
@@ -27,6 +34,7 @@ jobs:
           persist-credentials: false
       - id: revisions
         name: Enumerate every new BinaryRat commit
+        timeout-minutes: 5
         env:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
@@ -54,7 +62,7 @@ jobs:
         revision: ${{ fromJSON(needs.commits.outputs.revisions) }}
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # Windows verification takes about 80 minutes; leave room for slower runners.
+    # Windows verification takes 48-83 minutes; leave room for slower runners.
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -62,51 +70,82 @@ jobs:
           ref: ${{ matrix.revision }}
           persist-credentials: false
           fetch-depth: 0
-      - name: Authorship, upstream licenses and dependency integrity
-        run: python binaryrat/tools/check_repository.py --commit HEAD
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
-        with:
-          distribution: temurin
-          java-version: '25'
+      - name: Install the hash-pinned Temurin JDK that the bundle ships
+        timeout-minutes: 10
+        run: python binaryrat/tools/install_jdk.py --github-env
       - if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
       - if: runner.os == 'Linux'
         name: Install compiler and AArch64 cross-toolchain matrix
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu xvfb xauth
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y clang gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu xvfb xauth
       - name: Build native C++ engine
+        timeout-minutes: 10
         run: cmake -S binaryrat -B build/binaryrat
-      - run: cmake --build build/binaryrat --config Release --parallel 2
-      - name: Native C++ tests
-        run: ctest --test-dir build/binaryrat -C Release --output-on-failure
+      - timeout-minutes: 20
+        run: cmake --build build/binaryrat --config Release --parallel 2
       - name: Build and install the offline analyst wheel and benchmark dependencies
+        timeout-minutes: 10
         run: |
           python -m pip wheel --no-deps --wheel-dir build/wheelhouse ./binaryrat/python
           python -m pip install --no-index --find-links build/wheelhouse binaryrat
           python -m pip install -r binaryrat/requirements-test.txt
-      - name: Python API and live native-client tests
-        env:
-          BINARYRAT_ENGINE: ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
-        run: python -m unittest discover -s binaryrat/python/tests -p "test_*.py"
-      - name: Corpus tooling tests
-        run: python -m unittest discover -s binaryrat/tools -p "test_*.py"
-      - name: Integration verifier tests
-        run: python -m unittest discover -s binaryrat/benchmarks -p 'test_*.py'
       - if: runner.os == 'Linux'
         name: GCC, Clang and AArch64 corpus with separate debug oracles
+        timeout-minutes: 20
         run: python binaryrat/tools/build_corpus.py --output build/corpus --toolchain gcc --toolchain clang --toolchain gcc-aarch64
       - if: runner.os == 'Windows'
         name: MSVC PE/PDB corpus with separate debug oracles
+        timeout-minutes: 20
         run: python binaryrat/tools/build_corpus.py --output build/corpus --toolchain msvc
       - name: Download and verify official Ghidra 12.2 baseline
+        timeout-minutes: 15
         run: python binaryrat/tools/fetch_ghidra.py --output build/ghidra
-      - name: Exercise the live Python API and local JVM service
+      - name: Download the pinned Gradle distribution, retrying network failures
+        timeout-minutes: 15
+        shell: python
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          wrapper = str(Path("gradlew.bat" if os.name == "nt" else "gradlew").resolve())
+          subprocess.run([sys.executable, "binaryrat/tools/retry_command.py", "--",
+                          wrapper, "--version", "--no-daemon"], check=True)
+      - id: ready
+        name: Builds and downloads are complete
+        timeout-minutes: 1
+        run: echo "Each check below runs unless setup or a check whose output it reads failed."
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Authorship, upstream licenses and dependency integrity
+        timeout-minutes: 10
+        run: python binaryrat/tools/check_repository.py --commit HEAD
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Native C++ tests
+        timeout-minutes: 20
+        run: ctest --test-dir build/binaryrat -C Release --output-on-failure --timeout 600
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Python API and live native-client tests
+        timeout-minutes: 20
+        env:
+          BINARYRAT_ENGINE: ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
+        run: python -m unittest discover -s binaryrat/python/tests -p "test_*.py"
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Corpus, download and CI coverage tooling tests
+        timeout-minutes: 10
+        run: python -m unittest discover -s binaryrat/tools -p "test_*.py"
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Integration verifier tests
+        timeout-minutes: 15
+        run: python -m unittest discover -s binaryrat/benchmarks -p 'test_*.py'
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Exercise the live Python API and local JVM service
+        timeout-minutes: 20
         env:
           BINARYRAT_GHIDRA_INSTALL_DIR: ${{ github.workspace }}/build/ghidra/ghidra_12.2_PUBLIC
         shell: python
@@ -119,10 +158,14 @@ jobs:
                           "--find-links", str(wheels), "pyghidra==3.2.0"], check=True)
           subprocess.run([sys.executable, "-m", "unittest", "discover",
                           "-s", "binaryrat/python/tests", "-p", "test_live_ghidra.py"], check=True)
-      - name: Verify p-code layouts against separate DWARF and PDB oracles
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        id: accuracy
+        name: Verify p-code layouts against separate DWARF and PDB oracles
+        timeout-minutes: 20
         run: python binaryrat/benchmarks/verify_type_accuracy.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report/type-accuracy --engine ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
-      - if: runner.os == 'Linux'
+      - if: ${{ runner.os == 'Linux' && !cancelled() && steps.accuracy.outcome == 'success' }}
         name: Record confidence calibration coverage for the packed-layout cohort
+        timeout-minutes: 10
         shell: bash
         run: |
           python binaryrat/benchmarks/stage_packed_calibration.py \
@@ -132,37 +175,56 @@ jobs:
           python binaryrat/benchmarks/calibrate_type_confidence.py \
             --input build/ghidra-report/type-accuracy/packed-cases.json \
             > build/ghidra-report/type-accuracy/confidence.json
-      - name: Verify Itanium and MSVC C++ RTTI recovery
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Verify Itanium and MSVC C++ RTTI recovery
+        timeout-minutes: 20
         run: python binaryrat/benchmarks/verify_rtti.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report/rtti
-      - if: runner.os == 'Linux'
+      - if: ${{ runner.os == 'Linux' && !cancelled() && steps.ready.outcome == 'success' }}
         name: Verify bounded multi-hop layout recovery on x86-64 and AArch64
+        timeout-minutes: 20
         shell: bash
         run: |
           python binaryrat/benchmarks/verify_interprocedural_layout.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --engine build/binaryrat/binaryrat-engine --output build/ghidra-report/interprocedural-x86-64
           python binaryrat/benchmarks/verify_interprocedural_layout.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --engine build/binaryrat/binaryrat-engine --output build/ghidra-report/interprocedural-aarch64 --cc aarch64-linux-gnu-gcc --strip aarch64-linux-gnu-strip
-      - if: runner.os == 'Linux'
+      - if: ${{ runner.os == 'Linux' && !cancelled() && steps.ready.outcome == 'success' }}
         name: Verify summary-based layout recovery through call cycles on x86-64 and AArch64
+        timeout-minutes: 20
         shell: bash
         run: |
           python binaryrat/benchmarks/verify_summary_layout.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --engine build/binaryrat/binaryrat-engine --output build/ghidra-report/summary-x86-64
           python binaryrat/benchmarks/verify_summary_layout.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --engine build/binaryrat/binaryrat-engine --output build/ghidra-report/summary-aarch64 --cc aarch64-linux-gnu-gcc --strip aarch64-linux-gnu-strip
-      - name: Build and verify the installable BinaryRat extension
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        id: extension_build
+        name: Build the installable BinaryRat extension
+        timeout-minutes: 20
         env:
           GHIDRA_INSTALL_DIR: ${{ github.workspace }}/build/ghidra/ghidra_12.2_PUBLIC
           BINARYRAT_ENGINE: ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
         shell: python
         run: |
-          import os, subprocess, sys
+          import os, subprocess
           from pathlib import Path
           wrapper = str(Path("gradlew.bat" if os.name == "nt" else "gradlew").resolve())
           subprocess.run([wrapper, "-p", "binaryrat/bridge", "--no-daemon", "buildExtension",
                           "-PbinaryratEngine=" + os.environ["BINARYRAT_ENGINE"]], check=True)
+      - if: ${{ !cancelled() && steps.extension_build.outcome == 'success' }}
+        id: extension
+        name: Verify the installed extension on official Ghidra
+        timeout-minutes: 30
+        env:
+          GHIDRA_INSTALL_DIR: ${{ github.workspace }}/build/ghidra/ghidra_12.2_PUBLIC
+        shell: python
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
           archive, = Path("binaryrat/bridge/dist").glob("BinaryRat-ghidra-*.zip")
           subprocess.run([sys.executable, "binaryrat/benchmarks/verify_extension.py",
                           "--ghidra", os.environ["GHIDRA_INSTALL_DIR"], "--archive", str(archive),
                           "--corpus", "build/corpus/manifest.json",
                           "--output", "build/ghidra-report/extension"], check=True)
-      - name: Recover a layout at the CodeBrowser cursor and navigate to its evidence
+      - if: ${{ !cancelled() && steps.extension_build.outcome == 'success' }}
+        name: Recover a layout at the CodeBrowser cursor and navigate to its evidence
+        timeout-minutes: 20
         shell: python
         run: |
           import os, subprocess, sys
@@ -180,23 +242,28 @@ jobs:
             binaryrat/bridge/dist/BinaryRat-ghidra-*.zip
             binaryrat/bridge/dist/BinaryRat-ghidra-*.zip.sha256
           if-no-files-found: error
-      - if: runner.os == 'Linux'
+      - if: ${{ runner.os == 'Linux' && !cancelled() && steps.ready.outcome == 'success' }}
         name: Verify exact stock output on the pinned LLVM 19 large-binary sample
+        timeout-minutes: 20
         shell: bash
         run: |
-          mkdir -p build/llvm19-fixture
           archive=build/llvm19-fixture/libllvm19.deb
           library=build/llvm19-fixture/libLLVM.so.19.1
-          curl --fail --silent --show-error --location --retry 3 --output "$archive" \
-            'https://deb.debian.org/debian/pool/main/l/llvm-toolchain-19/libllvm19_19.1.7-3+b1_amd64.deb'
-          echo "db0d614d61345ca710fb73e75105f1ec6e38898fa7b3aa99fa7eb7d8b0a11d57  $archive" | sha256sum --check -
+          python binaryrat/tools/pinned_download.py --output "$archive" \
+            --url 'https://deb.debian.org/debian/pool/main/l/llvm-toolchain-19/libllvm19_19.1.7-3+b1_amd64.deb' \
+            --sha256 db0d614d61345ca710fb73e75105f1ec6e38898fa7b3aa99fa7eb7d8b0a11d57
           dpkg-deb --fsys-tarfile "$archive" | tar -xOf - ./usr/lib/x86_64-linux-gnu/libLLVM.so.19.1 >"$library"
           python binaryrat/benchmarks/verify_large_llvm.py \
             --library "$library" --ghidra build/ghidra/ghidra_12.2_PUBLIC \
             --engine build/binaryrat/binaryrat-engine --output build/ghidra-report/llvm19
-      - name: Stock versus BinaryRat Ghidra integration and benchmark evidence
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        id: parity
+        name: Stock versus BinaryRat Ghidra integration and benchmark evidence
+        timeout-minutes: 110
         run: python binaryrat/benchmarks/verify_ghidra.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report --workers 1 2 4 --repetitions 1 --engine ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
-      - name: Verify BinaryRat analyst commands against real exports and layout evidence
+      - if: ${{ !cancelled() && steps.parity.outcome == 'success' && steps.extension.outcome == 'success' }}
+        name: Verify BinaryRat analyst commands against real exports and layout evidence
+        timeout-minutes: 15
         run: python binaryrat/benchmarks/verify_analyst_tools.py --exports-dir build/ghidra-report --layout build/ghidra-report/extension/installed-layout.json --output build/ghidra-report/analyst-tools.json
       - if: runner.os == 'Linux'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -204,7 +271,9 @@ jobs:
           name: binaryrat-analyst-wheel-${{ matrix.revision }}
           path: build/wheelhouse/binaryrat-*-py3-none-any.whl
           if-no-files-found: error
-      - name: Reopen a cached Ghidra project after an offline edit
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Reopen a cached Ghidra project after an offline edit
+        timeout-minutes: 20
         env:
           BINARYRAT_ENGINE: ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
         shell: python
@@ -213,7 +282,9 @@ jobs:
           subprocess.run([sys.executable, "binaryrat/benchmarks/verify_cache_reopen.py",
               "--engine", os.environ["BINARYRAT_ENGINE"], "--ghidra", "build/ghidra/ghidra_12.2_PUBLIC",
               "--corpus", "build/corpus/manifest.json", "--output", "build/ghidra-report/cache-reopen"], check=True)
-      - name: Native artifact roundtrip, restart and invalidation benchmark
+      - if: ${{ !cancelled() && steps.parity.outcome == 'success' }}
+        name: Native artifact roundtrip, restart and invalidation benchmark
+        timeout-minutes: 15
         env:
           BINARYRAT_ENGINE: ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
         shell: python
@@ -239,7 +310,8 @@ jobs:
       matrix:
         revision: ${{ fromJSON(needs.commits.outputs.revisions) }}
     runs-on: windows-latest
-    timeout-minutes: 90
+    # Recent runs took 37-61 minutes, most of it in the parity step.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -248,31 +320,45 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
-        with:
-          distribution: temurin
-          java-version: '25'
+      - name: Install the hash-pinned Temurin JDK that the bundle ships
+        timeout-minutes: 10
+        run: python binaryrat/tools/install_jdk.py --github-env
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
       - name: Build host-native C++ engine for cross-target import tests
+        timeout-minutes: 10
         run: cmake -S binaryrat -B build/binaryrat
-      - run: cmake --build build/binaryrat --config Release --parallel 2
+      - timeout-minutes: 20
+        run: cmake --build build/binaryrat --config Release --parallel 2
       - name: Install Python API and pinned benchmark dependencies
+        timeout-minutes: 10
         run: python -m pip install -e binaryrat/python -r binaryrat/requirements-test.txt
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: amd64_arm64
       - name: Compile and strip real AArch64 PE/PDB fixture pairs
+        timeout-minutes: 20
         run: python binaryrat/tools/build_corpus.py --output build/corpus --toolchain msvc-aarch64
       - name: Download and verify official Ghidra 12.2 baseline
+        timeout-minutes: 15
         run: python binaryrat/tools/fetch_ghidra.py --output build/ghidra
-      - name: Verify AArch64 p-code layouts against separate PDB oracles
+      - id: ready
+        name: Builds and downloads are complete
+        timeout-minutes: 1
+        run: echo "Each check below runs unless setup failed."
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Verify AArch64 p-code layouts against separate PDB oracles
+        timeout-minutes: 20
         run: python binaryrat/benchmarks/verify_type_accuracy.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report/type-accuracy --engine ${{ github.workspace }}/build/binaryrat/Release/binaryrat-engine.exe
-      - name: Verify AArch64 MSVC C++ RTTI recovery
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Verify AArch64 MSVC C++ RTTI recovery
+        timeout-minutes: 20
         run: python binaryrat/benchmarks/verify_rtti.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report/rtti
-      - name: Import AArch64 PE and verify stock versus parallel output
-        run: python binaryrat/benchmarks/verify_ghidra.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report --workers 1 2 4 --repetitions 1 --engine ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Import AArch64 PE and verify stock versus parallel output
+        timeout-minutes: 100
+        run: python binaryrat/benchmarks/verify_ghidra.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report --workers 1 2 4 --repetitions 1 --engine ${{ github.workspace }}/build/binaryrat/Release/binaryrat-engine.exe
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -299,68 +385,48 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
-      - name: Install the hash-pinned Temurin JDK from its portable archive
-        shell: python
-        run: |
-          import hashlib, os, subprocess, tarfile
-          from pathlib import Path
-          from zipfile import ZipFile
-          windows = os.name == "nt"
-          if windows:
-              filename = "OpenJDK25U-jdk_x64_windows_hotspot_25.0.5.1_2.zip"
-              expected = "849d380ab0a64d9098e7d3a2de28beb73841c3b255c8284f019ccd8748c5eb5b"
-          else:
-              filename = "OpenJDK25U-jdk_x64_linux_hotspot_25.0.5.1_2.tar.gz"
-              expected = "760f91b22c3efc9bd1b64ff950598231be82928cc807e30691a0e7a2995a62c0"
-          runtime = Path(os.environ["RUNNER_TEMP"]) / "binaryrat-jdk"
-          runtime.mkdir(parents=True, exist_ok=True)
-          archive = runtime / filename
-          url = "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5.1%2B2/" + archive.name
-          subprocess.run(["curl.exe" if windows else "curl", "--fail", "--silent", "--show-error", "--location", "--retry", "3",
-                          "--output", str(archive), url], check=True)
-          with archive.open("rb") as source:
-              digest = hashlib.file_digest(source, "sha256").hexdigest()
-          if digest != expected:
-              raise SystemExit("Temurin archive SHA-256 verification failed")
-          if windows:
-              with ZipFile(archive) as package:
-                  package.extractall(runtime)
-          else:
-              with tarfile.open(archive, "r:gz") as package:
-                  package.extractall(runtime, filter="data")
-          archive.unlink()
-          java_home = runtime / "jdk-25.0.5.1+2"
-          javac = "javac.exe" if windows else "javac"
-          if not (java_home / "bin" / javac).is_file():
-              raise SystemExit("Pinned Temurin archive did not contain javac")
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
-              print(f"JAVA_HOME={java_home}", file=env)
-          with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as path:
-              print(java_home / "bin", file=path)
+      - name: Install the hash-pinned Temurin JDK that the bundle ships
+        timeout-minutes: 10
+        run: python binaryrat/tools/install_jdk.py --github-env
       - if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
       - if: runner.os == 'Linux'
         name: Install native source-build prerequisites
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential bison flex zip unzip xvfb xauth
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y build-essential bison flex zip unzip xvfb xauth
+      - name: Download the pinned Gradle distribution, retrying network failures
+        timeout-minutes: 15
+        shell: python
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          wrapper = str(Path("gradlew.bat" if os.name == "nt" else "gradlew").resolve())
+          subprocess.run([sys.executable, "binaryrat/tools/retry_command.py", "--",
+                          wrapper, "--version", "--no-daemon"], check=True)
       - if: runner.os == 'Linux'
         name: Fetch upstream source-build dependencies
+        timeout-minutes: 20
         run: ./gradlew -I gradle/support/fetchDependencies.gradle -DhideDownloadProgress -DnoEclipse --no-daemon
       - if: runner.os == 'Windows'
         name: Fetch upstream source-build dependencies
+        timeout-minutes: 20
         shell: pwsh
         run: .\gradlew.bat -I gradle/support/fetchDependencies.gradle -DhideDownloadProgress -DnoEclipse --no-daemon
       - if: runner.os == 'Linux'
         name: Build complete Ghidra fork using its pinned Gradle wrapper
+        timeout-minutes: 45
         run: ./gradlew buildGhidra --parallel --max-workers=2 --no-daemon
       - if: runner.os == 'Windows'
         name: Build complete Ghidra fork using its pinned Gradle wrapper
+        timeout-minutes: 45
         shell: pwsh
         run: .\gradlew.bat buildGhidra --parallel --max-workers=2 --no-daemon
       - name: Prepare the official baseline and this commit's source distribution
+        timeout-minutes: 15
         shell: python
         run: |
           import os, subprocess, sys
@@ -376,28 +442,47 @@ jobs:
           candidate, = dest.glob("ghidra_*")
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
               print(f"BINARYRAT_CANDIDATE={candidate.resolve()}", file=env)
-      - name: Open a saved Ghidra investigation and load an unchanged stock-built plugin
+      - id: ready
+        name: Builds and downloads are complete
+        timeout-minutes: 1
+        run: echo "Each check below runs unless setup or a check whose output it reads failed."
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Open a saved Ghidra investigation in the source-built fork
+        timeout-minutes: 20
         shell: python
         env:
           EXPECTED_REVISION: ${{ matrix.revision }}
         run: |
           import os, subprocess, sys
-          common = ["--stock-ghidra", "build/ghidra-stock/ghidra_12.2_PUBLIC",
-                    "--candidate-ghidra", os.environ["BINARYRAT_CANDIDATE"]]
-          subprocess.run([sys.executable, "binaryrat/benchmarks/verify_project_interop.py", *common,
+          subprocess.run([sys.executable, "binaryrat/benchmarks/verify_project_interop.py",
+                          "--stock-ghidra", "build/ghidra-stock/ghidra_12.2_PUBLIC",
+                          "--candidate-ghidra", os.environ["BINARYRAT_CANDIDATE"],
                           "--candidate-revision", os.environ["EXPECTED_REVISION"],
                           "--output", "build/reports/project-interop"], check=True)
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Load an unchanged stock-built plugin in the source-built fork
+        timeout-minutes: 20
+        shell: python
+        env:
+          EXPECTED_REVISION: ${{ matrix.revision }}
+        run: |
+          import os, subprocess, sys
           display = [] if os.name == "nt" else ["xvfb-run", "-a"]
           subprocess.run([*display, sys.executable, "binaryrat/benchmarks/verify_plugin_compatibility.py",
-                          *common, "--candidate-revision", os.environ["EXPECTED_REVISION"],
+                          "--stock-ghidra", "build/ghidra-stock/ghidra_12.2_PUBLIC",
+                          "--candidate-ghidra", os.environ["BINARYRAT_CANDIDATE"],
+                          "--candidate-revision", os.environ["EXPECTED_REVISION"],
                           "--output", "build/reports/plugin-compatibility"], check=True)
-      - if: runner.os == 'Linux'
+      - if: ${{ runner.os == 'Linux' && !cancelled() && steps.ready.outcome == 'success' }}
         name: Compare stock and source-built no-return analyzer effects
+        timeout-minutes: 25
         shell: bash
         run: |
           python binaryrat/benchmarks/verify_no_return.py --stock-ghidra build/ghidra-stock/ghidra_12.2_PUBLIC --candidate-ghidra "$BINARYRAT_CANDIDATE" --output build/reports/no-return-parity
           python binaryrat/benchmarks/benchmark_no_return.py --stock-ghidra build/ghidra-stock/ghidra_12.2_PUBLIC --candidate-ghidra "$BINARYRAT_CANDIDATE" --output build/reports/no-return-timing --timeout 150
-      - name: Check that source-built decompiler output does not depend on decompile order
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Check that source-built decompiler output does not depend on decompile order
+        timeout-minutes: 20
         shell: python
         run: |
           import os, subprocess, sys
@@ -405,7 +490,31 @@ jobs:
                           "--stock-ghidra", "build/ghidra-stock/ghidra_12.2_PUBLIC",
                           "--candidate-ghidra", os.environ["BINARYRAT_CANDIDATE"],
                           "--output", "build/reports/decompile-order"], check=True)
-      - name: Compile and test the bundled engine and extension
+      - if: ${{ runner.os == 'Linux' && !cancelled() && steps.ready.outcome == 'success' }}
+        name: Run upstream's decompiler unit and data tests on the patched native decompiler
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          # The join-flush core patch changes translate.cc, translate.hh and ghidra_process.cc.
+          # buildGhidra compiled every processor's .sla in the tree, including the test-only Toy.
+          root=build/decompiler-tests
+          mkdir -p "$root" build/reports
+          cp -r Ghidra/Features/Decompiler/src/decompile/{cpp,unittests,datatests} "$root"/
+          cd "$root/cpp"
+          # The parsers are generated and checked in; the BFD loader only reads raw files
+          # for the interactive console, so the test binary is built without it.
+          touch -- *.cc *.hh
+          rm -f bfd_arch.cc loadimage_bfd.cc codedata.cc analyzesigs.cc
+          sed -i 's/\r$//' ../datatests/*.xml
+          make -j2 decomp_test_dbg BFDLIB=
+          # The exit code is the number of failed tests.
+          ./decomp_test_dbg -sleighpath "$GITHUB_WORKSPACE" -path ../datatests | tee "$GITHUB_WORKSPACE/build/reports/decompiler-tests.log"
+          grep -Eq '^([1-9][0-9]*)/\1 tests passed\.$' "$GITHUB_WORKSPACE/build/reports/decompiler-tests.log"
+          grep -Eq '^Total tests applied = [1-9]' "$GITHUB_WORKSPACE/build/reports/decompiler-tests.log"
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        id: bundle_parts
+        name: Compile and test the bundled engine and extension
+        timeout-minutes: 25
         shell: python
         run: |
           import os, subprocess, sys
@@ -413,7 +522,8 @@ jobs:
           options = ["-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>"] if os.name == "nt" else []
           subprocess.run(["cmake", "-S", "binaryrat", "-B", "build/bundle-engine", *options], check=True)
           subprocess.run(["cmake", "--build", "build/bundle-engine", "--config", "Release", "--parallel", "2"], check=True)
-          subprocess.run(["ctest", "--test-dir", "build/bundle-engine", "-C", "Release", "--output-on-failure"], check=True)
+          subprocess.run(["ctest", "--test-dir", "build/bundle-engine", "-C", "Release", "--output-on-failure",
+                          "--timeout", "600"], check=True)
           engine = Path("build/bundle-engine") / ("Release/binaryrat-engine.exe" if os.name == "nt" else "binaryrat-engine")
           wrapper = str(Path("gradlew.bat" if os.name == "nt" else "gradlew").resolve())
           subprocess.run([wrapper, "-p", "binaryrat/bridge", "--no-daemon", "buildExtension",
@@ -421,7 +531,10 @@ jobs:
                          env=os.environ | {"GHIDRA_INSTALL_DIR": os.environ["BINARYRAT_CANDIDATE"]}, check=True)
           subprocess.run([sys.executable, "-m", "pip", "wheel", "--no-deps", "--wheel-dir", "build/bundle-wheels",
                           "./binaryrat/python"], check=True)
-      - name: Assemble and test the complete BinaryRat application
+      - if: ${{ !cancelled() && steps.bundle_parts.outcome == 'success' }}
+        id: bundle
+        name: Assemble and test the complete BinaryRat application
+        timeout-minutes: 25
         shell: python
         env:
           EXPECTED_REVISION: ${{ matrix.revision }}
@@ -440,10 +553,7 @@ jobs:
                              ["cc", "-std=c11", "-O0", "-s", "-rdynamic", "-o", str(example), str(walkthrough)])
           subprocess.run(compile_example, cwd=example_dir, check=True)
           source = Path("build") / "OpenJDK25U-jdk-sources_25.0.5.1_2.tar.gz"
-          url = "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5.1%2B2/" + source.name
-          curl = "curl.exe" if os.name == "nt" else "curl"
-          subprocess.run([curl, "--fail", "--silent", "--show-error", "--location", "--retry", "3",
-                          "--output", str(source), url], check=True)
+          subprocess.run([sys.executable, "binaryrat/tools/install_jdk.py", "--sources", str(source)], check=True)
           subprocess.run([sys.executable, "binaryrat/distribution/build_bundle.py", "--ghidra", str(ghidra),
                           "--extension", str(extension), "--jdk", os.environ["JAVA_HOME"], "--jdk-source", str(source),
                           "--revision", os.environ["EXPECTED_REVISION"], "--wheel", str(wheel), "--example", str(example),
@@ -454,7 +564,9 @@ jobs:
           display = [] if os.name == "nt" else ["xvfb-run", "-a"]
           subprocess.run([*display, sys.executable, "binaryrat/distribution/verify_workspace.py",
                           "--bundle", "build/br/BinaryRat", "--output", "build/reports/workspace"], check=True)
-      - name: Run bundle tooling and required shared Python service tests
+      - if: ${{ !cancelled() && steps.bundle.outcome == 'success' }}
+        name: Run bundle tooling and required shared Python service tests
+        timeout-minutes: 20
         shell: python
         run: |
           import os, subprocess, sys

@@ -10,8 +10,9 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
-import urllib.request
 import zipfile
+
+from pinned_download import DownloadError, fetch
 
 
 URL = ("https://github.com/NationalSecurityAgency/ghidra/releases/download/"
@@ -52,14 +53,12 @@ def main() -> None:
     args = parser.parse_args()
     output = args.output.resolve()
     archive = args.archive or output.parent / "ghidra_12.2.zip"
-    archive.parent.mkdir(parents=True, exist_ok=True)
-    if args.archive is None and not archive.is_file():
-        # A partial download is never accepted as the cached pinned archive.
-        temporary = archive.with_suffix(".zip.part")
-        with urllib.request.urlopen(URL, timeout=60) as source, temporary.open("wb") as target:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                target.write(chunk)
-        temporary.replace(archive)
+    if args.archive is None:
+        # Retries transient failures; a partial or altered download is never kept.
+        try:
+            fetch(URL, archive, SHA256)
+        except DownloadError as error:
+            raise SystemExit(str(error))
     print(extract_verified(archive, output))
 
 

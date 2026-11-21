@@ -97,6 +97,15 @@ must still show the order effect. Every candidate digest must equal the
 official new-process digest. CI runs it on the Linux and Windows source builds.
 [Headless fixture](../../benchmarks/ghidra_scripts/BinaryRatDecompileOrder.java)
 
+The Linux source build also builds upstream's `decomp_test_dbg` from the
+patched files and runs its 204 unit tests and 733 data tests against the
+`.sla` files compiled in the tree, including the test-only Toy processor that
+`funcproto_join` and `funcproto_nojoin` use. All must pass. The BFD loader is
+left out because only the interactive console uses it. Built from the upstream
+blobs, the same program gives identical results. Making `findAddJoin` add one
+byte per piece fails 4 unit tests. The data tests' multi-line patterns need LF
+line endings, so the step converts its copy.
+
 ## Upstream and removal
 
 [Join allocation](https://github.com/NationalSecurityAgency/ghidra/blob/Ghidra_12.2_build/Ghidra/Features/Decompiler/src/decompile/cpp/translate.cc#L686) ·

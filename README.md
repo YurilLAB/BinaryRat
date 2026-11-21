@@ -36,6 +36,7 @@ Every commit to `master` is built and tested on Linux and Windows.
 - Read-only p-code layout footprints against separate DWARF and PDB ground truth. [Corpus](binaryrat/corpus/README.md)
 - The complete application ZIP for each platform, launched with its bundled JDK to import and decompile an example.
 - The patched no-return analyzer runs faster on a controlled call-heavy fixture. [Analyzer benchmark](binaryrat/docs/core-patches/no-return-candidate-checks.md)
+- Upstream's own decompiler unit and data tests pass on the patched decompiler. [Core patch](binaryrat/docs/core-patches/decompiler-join-flush.md)
 
 ## Documentation
 
