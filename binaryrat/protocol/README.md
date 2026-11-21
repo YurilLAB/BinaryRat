@@ -88,7 +88,9 @@ Schema 1 keys require `schema_version:1`, `ghidra_version:"12.2"`, `program_id`,
 `revision` (nonnegative integer), `address_space`, `address`, `body_sha256`, and
 `options_digest`; the caller vouches that the key names a complete program state.
 The bridge's `revision` is process-local; do not reuse across unrelated imports
-merely because that number matches.
+merely because that number matches. Function bytes and the in-memory modification
+number alone cannot establish correctness across reopen or import, and plain
+exports are evidence artifacts, not reusable decompilations.
 
 Schema 2 keys are live: `schema_version:2`, `ghidra_version`, `kind`,
 `program_id`, `address_space`, `address`, `options_digest`, and no `revision`.

@@ -54,22 +54,9 @@ The Program DB provides no snapshot reads for this design. Ordinary calls take
 short read locks; immutable exported DTOs are results of an optimistic attempt,
 not database snapshots. No correctness claim depends on a stable read epoch.
 
-**Current implementation versus target:** the native artifact server, bounded
-executor, memory-admission executor, preliminary layout-evidence aggregation,
-typed client and headless stock-decompiler adapter exist. The engine's lease
-scheduler admits headless stock decompilations by CPU and RAM, enforces deadlines,
-cancels and per-process resident-memory ceilings, and kills stuck processes. The
-live cache records callback reads, removes entries on mapped Program changes,
-and replays persisted entries before reuse in scheduled headless exports. The
-integration harness compares cold, warm, and reopened exports against fresh
-decompilation. A native summary solver propagates per-parameter layout evidence
-over direct calls through strongly connected components, and withholds cycles
-whose pointer offsets drift. A local PyGhidra service keeps a read-only JVM open
-for scripts; it and the headless script recover summary layouts through one Java
-service and return a validated, versioned report.
-The headless review service can create a new structure after approval through
-a coordinated native transaction. Shared GUI and Python review, applying
-types to existing targets, and per-function memory estimates remain open.
+**Current implementation versus target:** [Gate status](#gate-status) lists what
+exists for each gate and what remains; [Roadmap](#roadmap) gives the order of the
+remaining work.
 
 ## Reuse the existing implementations
 
@@ -80,6 +67,9 @@ types to existing targets, and per-function memory estimates remain open.
 | `FillOutStructureHelper` / `FillOutStructureCmd` | Whole-program summaries, recursive SCC propagation, competing layouts, confidence and evidence |
 | `RecoverClassesFromRTTIScript` and `classrecovery` | Promote audited recovery to registered analysis and reviewable proposals with confidence and native undo |
 | PyGhidra `open_project`, `program_context`, `transaction`, `analyze`, `walk_programs` | Pythonic objects, bulk access, typed/versioned facade and persistent-session transport |
+| BSim, including 12.2's structure reconstruction from a matched program | Signature libraries scored against corpus ground truth; matched structures as one more evidence source |
+| Version Tracking correlators | Patch diffs of stock-verified decompilations, with each match's correlator and score |
+| P-code emulator | Emulator-checked layouts and decoded strings, with the trace as evidence |
 
 `FillOutStructureHelper` already follows some direct calls when supplied a
 `DecompInterface`, with `maxCallDepth = 1` and zero-offset pointer arguments.
@@ -321,6 +311,138 @@ No feature is complete solely because code exists. Automated compatibility or
 accuracy checks and benchmark evidence are required. Small-fixture tests do not
 complete interprocedural recovery, calibrated confidence, native undo integration,
 RAM admission or large-binary performance gates.
+
+## Gate status
+
+Status in November 2026. Done means automated checks or recorded evidence exist.
+[Verification](VERIFICATION.md)
+
+| Gate | Done | Open |
+|---|---|---|
+| 1. Baseline | Hash-pinned Ghidra 12.2 and Temurin JDK; fork source builds on Linux and Windows for every commit; GCC, Clang, AArch64 and MSVC x64/ARM64 corpora with separate DWARF/PDB oracles; byte-exact comparator; whole-program profiler | Calibration families and benchmarks (milestone 1) |
+| 2. Execution | Leases with CPU/RAM admission, deadlines, cancels and resident-memory limits on real decompilations; live cache with replay; `cache-proof` rounds, cold/warm and reopen checks; stock-verified export | Per-function memory estimates; `cache-proof` rounds for options and language/cspec; an injected mid-extraction change |
+| 3. Services/scripting | `SummaryLayouts` and `CallSites` Java services shared by scripts, PyGhidra and the live service; the `DecompilationSession` scheduling service; typed, versioned DTOs; a read-only JVM shared by local clients; analyst commands | One proposal service for GUI and Python review; an agent interface (milestone 2); writable JVM ownership |
+| 4. Types | P-code layout evidence with bounded direct-call forwarding and union views; SCC summary solver; Itanium and MSVC RTTI evidence; calibration evaluator with one source family | Flows through memory and indirect calls; multi-family calibration; a registered RTTI analyzer; summary results in the GUI evidence table and reviewed creation |
+| 5. Application | Reviewed creation of a new structure and a reviewed call-site prototype override, both with native undo | Types applied to existing targets; provenance journal; per-proposal revert |
+| 6. Scale | No-return analyzer core patch, faster on a focused fixture; join-flush core patch; 384-function LLVM parity | A completed whole-program run on a code-heavy 100 MB+ input (the LLVM run reached its deadline); speedup evidence |
+
+## Roadmap
+
+The milestones run in this order and close like the gates: with automated checks
+or recorded evidence. Measurement comes first because calibration, type
+benchmarks and speed claims all depend on it. Speed work stays after types and
+application: no whole-program speed claim is possible until a code-heavy run
+completes. The research listed at the end shows larger gaps in correctness and
+trust: refined output that recompiles but behaves differently, and accuracy
+figures that rely on functions seen in training.
+
+### 1. Measure (gate 1)
+
+- At least five held-out project families for calibration (for example
+  Assemblage builds), with functions deduplicated by hash before the split. Fit
+  scores on validation families (isotonic regression, as XTRIDE does) and report
+  reliability error and precision and recall at fixed thresholds on held-out
+  families.
+- Count evidence once per origin: a propagated summary and the access it came
+  from are not independent support.
+- DecompileBench as a baseline. Stock-verified output equals stock Ghidra, so the
+  scores equal Ghidra's until applied types change the output. The benchmark
+  measures milestone 4, not the export path.
+- Report behavioural divergence of recompiled output from the original binary,
+  not recompile rates alone: LLM refinement raises recompile rates while
+  behaviour drifts.
+- Score call-site and indirect-call evidence on ICALL-BENCH, whose ground truth
+  comes from dynamic profiling.
+- Nightly whole-program profiles of the LLVM library and Godot.
+
+### 2. Agent interface (gate 3)
+
+- A read-only MCP server over the existing `binaryrat-live` service and typed
+  Python API: a few broad tools plus Python, not one tool per query. Add a
+  stack-strings method to the live service first.
+- Binary-derived text (strings, names, comments) is returned as data with its
+  address, never as instructions.
+- Selective retrieval: what changed since the agent's last visit, answered from
+  the dependency-tracked cache.
+- A provenance manifest on every export and report (Ghidra build, analyzer
+  options, input hash), and SARIF output for evidence.
+- Writes come later, only through the milestone 4 review service.
+
+### 3. Types (gate 4)
+
+- Pointers passed through memory and indirect calls, with a subtyping solver in
+  the style of BinSub.
+- Summary-solver results in the CodeBrowser evidence table and in reviewed
+  structure creation.
+- More evidence sources: Ghidra 12.2's BSim structure reconstruction from a
+  matched program, and layout hypotheses checked on the p-code emulator, with
+  the trace as evidence.
+- Promote RTTI evidence to a registered analyzer.
+- Benchmark against TRex and stock structure recovery on the milestone 1 families.
+
+### 4. Application (gate 5)
+
+- Apply reviewed types to existing parameters, variables and fields through one
+  review service for CodeBrowser, Python and agents.
+- Event-driven provenance journal and conflict-aware per-proposal revert.
+- After each applied change, compare with a fresh stock decompilation of the
+  changed Program and rerun the milestone 1 benchmarks.
+
+### 5. Scale (gate 6)
+
+- Finish the no-return candidate on whole programs. Profile the Call-Fixup
+  Installer, and instruction decoding apart from `CodeManager.addInstructions`.
+- Per-function memory estimates for admission.
+- A completed stock-versus-BinaryRat whole-program run on a code-heavy 100 MB+
+  input, with repeated measurements, before any speedup claim.
+
+### 6. Analyst features (new scope)
+
+Each feature proposes facts with evidence and leaves stock output unchanged
+unless an analyst applies a change through review.
+
+- Patch diff: match functions with Version Tracking correlators, then show
+  stock-verified decompilation diffs with each match's correlator and score.
+- Signature libraries built from the corpus (libc, zlib, OpenSSL, Rust std) with
+  measured precision and recall; WARP import and export; a shared BSim database.
+- Mixed boolean-arithmetic simplification over p-code with an equivalence proof
+  attached to every rewrite, shown beside the stock output. Review the license
+  of CoBRA's C++ library before adopting it.
+- Decoded and loop-built strings from the p-code emulator, beyond constant stores.
+- Firmware base-address candidates scored by the pointers they resolve, and SVD
+  peripheral import as a reviewed change.
+- Rust data-layout evidence. Go needs no BinaryRat pass: Ghidra 12.2 already
+  analyzes current Go releases, including Go 1.26.
+
+### Hardening (every milestone)
+
+- Extend the seeded fuzzers to every input BinaryRat parses itself: cache record
+  files, exports, and the reports read by the Python tools.
+- Treat a shared cache directory as untrusted: authenticate records before replay.
+- Import and analyze hostile samples in a resource-capped process without network
+  access.
+- Ship each upstream security release. Ghidra 12.0.3 fixed command execution from
+  annotations in generated comments (CVE-2026-4946); 12.2 fixed path traversal,
+  zip-bomb archives and a debugger connector command injection.
+
+### Not planned
+
+- Machine-learned names or types as evidence. Name-recovery models train on
+  debug information and cannot be checked against the binary; at most they could
+  appear as low-authority suggestions in review.
+- Replacing decompiler output with LLM rewrites. Any rewrite would be an overlay
+  behind the behavioural check.
+- Training binary-similarity models: BSim and WARP cover matching.
+- A collaboration server (Ghidra Server is inherited), VM devirtualization, and
+  .NET, WebAssembly or Dalvik decompilation.
+
+Research behind this order:
+[When LLM decompilers recompile more and preserve less](https://arxiv.org/abs/2609.05370),
+[XTRIDE](https://arxiv.org/abs/2603.08225),
+[ICALL-BENCH](https://arxiv.org/abs/2610.37871),
+[CoBRA](https://blog.trailofbits.com/2026/04/03/simplifying-mba-obfuscation-with-cobra/),
+[CVE-2026-4946](https://nvd.nist.gov/vuln/detail/cve-2026-4946), and the Ghidra 12.2
+change history (GP-6921, BSim structure reconstruction).
 
 ## Pinned source references
 

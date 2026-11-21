@@ -7,6 +7,13 @@ BinaryRat is an open-source reverse-engineering project for Linux and Windows, b
 
 **Standalone BinaryRat previews for Windows x64 and Linux x64.** Verified ZIPs are published on GitHub Releases after both platform builds pass CI. Each ZIP includes the patched Ghidra build, BinaryRat's native engine and compiled extension, the default desktop workspace, JDK 25, and local help with an example binary. Extract the ZIP and launch `binaryrat.bat` on Windows or `./binaryrat` on Linux. [Releases](https://github.com/YurilLAB/BinaryRat/releases)
 
+## Contents
+
+- [What BinaryRat does](#what-binaryrat-does)
+- [What CI verifies](#what-ci-verifies)
+- [Documentation](#documentation)
+- [License](#license)
+
 ## What BinaryRat does
 
 - **Parallel decompilation** schedules native decompiler processes within CPU and memory budgets and enforces per-function deadlines.
@@ -15,20 +22,33 @@ BinaryRat is an open-source reverse-engineering project for Linux and Windows, b
 - **Layout recovery in CodeBrowser** examines a function parameter at the cursor and lets you jump from a proposed field to the load or store that supports it.
 - **C++ recovery** reports Itanium and MSVC class relationships and vtables.
 - **Reviewed type creation** lets an analyst approve a new structure with provenance and native Ghidra undo.
+- **Call sites with arguments** list every call to a function with the values the decompiler proved constant and the strings or symbols they point to.
+- **Stack strings** recover text a function builds on its stack, with the instructions that wrote it.
 - **Call-site corrections** show an instruction's p-code with register names, before and after Listing overrides, and apply or replace a reviewed prototype at one call with native undo. Indirect calls start from the decompiler's view of their arguments.
 - **Desktop and scripting access** provides BinaryRat actions in CodeBrowser, headless exports, and typed Python access through PyGhidra.
 - **BinaryRat analyst tools** compare two decompiler exports with `binaryrat-diff` (`--patch` shows the changed C) and show which instructions support a proposed field with `binaryrat-explain`. Both work offline on saved reports. `binaryrat-decompile` decompiles a function from a saved project, selected by name or by any address inside it.
 
-## Project status
+## What CI verifies
 
-Linux CI checks byte-for-byte stock parity on 384 sampled functions from a 130 MB LLVM library. Stock verification uses a separate serial pass. [Benchmark evidence](binaryrat/docs/evidence/llvm19-linux.md)
+Every commit to `master` is built and tested on Linux and Windows.
 
-The no-return analyzer runs faster on a controlled call-heavy fixture. Whole-program speed on code-heavy binaries, broader type inference, and calibrated confidence remain open. [Analyzer benchmark](binaryrat/docs/core-patches/no-return-candidate-checks.md) · [Architecture and milestones](binaryrat/docs/ARCHITECTURE.md)
+- Byte-for-byte stock parity on 384 sampled functions from a 130 MB LLVM library, checked against a separate serial stock run. [Benchmark evidence](binaryrat/docs/evidence/llvm19-linux.md)
+- Read-only p-code layout footprints against separate DWARF and PDB ground truth. [Corpus](binaryrat/corpus/README.md)
+- The complete application ZIP for each platform, launched with its bundled JDK to import and decompile an example.
+- The patched no-return analyzer runs faster on a controlled call-heavy fixture. [Analyzer benchmark](binaryrat/docs/core-patches/no-return-candidate-checks.md)
 
-## Guides
+## Documentation
 
-- [Build and test BinaryRat](binaryrat/README.md) · [Install the Ghidra extension](binaryrat/bridge/README.md#install-the-extension)
-- [Adopt BinaryRat in a Ghidra team](binaryrat/docs/ADOPTION.md) · [Contact the maintainer](.github/SUPPORT.md)
+| Topic | Document |
+|---|---|
+| Build the engine and run the tests | [Engine and tooling](binaryrat/README.md) |
+| Install and use the Ghidra extension | [Export bridge](binaryrat/bridge/README.md) |
+| Python API and analyst commands | [Python client](binaryrat/python/README.md) |
+| Checks, CI and raw evidence | [Verification](binaryrat/docs/VERIFICATION.md) |
+| Using BinaryRat in a Ghidra team | [Adoption guide](binaryrat/docs/ADOPTION.md) |
+| Design, gates and roadmap | [Architecture](binaryrat/docs/ARCHITECTURE.md) |
+| Changes to upstream Ghidra files | [Core patch ledger](binaryrat/docs/core-patches/README.md) |
+| Questions and bug reports | [Support](.github/SUPPORT.md) |
 
 ## License
 

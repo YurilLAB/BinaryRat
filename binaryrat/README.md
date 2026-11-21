@@ -4,6 +4,15 @@ BinaryRat's new engine is C++20. Ghidra's existing Java framework, SLEIGH, nativ
 decompiler, and database are retained. This repository starts at the official
 `Ghidra_12.2_build` tag; version and archive hashes are in `UPSTREAM.json`.
 
+## Contents
+
+- [Complete application releases](#complete-application-releases)
+- [Build the C++ engine](#build-the-c-engine)
+- [What is implemented](#what-is-implemented)
+- [Verify against Ghidra](#verify-against-ghidra)
+- [Documentation](#documentation)
+- [Licensing and contributions](#licensing-and-contributions)
+
 ## Complete application releases
 
 The fork-build jobs assemble one ZIP per x64 platform from the same commit's
@@ -57,15 +66,26 @@ See the [engine protocol](protocol/README.md) and [Python service](python/README
   callback, a dependency index that removes entries on mapped Program changes,
   and replay against the Program after changes of unknown reach or a restart.
   Set `BINARYRAT_CACHE_DIR` to reuse results in ordinary scheduled exports.
-  [Usage and cache report](bridge/README.md)
-- A read-only layout extractor over real Ghidra p-code and a C++ aggregator
-  that preserves gaps and overlapping alternatives. Each field links to its
-  instruction evidence. Scores express uncalibrated support.
+  [Usage and cache report](bridge/README.md#live-cache-and-cache-proof)
 - A Java adapter using Ghidra's existing `DecompInterface` and
   `DecompilerCallback`, with a strict raw comparator and stock-verified export.
+- A read-only layout extractor over real Ghidra p-code that follows bounded direct
+  calls and reports shared-storage candidates, and a C++ aggregator that preserves
+  gaps and overlapping alternatives. Each field links to its instruction evidence.
+  Scores express uncalibrated support.
+  [Layout evidence](bridge/README.md#read-only-layout-evidence)
+- A native summary solver that carries parameter layout evidence through recursive
+  call cycles and shifted pointers, shared by the headless script, PyGhidra and the
+  live service. [Summary propagation](protocol/README.md#summary-propagation)
+- Itanium and MSVC RTTI evidence reports. [C++ RTTI](bridge/README.md#read-only-c-rtti)
+- Reviewed creation of a new structure with provenance and native undo.
+  [Reviewed structure creation](bridge/README.md#reviewed-structure-creation)
 - An installable extension with the native engine, CodeBrowser decompilation
   exports, layout recovery at the cursor and a navigable field evidence table.
   [Build and install](bridge/README.md#install-the-extension)
+- Call-site corrections in CodeBrowser: an instruction's p-code with register names,
+  before and after Listing overrides, and a reviewed call prototype applied at one
+  call with native undo. [Workflow](docs/ADOPTION.md#follow-a-function-while-reviewing-code)
 - Call sites with arguments: every call to a function, including through its thunks,
   as the caller's decompiled statement with the values the decompiler proved constant
   and the strings or symbols they point to. In CodeBrowser, PyGhidra, the CLI and the
@@ -73,75 +93,39 @@ See the [engine protocol](protocol/README.md) and [Python service](python/README
 - Stack strings: text a function builds on its stack with constant stores, read without
   the decompiler and assembled by the engine, with the instructions that wrote it.
   [Stack strings](bridge/README.md#stack-strings)
+- Analysis profiles (Quick Triage, Normal, Deeper Recovery) that restore the
+  project's analyzer settings afterwards.
+  [Choose how much analysis to run](docs/ADOPTION.md#choose-how-much-analysis-to-run)
 - Typed Python access to functions, references, datatypes, and decompilation in
-  saved Programs. Separate local clients can share one read-only Ghidra JVM.
-  [Python API](python/README.md)
+  saved Programs, plus the analyst tools `binaryrat-diff`, `binaryrat-explain`
+  and `binaryrat-decompile`. Separate local clients can share one read-only Ghidra
+  JVM. [Python API](python/README.md)
+- Two documented Ghidra core patches: faster no-return candidate checks, and join
+  records dropped at each native flush. [Core patch ledger](docs/core-patches/README.md)
 - C/C++ corpus builders with separate DWARF/PDB oracles, stripping checks,
-  cross-target manifests, and CI for Linux/Windows.
+  cross-target manifests, a whole-program auto-analysis profiler, and CI for
+  Linux/Windows.
 
-The bridge's live cache uses schema 2 keys, tracked dependencies, and replay
-to verify Program reads across changes and restarts. Stock verification also
-checks that output matches the ascending stock process history; the source-built
-fork drops the join records behind that history at each native flush. Schema 1 keys require
-callers to supply complete semantic identities; function bytes and the in-memory
-modification number alone cannot establish correctness across reopen/import, and
-plain exports are evidence artifacts, not reusable decompilations.
+## Verify against Ghidra
 
-## Ghidra integration checks
+Use an official Ghidra 12.2 installation and JDK 25, build the corpus, then run
+`binaryrat/benchmarks/verify_ghidra.py` with `--engine`. It compares scheduled
+exports, cold and warm, with stock decompilation byte for byte.
+[How BinaryRat is verified](docs/VERIFICATION.md)
 
-Use an official Ghidra 12.2 installation and JDK 25. The bridge is compiled by
-Ghidra's script machinery. Except for `cache-proof`, which edits a throwaway
-program, the bridge performs read-only exports from CodeBrowser or headless
-Ghidra after analysis. [Bridge contract](bridge/README.md)
+## Documentation
 
-```sh
-python -m pip install -r binaryrat/requirements-test.txt
-python binaryrat/tools/build_corpus.py --output build/corpus --toolchain gcc
-python binaryrat/benchmarks/verify_ghidra.py \
-  --ghidra /path/to/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json \
-  --output build/verification --workers 1 2 4 --repetitions 1 \
-  --engine build/native/binaryrat/binaryrat-engine
-```
-
-With `--engine`, the verifier checks scheduled output against stock, tests cold
-and warm exports in separate JVMs, and exercises deadlines, resident memory limits,
-and interrupted leases through Ghidra. CI installs the host extension ZIP into
-isolated settings and repeats the cold and warm checks through its bundled
-engine. CI also reopens a cached project after a function rename made while the
-engine is offline. The verifier checks output records and
-script success messages because Ghidra can return zero after a postScript fails.
-The small Windows corpus records one known stock Ghidra coverage failure in each
-of three MSVC optimization variants. Every exported record participates in the
-exact comparison. [MSVC runtime parity evidence](docs/evidence/msvc-crt-parity.md)
-Linux CI downloads and hash-checks a pinned 130 MB LLVM library, then compares the
-stock-verified export of 384 sampled functions to an independent stock serial run
-byte for byte. [LLVM harness and evidence](docs/evidence/llvm19-linux.md)
-CI also checks read-only p-code footprints against separate DWARF and PDB
-oracles and exercises write-back transaction semantics on a disposable Program.
-[Corpus accuracy checks](corpus/README.md)
-For repeated diagnostic timing, use `--repetitions 5`. The report explicitly
-labels sampled process-tree RSS and separates overall headless-run wall time
-from exporter-phase times; it does not claim large-binary speedup.
-
-CTest also runs `native.live_cache_fuzz`, which checks the native engine against
-a reference model using seeded sequences of synthetic cache operations. To
-repeat a seed, run `python binaryrat/native/tests/live_cache_fuzz.py --engine
-PATH_TO_ENGINE --seed 0 --steps 1000`.
-
-## Remaining milestones
-
-The extractor follows bounded direct calls and reports shared-storage candidates
-and Itanium and MSVC RTTI. The engine's summary solver carries parameter evidence
-through recursive call cycles and shifted pointers. Analysts can review a
-proposed layout and create a new structure with native undo. Pointers passed
-through memory or indirect calls, calibrated confidence, and applying types to
-existing targets from the GUI and Python remain open.
-[Architecture and milestones](docs/ARCHITECTURE.md)
-
-The whole-program profiler records analyzer timings, completion, wall time,
-and process-tree RSS. The 130 MB LLVM run reached its analysis deadline.
-Whole-program speedup on code-heavy binaries remains unmeasured.
-[Whole-program analysis evidence](docs/evidence/full-analysis.md)
+| Topic | Document |
+|---|---|
+| Ghidra extension: install, CodeBrowser, headless exports, layouts, RTTI, call sites, stack strings, cache | [Export bridge](bridge/README.md) |
+| Python API, analyst commands, live JVM service | [Python client](python/README.md) |
+| Engine wire protocol | [Native protocol](protocol/README.md) |
+| Ground-truth corpus | [Corpus](corpus/README.md) |
+| Checks, CI and raw evidence | [Verification](docs/VERIFICATION.md) |
+| Using BinaryRat in a Ghidra team | [Adoption guide](docs/ADOPTION.md) |
+| Design, gates and roadmap | [Architecture](docs/ARCHITECTURE.md) |
+| Changes to upstream Ghidra files | [Core patch ledger](docs/core-patches/README.md) |
+| Upstream synchronization | [Upstream](docs/UPSTREAM.md) |
 
 ## Licensing and contributions
 

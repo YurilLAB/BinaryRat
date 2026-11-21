@@ -1,0 +1,75 @@
+# How BinaryRat is verified
+
+BinaryRat counts a feature as done only when an automated check or recorded
+evidence backs it. This page lists those checks and links to the raw evidence.
+
+## Ghidra integration checks
+
+Use an official Ghidra 12.2 installation and JDK 25. The bridge is compiled by
+Ghidra's script machinery. Except for `cache-proof`, which edits a throwaway
+program, the bridge performs read-only exports from CodeBrowser or headless
+Ghidra after analysis. [Bridge contract](../bridge/README.md#contract)
+
+```sh
+python -m pip install -r binaryrat/requirements-test.txt
+python binaryrat/tools/build_corpus.py --output build/corpus --toolchain gcc
+python binaryrat/benchmarks/verify_ghidra.py \
+  --ghidra /path/to/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json \
+  --output build/verification --workers 1 2 4 --repetitions 1 \
+  --engine build/native/binaryrat/binaryrat-engine
+```
+
+With `--engine`, the verifier checks scheduled output against stock, tests cold
+and warm exports in separate JVMs, and exercises deadlines, resident memory limits,
+and interrupted leases through Ghidra. The verifier checks output records and
+script success messages because Ghidra can return zero after a postScript fails.
+
+The small Windows corpus records one known stock Ghidra coverage failure in each
+of three MSVC optimization variants. Every exported record participates in the
+exact comparison. [MSVC runtime parity evidence](evidence/msvc-crt-parity.md)
+
+## What CI checks on every commit
+
+The `BinaryRat` workflow tests every first-parent commit pushed to `master` on
+Linux and Windows. Besides the native tests and the integration checks above:
+
+- CI installs the host extension ZIP into isolated settings and repeats the cold
+  and warm checks through its bundled engine. It also reopens a cached project
+  after a function rename made while the engine is offline.
+- Linux CI downloads and hash-checks a pinned 130 MB LLVM library, then compares
+  the stock-verified export of 384 sampled functions to an independent stock
+  serial run byte for byte. [LLVM harness and evidence](evidence/llvm19-linux.md)
+- CI checks read-only p-code footprints against separate DWARF and PDB oracles
+  and exercises write-back transaction semantics on a disposable Program.
+  [Corpus accuracy checks](../corpus/README.md)
+- The fork-build jobs assemble the complete application for each x64 platform,
+  run the extracted bundle with its bundled runtime, import and decompile the
+  example, and exercise the default desktop workspace and the included Python wheel.
+- The Linux and Windows fork builds check that every function prints as a new
+  official decompiler process prints it, in any order.
+  [Core patch](core-patches/decompiler-join-flush.md)
+
+## Timing and memory
+
+For repeated diagnostic timing, use `--repetitions 5`. The report explicitly
+labels sampled process-tree RSS and separates overall headless-run wall time
+from exporter-phase times; it does not claim large-binary speedup.
+
+The whole-program profiler records analyzer timings, completion, wall time,
+and process-tree RSS for stock auto-analysis.
+[Whole-program analysis evidence](evidence/full-analysis.md) ·
+[No-return analyzer timing](core-patches/no-return-candidate-checks.md)
+
+## Native fuzzing
+
+CTest also runs `native.live_cache_fuzz`, which checks the native engine against
+a reference model using seeded sequences of synthetic cache operations. To
+repeat a seed, run `python binaryrat/native/tests/live_cache_fuzz.py --engine
+PATH_TO_ENGINE --seed 0 --steps 1000`. The seeded `native.protocol_fuzz`,
+`native.types_solve_fuzz` and `native.stack_strings_fuzz` tests cover the wire
+protocol, the summary solver and stack-string assembly the same way.
+
+## Type confidence
+
+The offline evaluator compares layout proposal scores with outcomes labelled by
+a separate debug-information oracle. [Confidence calibration](evidence/confidence-calibration.md)
