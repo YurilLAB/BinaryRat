@@ -34,6 +34,7 @@ Every commit to `master` is built and tested on Linux and Windows.
 
 - Byte-for-byte stock parity on 384 sampled functions from a 130 MB LLVM library, checked against a separate serial stock run. [Benchmark evidence](binaryrat/docs/evidence/llvm19-linux.md)
 - Read-only p-code layout footprints against separate DWARF and PDB ground truth. [Corpus](binaryrat/corpus/README.md)
+- Field scores fitted on six open-source projects and checked against the debug information of six others. [Calibration evidence](binaryrat/docs/evidence/confidence-calibration.md)
 - The complete application ZIP for each platform, launched with its bundled JDK to import and decompile an example.
 - The patched no-return analyzer runs faster on a controlled call-heavy fixture. [Analyzer benchmark](binaryrat/docs/core-patches/no-return-candidate-checks.md)
 - Upstream's own decompiler unit and data tests pass on the patched decompiler. [Core patch](binaryrat/docs/core-patches/decompiler-join-flush.md)

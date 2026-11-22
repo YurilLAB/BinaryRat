@@ -35,13 +35,22 @@ Linux and Windows. Besides the native tests and the integration checks above:
 
 - CI installs the host extension ZIP into isolated settings and repeats the cold
   and warm checks through its bundled engine. It also reopens a cached project
-  after a function rename made while the engine is offline.
+  after a function rename made while the engine is offline. The installed
+  program-wide layout survey must report the same fields as the installed
+  single-parameter extractor.
 - Linux CI downloads and hash-checks a pinned 130 MB LLVM library, then compares
   the stock-verified export of 384 sampled functions to an independent stock
   serial run byte for byte. [LLVM harness and evidence](evidence/llvm19-linux.md)
 - CI checks read-only p-code footprints against separate DWARF and PDB oracles
   and exercises write-back transaction semantics on a disposable Program.
   [Corpus accuracy checks](../corpus/README.md)
+- Linux CI builds twelve open-source projects from hash-pinned sources, surveys
+  every function's register parameters on official Ghidra, and labels each
+  proposed field against the project's separate DWARF file. It fits the scores
+  on six projects and reports their calibration on the other six. The same run
+  requires the survey to match the single-parameter extractor on eight
+  functions and to refuse an over-limit request and an existing report.
+  [Calibration evidence](evidence/confidence-calibration.md)
 - The fork-build jobs assemble the complete application for each x64 platform,
   run the extracted bundle with its bundled runtime, import and decompile the
   example, and exercise the default desktop workspace and the included Python wheel.
@@ -89,7 +98,13 @@ PATH_TO_ENGINE --seed 0 --steps 1000`. The seeded `native.protocol_fuzz`,
 `native.types_solve_fuzz` and `native.stack_strings_fuzz` tests cover the wire
 protocol, the summary solver and stack-string assembly the same way.
 
+The Python tests add seeded checks for the calibration tools. The DWARF range
+labeller is compared with plain enumeration on 300 random nested layouts, and
+400 mutated survey reports must each be accepted or refused with a clear error.
+
 ## Type confidence
 
 The offline evaluator compares layout proposal scores with outcomes labelled by
-a separate debug-information oracle. [Confidence calibration](evidence/confidence-calibration.md)
+a separate debug-information oracle. Field scores are fitted on six source
+families and checked on six others.
+[Confidence calibration](evidence/confidence-calibration.md)

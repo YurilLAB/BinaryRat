@@ -72,8 +72,11 @@ See the [engine protocol](protocol/README.md) and [Python service](python/README
 - A read-only layout extractor over real Ghidra p-code that follows bounded direct
   calls and reports shared-storage candidates, and a C++ aggregator that preserves
   gaps and overlapping alternatives. Each field links to its instruction evidence.
-  Scores express uncalibrated support.
-  [Layout evidence](bridge/README.md#read-only-layout-evidence)
+  Scores express uncalibrated support; their calibration is measured on held-out
+  projects. A headless survey reports every function's register parameters in
+  one run.
+  [Layout evidence](bridge/README.md#read-only-layout-evidence) ·
+  [Calibration](docs/evidence/confidence-calibration.md)
 - A native summary solver that carries parameter layout evidence through recursive
   call cycles and shifted pointers, shared by the headless script, PyGhidra and the
   live service. [Summary propagation](protocol/README.md#summary-propagation)

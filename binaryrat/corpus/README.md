@@ -52,13 +52,29 @@ The PE oracle uses LLVM's `llvm-pdbutil`.
 
 `fixtures/layout_paths.c` is not built by `build_corpus.py`:
 `benchmarks/verify_interprocedural_layout.py` compiles it itself for its
-call-path checks. An offline confidence-calibration evaluator exists
-(`benchmarks/calibrate_type_confidence.py`, see
-[confidence calibration](../docs/evidence/confidence-calibration.md)), but with a
-single source family so far no calibrated model exists and scores remain
-uncalibrated support. Semantic type scoring, whole-program fixtures and a
+call-path checks. Semantic type scoring, whole-program fixtures and a
 100MB+ benchmark suite beyond the pinned LLVM parity sample remain to be
 implemented.
+
+## Calibration families
+
+`families.json` lists twelve independent open-source projects used to measure
+field scores: three from this repository and nine from release archives pinned
+by SHA-256. Its `split` values follow a rule that depends on the family IDs
+alone, and a test enforces the rule.
+
+```sh
+python binaryrat/tools/build_families.py --output build/families
+```
+
+The builder downloads missing archives through the hash-checking downloader, or
+reads them from `--archives DIR`. It unpacks regular files only, compiles the
+listed sources with GCC `-O2` and DWARF 4 into one shared object per family,
+and separates the debug file and the stripped analysis copy as above. It never
+runs a project's configure or build script and never executes the result; the
+few configuration macros a project needs are listed in `families.json`. The
+manifest stores paths relative to its own directory.
+[Family calibration](../docs/evidence/confidence-calibration.md#source-family-calibration)
 
 The fixture ABI and layout depend on compiler and target. Read the debug files
 for ground truth; do not assume hard-coded host offsets. Optimized debug

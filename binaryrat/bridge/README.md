@@ -199,6 +199,21 @@ The script, PyGhidra (`ProgramView.solve_layout`) and the `binaryrat-live`
 service share one Java service, `binaryrat.SummaryLayouts`.
 [Summary verification](../benchmarks/verify_summary_layout.py)
 
+`BinaryRatSurveyLayouts.java OUTPUT_JSON [TIMEOUT_SECONDS] [DEADLINE_SECONDS]
+[MAX_FUNCTIONS]` surveys the whole Program in one run. It decompiles every
+supported function once and treats each pointer-sized register parameter as a
+possible object start, aggregating that function's own exact accesses with
+`types.recover`. Nothing is followed into callees, so each access supports one
+parameter of one function. The report (`analysis_mode`
+`read_only_layout_survey`) gives every function's body SHA-256, a hash of its
+instructions with linked addresses masked and, per parameter, its register and
+fields. A function that cannot be
+decompiled or exceeds an evidence limit is listed with its reason; the function
+limit and the overall deadline fail closed. The survey states what the code does
+with each register parameter, not that the parameter points to a structure.
+Headless only; the Java service is `binaryrat.LayoutSurvey`.
+[Family calibration](../benchmarks/verify_family_calibration.py)
+
 `union_candidates` highlights exact loads at the same offset whose independently
 observed consumers interpret the bytes as integers and floating-point values.
 Each view points to the load and the typed operation. The candidate captures

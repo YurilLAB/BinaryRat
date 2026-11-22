@@ -319,10 +319,10 @@ Status in November 2026. Done means automated checks or recorded evidence exist.
 
 | Gate | Done | Open |
 |---|---|---|
-| 1. Baseline | Hash-pinned Ghidra 12.2 and Temurin JDK; fork source builds on Linux and Windows for every commit; GCC, Clang, AArch64 and MSVC x64/ARM64 corpora with separate DWARF/PDB oracles; byte-exact comparator; whole-program profiler | Calibration families and benchmarks (milestone 1) |
+| 1. Baseline | Hash-pinned Ghidra 12.2 and Temurin JDK; fork source builds on Linux and Windows for every commit; GCC, Clang, AArch64 and MSVC x64/ARM64 corpora with separate DWARF/PDB oracles; byte-exact comparator; whole-program profiler; twelve calibration families built from hash-pinned sources | More families, compilers and targets; external benchmarks (milestone 1) |
 | 2. Execution | Leases with CPU/RAM admission, deadlines, cancels and resident-memory limits on real decompilations; live cache with replay; `cache-proof` rounds, cold/warm and reopen checks; stock-verified export | Per-function memory estimates; `cache-proof` rounds for options and language/cspec; an injected mid-extraction change |
 | 3. Services/scripting | `SummaryLayouts` and `CallSites` Java services shared by scripts, PyGhidra and the live service; the `DecompilationSession` scheduling service; typed, versioned DTOs; a read-only JVM shared by local clients; analyst commands | One proposal service for GUI and Python review; an agent interface (milestone 2); writable JVM ownership |
-| 4. Types | P-code layout evidence with bounded direct-call forwarding and union views; SCC summary solver; Itanium and MSVC RTTI evidence; calibration evaluator with one source family | Flows through memory and indirect calls; multi-family calibration; a registered RTTI analyzer; summary results in the GUI evidence table and reviewed creation |
+| 4. Types | P-code layout evidence with bounded direct-call forwarding and union views; SCC summary solver; Itanium and MSVC RTTI evidence; a program-wide layout survey; field scores fitted on six source families and checked on six others | Flows through memory and indirect calls; calibration of evidence carried from callees; fitted estimates in reports; a registered RTTI analyzer; summary results in the GUI evidence table and reviewed creation |
 | 5. Application | Reviewed creation of a new structure and a reviewed call-site prototype override, both with native undo | Types applied to existing targets; provenance journal; per-proposal revert |
 | 6. Scale | No-return analyzer core patch, faster on a focused fixture; join-flush core patch; 384-function LLVM parity | A completed whole-program run on a code-heavy 100 MB+ input (the LLVM run reached its deadline); speedup evidence |
 
@@ -338,13 +338,19 @@ figures that rely on functions seen in training.
 
 ### 1. Measure (gate 1)
 
-- At least five held-out project families for calibration (for example
-  Assemblage builds), with functions deduplicated by hash before the split. Fit
-  scores on validation families (isotonic regression, as XTRIDE does) and report
-  reliability error and precision and recall at fixed thresholds on held-out
-  families.
-- Count evidence once per origin: a propagated summary and the access it came
-  from are not independent support.
+Done: field scores are fitted on six source families and checked on six
+others, with functions deduplicated by hash before the split, each access
+counted for one proposal, and reliability error, precision and recall reported
+on the held-out families.
+[Calibration evidence](evidence/confidence-calibration.md)
+
+- Grow the corpus to at least eight held-out families, the minimum for
+  intervals, and add Clang, other optimization levels, AArch64 and MSVC builds
+  (for example Assemblage builds).
+- Measure evidence carried from callees, still counting each origin once: a
+  propagated summary and the access it came from are not independent support.
+- Print the fitted estimate beside the support score once the wider corpus
+  confirms it.
 - DecompileBench as a baseline. Stock-verified output equals stock Ghidra, so the
   scores equal Ghidra's until applied types change the output. The benchmark
   measures milestone 4, not the export path.

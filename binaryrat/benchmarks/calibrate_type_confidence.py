@@ -33,6 +33,7 @@ MIN_FIT_BIN_FAMILIES = 3
 MIN_INTERVAL_FAMILIES = 8
 BOOTSTRAP_REPLICATES = 399
 BOOTSTRAP_SEED = 20261118
+THRESHOLDS = (0.5, 0.6, 0.7, 0.8, 0.9, 0.95)
 ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_./:-]{0,127}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -170,12 +171,12 @@ def _check_depth(data: bytes) -> None:
                 raise ValueError("invalid JSON brackets")
 
 
-def load_json(path: Path) -> object:
-    if not path.is_file() or not 0 < path.stat().st_size <= MAX_INPUT_BYTES:
+def load_json(path: Path, limit: int = MAX_INPUT_BYTES) -> object:
+    if not path.is_file() or not 0 < path.stat().st_size <= limit:
         raise ValueError("input must be a regular JSON file in the supported size range")
     with path.open("rb") as stream:
-        data = read_limited(stream, MAX_INPUT_BYTES + 1)
-    if len(data) > MAX_INPUT_BYTES:
+        data = read_limited(stream, limit + 1)
+    if len(data) > limit:
         raise ValueError("input exceeded the JSON size limit while reading")
     _check_depth(data)
     return json.loads(data.decode("utf-8"), object_pairs_hook=_unique_keys,
@@ -203,8 +204,11 @@ def _fit(rows: list[Scored]) -> tuple[dict, dict[int, float]]:
     if len(totals) < MIN_FIT_FAMILIES or min(true_families, false_families) < MIN_FIT_LABEL_FAMILIES:
         return model, {}
 
-    # Each family has total fit weight one per kind. Pool neighboring supported
-    # bins when their smoothed empirical probabilities violate monotonicity.
+    # Each family has total fit weight one per kind. One neutral pseudo-family is
+    # added whose proposals fall in the bins like the fit families' own, so every
+    # bin shrinks toward one half by 1 / (families + 1) and a sparse bin is not
+    # pulled further than a dense one. Neighboring supported bins are pooled when
+    # their estimates violate monotonicity.
     blocks: list[tuple[list[int], float, float]] = []
     details = {}
     for index, bucket in enumerate(_buckets(rows)):
@@ -212,8 +216,10 @@ def _fit(rows: list[Scored]) -> tuple[dict, dict[int, float]]:
         if len(counts) < MIN_FIT_BIN_FAMILIES:
             continue
         correct = Counter(row.family for row in bucket if row.correct)
-        mass = 1 + math.fsum(counts[family] / totals[family] for family in counts)
-        positive = 0.5 + math.fsum(correct[family] / totals[family] for family in counts)
+        observed = math.fsum(counts[family] / totals[family] for family in counts)
+        mass = observed * (1 + 1 / len(totals))
+        positive = (math.fsum(correct[family] / totals[family] for family in counts) +
+                    0.5 * observed / len(totals))
         details[index] = {"index": index, "fit_families": len(counts), "fit_proposals": len(bucket)}
         blocks.append(([index], mass, positive))
         while len(blocks) >= 2:
@@ -252,6 +258,42 @@ def _squared_error(row: Scored) -> float:
     return (row.score - row.correct) ** 2
 
 
+def _reliability_error(rows: list[Scored]) -> float | None:
+    """Expected calibration error over the fixed bins, every family weighted equally."""
+    if not rows:
+        return None
+    totals = Counter(row.family for row in rows)
+    error = 0.0
+    for bucket in _buckets(rows):
+        if not bucket:
+            continue
+        counts = Counter(row.family for row in bucket)
+        weight = math.fsum(counts[family] / totals[family] for family in counts) / len(totals)
+        observed = mean(_family_means(bucket, lambda row: int(row.correct)))
+        predicted = mean(_family_means(bucket, lambda row: row.score))
+        error += weight * abs(observed - predicted)
+    return error
+
+
+def _thresholds(rows: list[Scored]) -> list[dict]:
+    """Precision of the proposals at or above each score, and the correct ones it keeps.
+
+    Recall counts correct scored proposals only: fields the analysis never proposed are
+    outside this dataset.
+    """
+    correct = Counter(row.family for row in rows if row.correct)
+    result = []
+    for threshold in THRESHOLDS:
+        accepted = [row for row in rows if row.score >= threshold]
+        kept = Counter(row.family for row in accepted if row.correct)
+        precision = _family_means(accepted, lambda row: int(row.correct))
+        recall = [kept[family] / correct[family] for family in sorted(correct)]
+        result.append({"threshold": threshold, "accepted_proposals": len(accepted),
+                       "accepted_families": len(precision), "precision": _estimate(precision),
+                       "recall_of_correct_proposals": _estimate(recall)})
+    return result
+
+
 def _metrics(rows: list[Scored]) -> dict:
     reliability = []
     for index, bucket in enumerate(_buckets(rows)):
@@ -262,7 +304,9 @@ def _metrics(rows: list[Scored]) -> dict:
                             "mean_score": mean(predicted) if predicted else None,
                             "observed_correct": _estimate(observed)})
     return {"proposals": len(rows), "families": len({row.family for row in rows}),
-            "brier": _estimate(_family_means(rows, _squared_error)), "reliability": reliability}
+            "brier": _estimate(_family_means(rows, _squared_error)),
+            "reliability_error": _reliability_error(rows), "thresholds": _thresholds(rows),
+            "reliability": reliability}
 
 
 def _scored(cases: list[Case]) -> list[Scored]:
@@ -313,7 +357,7 @@ def evaluate(dataset: object) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
         "purpose": "offline calibration evidence",
-        "method": "equal-family weighted score bins with monotone pooling and a neutral prior",
+        "method": "equal-family weighted score bins with monotone pooling and one neutral pseudo-family",
         "minimum_fit_families": MIN_FIT_FAMILIES,
         "minimum_fit_families_per_label": MIN_FIT_LABEL_FAMILIES,
         "minimum_fit_bin_families": MIN_FIT_BIN_FAMILIES,

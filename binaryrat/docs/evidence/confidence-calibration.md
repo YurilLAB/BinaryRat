@@ -53,11 +53,12 @@ python binaryrat/benchmarks/calibrate_type_confidence.py --input cases.json > ca
 
 The evaluator fits each kind independently using ten fixed raw score bins. A
 larger raw score represents stronger support. It assigns equal total fit weight
-to each family, adds one neutral pseudo-family per supported bin, and pools
-adjacent supported bins until their fitted estimates are monotone. Fitting
-requires at least five scored families, two families with each outcome, and
-three scored families for each supported bin. Unsupported bins abstain. The
-fit uses only fit-partition cases and labels.
+to each family and adds one neutral pseudo-family whose proposals fall in the
+bins like the fit families' own, so every estimate moves toward one half by
+`1 / (families + 1)`. It pools adjacent supported bins until their fitted
+estimates are monotone. Fitting requires at least five scored families, two
+families with each outcome, and three scored families for each supported bin.
+Unsupported bins abstain. The fit uses only fit-partition cases and labels.
 
 The held-out report gives case and proposal counts, abstention coverage, and
 the fraction of numerically scored proposals with fitted estimates. Brier
@@ -65,10 +66,14 @@ error averages squared error within each family and then across families.
 Compare the fitted Brier estimate with `paired_raw_brier` on the same scored
 proposals. The raw evidence-strength comparison treats the support score as
 a numerical baseline. Reliability bins report the observed correctness rate,
-mean score, proposal count, and family support. An empty group reports a null
-estimate. Approximate 95% intervals resample the held-out family means with a
-fixed seed, conditional on the fitted model and a minimum of eight families.
-Sparse holdouts remain descriptive.
+mean score, proposal count, and family support. `reliability_error` is the
+expected calibration error over those bins with every family weighted equally.
+`thresholds` gives, for each fixed score, the precision of the proposals at or
+above it and the share of correct proposals it keeps. That recall counts
+proposed fields only: fields the analysis never proposed are not in the dataset.
+An empty group reports a null estimate. Approximate 95% intervals resample the
+held-out family means with a fixed seed, conditional on the fitted model and a
+minimum of eight families. Sparse holdouts remain descriptive.
 
 ## Packed structure diagnostic
 
@@ -89,4 +94,117 @@ python binaryrat/benchmarks/calibrate_type_confidence.py \
 The GCC and Clang diagnostic staged 18 proposed fields from nine real builds.
 All 18 matched their separate DWARF oracle. The builds form one source family,
 so the report shows raw support diagnostics and insufficient fit evidence.
-Production fields retain their uncalibrated support scores.
+
+## Source-family calibration
+
+Twelve independent open-source projects measure the score on code BinaryRat's
+authors did not write. `binaryrat/corpus/families.json` lists them: zlib, the
+GNU demangler and lzfse from this repository, and bzip2, expat, jansson,
+libtomcrypt, libyaml, Lua, lz4, MuJS and zstd from release archives pinned by
+SHA-256. Each project is one family.
+
+```sh
+python binaryrat/tools/build_families.py --output build/families
+python binaryrat/benchmarks/verify_family_calibration.py \
+  --ghidra /path/to/ghidra_12.2_PUBLIC --engine build/native/binaryrat/binaryrat-engine \
+  --families build/families/manifest.json --output build/family-calibration
+```
+
+**Build.** Each family's listed sources are compiled with GCC `-O2` and DWARF 4
+into one x86-64 shared object. No project build script runs and nothing is
+executed. The stripped copy is the analysis input; the debug file stays in a
+separate directory for the oracle.
+
+**Split.** Families are ordered by the SHA-256 of their ID; the first half is
+the fit partition and the rest is held out. The rule depends on the names alone
+and a test enforces it, so no outcome can move a family.
+
+**Inference.** `BinaryRatSurveyLayouts.java` runs on the stripped file in
+official Ghidra 12.2. It decompiles every function once and aggregates the exact
+accesses made through each pointer-sized register parameter of that function.
+Callees are not followed, so each access supports one proposal.
+
+**Oracle.** After Ghidra exits, the DWARF reader lists every parameter that the
+location list places in an integer argument register at the function's entry
+address and that is declared as a pointer to a structure, union or class. Each
+such parameter is one case. Reading the register from the location list keeps
+labels right when the compiler changes a signature: GCC's clones with removed
+arguments describe only the parameters they still take. A proposed byte range is
+correct when it is exactly one declared member, array element or base subobject
+of the pointee at any nesting depth. A range that spans members, covers part of
+one, or lies beyond the pointee is incorrect.
+
+**Exclusions, all counted in the report.** Functions with identical
+instructions, linked addresses masked, are kept once across all families before
+the split. Ranges that touch bit-field storage are not judged. Pointees that are
+incomplete in the function's unit or have virtual bases give no case. A
+parameter the survey did not see is an abstention: a case without proposals.
+
+### Result
+
+Measured with GCC 15.2.0 and Ghidra 12.2 in November 2026. CI repeats the
+measurement on every commit and uploads the report.
+
+| | Fit families | Held-out families |
+|---|---|---|
+| Families | bzip2, libtomcrypt, libyaml, MuJS, zlib, zstd | expat, GNU demangler, jansson, Lua, lz4, lzfse |
+| Cases (pointer parameters) | 1,704 | 1,385 |
+| Cases with proposals | 1,087 | 863 |
+| Proposed fields | 7,858 | 3,134 |
+
+The DWARF files describe 3,509 functions with code; 2,716 have an aggregate
+pointer parameter in an argument register. 82 duplicate functions and 257
+parameters with an incomplete pointee were left out, and one proposal touched
+bit-field storage. Of 3,089 cases, 469 had no
+Ghidra function at the entry address (mostly static functions reached only
+through pointers), 572 had no exact field access, 95 were not register
+parameters in the decompiler's view, and 3 functions exceeded a survey limit.
+
+The fit on six families maps the support count to an estimate:
+
+| Accesses supporting the field | Raw score | Fitted estimate |
+|---|---|---|
+| 1 | 0.50 | 0.791 |
+| 2 | 0.67 | 0.855 |
+| 3 to 8 | 0.75 to 0.89 | 0.909 |
+| 9 or more | 0.90 and above | 0.919 |
+
+On the six held-out families:
+
+| Support | Proposals | Fitted estimate | Observed correct |
+|---|---|---|---|
+| 1 access | 1,662 | 0.791 | 0.800 |
+| 2 accesses | 641 | 0.855 | 0.857 |
+| 3 or more | 831 | 0.911 | 0.904 |
+
+| Held-out metric | Raw score | Fitted estimate |
+|---|---|---|
+| Reliability error | 0.215 | 0.007 |
+| Brier error | 0.188 | 0.130 |
+
+A fitted estimate of at least 0.8 keeps 1,472 proposals at precision 0.88 and
+52% of the correct proposals. At least 0.9 keeps 831 at precision 0.90 and 31%.
+
+The raw score understates: a field seen in one access is right about four times
+in five. Correctness differs between projects, from 0.70 of jansson's proposals
+to 0.98 of MuJS's, so one project is not a sample of another.
+
+### Limits
+
+- One compiler, one optimization level and one architecture. Clang, other
+  levels, AArch64 and MSVC builds are not measured.
+- Six held-out families are below the eight needed for intervals, so the
+  held-out numbers are descriptive.
+- Only a function's own accesses are measured. Evidence carried from callees by
+  direct-call forwarding or the summary solver is not calibrated.
+- Byte ranges only. Member types, names and signedness are not scored.
+- The truth rule assumes the parameter points at one object. A parameter that
+  walks an array of structures yields ranges beyond the pointee, counted wrong.
+
+The first run used the earlier prior, one neutral pseudo-family per bin. On this
+data it outweighed the sparse high-score bins and merged every bin into one
+estimate of 0.711. It was replaced by the single pseudo-family described above
+before these results were recorded; the family list and the split did not
+change.
+
+Layout reports still print the uncalibrated support score.

@@ -101,6 +101,10 @@ jobs:
         name: GCC, Clang and AArch64 corpus with separate debug oracles
         timeout-minutes: 20
         run: python binaryrat/tools/build_corpus.py --output build/corpus --toolchain gcc --toolchain clang --toolchain gcc-aarch64
+      - if: runner.os == 'Linux'
+        name: Calibration source families from hash-pinned archives, with separate debug oracles
+        timeout-minutes: 15
+        run: python binaryrat/tools/build_families.py --output build/families
       - if: runner.os == 'Windows'
         name: MSVC PE/PDB corpus with separate debug oracles
         timeout-minutes: 20
@@ -175,6 +179,10 @@ jobs:
           python binaryrat/benchmarks/calibrate_type_confidence.py \
             --input build/ghidra-report/type-accuracy/packed-cases.json \
             > build/ghidra-report/type-accuracy/confidence.json
+      - if: ${{ runner.os == 'Linux' && !cancelled() && steps.ready.outcome == 'success' }}
+        name: Measure layout score calibration on held-out source families
+        timeout-minutes: 30
+        run: python binaryrat/benchmarks/verify_family_calibration.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --engine build/binaryrat/binaryrat-engine --families build/families/manifest.json --output build/ghidra-report/family-calibration
       - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
         name: Verify Itanium and MSVC C++ RTTI recovery
         timeout-minutes: 20

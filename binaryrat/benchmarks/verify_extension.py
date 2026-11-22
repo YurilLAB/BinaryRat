@@ -16,6 +16,7 @@ import tempfile
 from zipfile import ZipFile
 
 from verify_analysis_profiles import verify_profiles
+from verify_family_calibration import compare_layout
 from verify_ghidra import (PROJECT, check_cache_edges, check_call_sites, check_persistent_cache,
                            check_stack_strings,
                            measured_run, saved_project_hashes, sha256)
@@ -119,7 +120,8 @@ def main() -> None:
                      "BinaryRat/ghidra_scripts/BinaryRatRecoverRtti.java",
                      "BinaryRat/ghidra_scripts/BinaryRatReviewLayout.java",
                      "BinaryRat/ghidra_scripts/BinaryRatSolveLayouts.java",
-                     "BinaryRat/ghidra_scripts/BinaryRatStackStrings.java"}):
+                     "BinaryRat/ghidra_scripts/BinaryRatStackStrings.java",
+                     "BinaryRat/ghidra_scripts/BinaryRatSurveyLayouts.java"}):
             raise RuntimeError("unexpected extension contents")
         with ZipFile(io.BytesIO(package.read("BinaryRat/lib/BinaryRat.jar"))) as library:
             if not {"binaryrat/writeback/ProtectedLayoutWriteBack.class",
@@ -130,6 +132,7 @@ def main() -> None:
                     "binaryrat/DecompilationSession.class",
                     "binaryrat/RttiEvidence.class",
                     "binaryrat/SummaryLayouts.class",
+                    "binaryrat/LayoutSurvey.class",
                     "binaryrat/CallSites.class",
                     "binaryrat/desktop/CallSitesTable.class",
                     "binaryrat/StackStrings.class",
@@ -243,15 +246,31 @@ def main() -> None:
                     scripts.extend(["-postScript", "BinaryRatRecoverLayouts.java", str(two_hops),
                                     "name:forward_packed_twice", "0", "60", "2"])
                     proof_args.append(str(two_hops))
+            # The program-wide survey runs in the same session and must agree with the
+            # single-parameter extractor on the packed record.
+            survey = output / "installed-survey.json"
+            survey.unlink(missing_ok=True)
+            scripts.extend(["-postScript", "BinaryRatSurveyLayouts.java", str(survey), "60", "300"])
             extraction = measured_run(
                 [str(headless), str(root), "installed-layout", "-import", str(fixture), *scripts],
                 layout_log, 300, environment)
-            if extraction["returncode"] or any(not Path(file).is_file() for file in proof_args):
+            if extraction["returncode"] or any(
+                    not Path(file).is_file() for file in [*proof_args, survey]):
                 raise RuntimeError(f"packaged layout extractor did not complete (see {layout_log})")
-            fields = verified_fields(json_file(layout), artifact)
+            single = json_file(layout)
+            fields = verified_fields(single, artifact)
             if {(field["offset"], field["width"]) for field in fields} != {(0, 1), (1, 4)}:
                 raise RuntimeError(f"packaged extractor did not recover the packed fields (see {layout_log})")
-            layout_proof = {"passed": True, "fields": len(fields), "report": layout.name}
+            surveyed = json_file(survey)
+            entry = single["function"]["address_space"], single["function"]["address"]
+            matches = [parameter for function in surveyed["functions"]
+                       if (function["address_space"], function["address"]) == entry
+                       for parameter in function["parameters"] if parameter["index"] == 0]
+            if len(matches) != 1 or matches[0]["layout"] is None:
+                raise RuntimeError(f"packaged survey did not report the packed-record parameter (see {layout_log})")
+            compare_layout(single, surveyed, entry[1], 0, matches[0]["layout"]["fields"])
+            layout_proof = {"passed": True, "fields": len(fields), "report": layout.name,
+                            "survey": survey.name, "surveyed_functions": surveyed["surveyed_functions"]}
             writeback_log = output / "protected-layout.log"
             project = [str(headless), str(root), "installed-layout", "-process", fixture.name, "-noanalysis"]
             before = saved_project_hashes(root, "installed-layout")

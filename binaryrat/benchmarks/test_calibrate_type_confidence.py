@@ -63,9 +63,10 @@ class CalibrationTests(unittest.TestCase):
         first = evaluate(data)["kinds"][FIELD]
         bins = first["model"]["bins"]
         self.assertEqual([item["index"] for item in bins], [2, 8])
-        self.assertAlmostEqual(bins[0]["estimated_probability"], 1 / 7)
-        self.assertAlmostEqual(bins[1]["estimated_probability"], 6 / 7)
-        self.assertAlmostEqual(first["holdout"]["calibrated"]["brier"]["estimate"], 1 / 49)
+        # Five families and one neutral pseudo-family: (5 * rate + 0.5) / 6.
+        self.assertAlmostEqual(bins[0]["estimated_probability"], 1 / 12)
+        self.assertAlmostEqual(bins[1]["estimated_probability"], 11 / 12)
+        self.assertAlmostEqual(first["holdout"]["calibrated"]["brier"]["estimate"], 1 / 144)
         self.assertAlmostEqual(first["holdout"]["paired_raw_brier"]["estimate"], 0.04)
         self.assertEqual(first["holdout"]["paired_score_coverage"], 1)
         for entry in holdout:
@@ -73,7 +74,7 @@ class CalibrationTests(unittest.TestCase):
                 proposal["correct"] = not proposal["correct"]
         second = evaluate(data)["kinds"][FIELD]
         self.assertEqual(first["model"], second["model"])
-        self.assertAlmostEqual(second["holdout"]["calibrated"]["brier"]["estimate"], 36 / 49)
+        self.assertAlmostEqual(second["holdout"]["calibrated"]["brier"]["estimate"], 121 / 144)
 
     def test_monotonic_pooling_and_sparse_bin_abstention(self):
         fit = [case(f"fit{i}", "fit", [(0.21, True), (0.81, False)]) for i in range(5)]
@@ -157,6 +158,50 @@ class CalibrationTests(unittest.TestCase):
             input_file.write_text(json.dumps(payload), encoding="utf-8")
             self.assertEqual(load_json(input_file), payload)
 
+    def test_sparse_high_bin_is_not_pulled_below_a_dense_lower_bin(self):
+        # Nineteen of every twenty proposals score low and are right 80% of the time; the
+        # rare high scores are always right. The neutral pseudo-family must keep that order.
+        fit = []
+        for i in range(6):
+            rows = [(0.55, index % 5 != 0) for index in range(95)] + [(0.95, True)] * 5
+            fit.append(case(f"fit{i}", "fit", rows))
+        held = case("held", "holdout", [(0.55, True), (0.95, True)])
+        bins = evaluate(dataset(fit + [held]))["kinds"][FIELD]["model"]["bins"]
+        self.assertEqual([item["index"] for item in bins], [5, 9])
+        low, high = [item["estimated_probability"] for item in bins]
+        self.assertAlmostEqual(low, (6 * 0.8 + 0.5) / 7)
+        self.assertAlmostEqual(high, (6 * 1.0 + 0.5) / 7)
+
+    def test_reliability_error_and_threshold_metrics(self):
+        # Scores 0.25 are right half the time in both families; scores 0.85 are always
+        # right in one family and right half the time in the other.
+        held = [case("a", "holdout", [(0.25, True), (0.25, False), (0.85, True), (0.85, True)]),
+                case("b", "holdout", [(0.25, True), (0.25, False), (0.85, True), (0.85, False)])]
+        raw = evaluate(dataset(trained_cases() + held))["kinds"][FIELD]["holdout"]["raw_diagnostic"]
+        # Each bin holds half of each family: |0.5 - 0.25| and |0.75 - 0.85|.
+        self.assertAlmostEqual(raw["reliability_error"], 0.5 * 0.25 + 0.5 * 0.10)
+        self.assertEqual([item["threshold"] for item in raw["thresholds"]],
+                         [0.5, 0.6, 0.7, 0.8, 0.9, 0.95])
+        by_threshold = {item["threshold"]: item for item in raw["thresholds"]}
+        self.assertEqual((by_threshold[0.8]["accepted_proposals"],
+                          by_threshold[0.8]["accepted_families"]), (4, 2))
+        self.assertAlmostEqual(by_threshold[0.8]["precision"]["estimate"], 0.75)
+        # Family a keeps 2 of its 3 correct proposals, family b 1 of its 2.
+        self.assertAlmostEqual(by_threshold[0.8]["recall_of_correct_proposals"]["estimate"],
+                               (2 / 3 + 1 / 2) / 2)
+        self.assertEqual(by_threshold[0.9]["accepted_proposals"], 0)
+        self.assertIsNone(by_threshold[0.9]["precision"]["estimate"])
+        self.assertEqual(by_threshold[0.9]["recall_of_correct_proposals"]["estimate"], 0)
+
+    def test_reliability_error_is_zero_for_matching_scores_and_null_without_rows(self):
+        held = [case(f"h{i}", "holdout", [(0.75, True)] * 3 + [(0.75, False)]) for i in range(2)]
+        report = evaluate(dataset(trained_cases() + held))["kinds"][FIELD]["holdout"]
+        self.assertAlmostEqual(report["raw_diagnostic"]["reliability_error"], 0)
+        empty = evaluate(dataset([case("h", "holdout", [])]))["kinds"][FIELD]["holdout"]
+        self.assertIsNone(empty["raw_diagnostic"]["reliability_error"])
+        self.assertTrue(all(item["accepted_proposals"] == 0 and item["precision"]["estimate"] is None
+                            for item in empty["raw_diagnostic"]["thresholds"]))
+
     def test_seeded_metrics_never_leave_probability_or_coverage_bounds(self):
         rng = random.Random(20261118)
         for count in range(1, 21):
@@ -174,6 +219,16 @@ class CalibrationTests(unittest.TestCase):
                     self.assertLessEqual(value, 1)
                 self.assertEqual(sum(bin["proposals"] for bin in result[name]["reliability"]),
                                  result[name]["proposals"])
+                error = result[name]["reliability_error"]
+                self.assertEqual(error is None, result[name]["proposals"] == 0)
+                if error is not None:
+                    self.assertTrue(0 <= error <= 1, error)
+                accepted = [item["accepted_proposals"] for item in result[name]["thresholds"]]
+                self.assertEqual(accepted, sorted(accepted, reverse=True))
+                for item in result[name]["thresholds"]:
+                    for key in ("precision", "recall_of_correct_proposals"):
+                        value = item[key]["estimate"]
+                        self.assertTrue(value is None or 0 <= value <= 1, (key, value))
 
 
 if __name__ == "__main__":

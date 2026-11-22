@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "split_rule": "sha256-of-id order, first half fit",
+  "families": [
+    {
+      "id": "bzip2",
+      "split": "fit",
+      "language": "c",
+      "license": "bzip2-1.0.6",
+      "origin": {"archive": {
+        "name": "bzip2-1.0.8.tar.gz",
+        "url": "https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz",
+        "sha256": "ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269",
+        "prefix": "bzip2-1.0.8"}},
+      "sources": ["blocksort.c", "huffman.c", "crctable.c", "randtable.c", "compress.c",
+                  "decompress.c", "bzlib.c"],
+      "flags": ["-std=gnu17"]
+    },
+    {
+      "id": "expat",
+      "split": "holdout",
+      "language": "c",
+      "license": "MIT",
+      "origin": {"archive": {
+        "name": "expat-2.7.1.tar.xz",
+        "url": "https://github.com/libexpat/libexpat/releases/download/R_2_7_1/expat-2.7.1.tar.xz",
+        "sha256": "354552544b8f99012e5062f7d570ec77f14b412a3ff5c7d8d0dae62c0d217c30",
+        "prefix": "expat-2.7.1"}},
+      "sources": ["lib/xmlparse.c", "lib/xmlrole.c", "lib/xmltok.c"],
+      "include": ["lib"],
+      "defines": ["XML_GE=1", "XML_DTD=1", "XML_NS=1", "XML_CONTEXT_BYTES=1024",
+                  "XML_DEV_URANDOM=1", "HAVE_UNISTD_H=1", "HAVE_FCNTL_H=1"],
+      "flags": ["-std=gnu17"]
+    },
+    {
+      "id": "gnu-demangler",
+      "split": "holdout",
+      "language": "c",
+      "license": "LGPL-2.1-or-later",
+      "origin": {"repository": "GPL/DemanglerGnu/src/demangler_gnu_v2_41"},
+      "sources": ["c/cp-demangle.c", "c/cplus-dem.c", "c/d-demangle.c", "c/rust-demangle.c",
+                  "c/dyn-string.c", "c/safe-ctype.c", "c/xexit.c", "c/xstrdup.c", "c/argv.c",
+                  "c/getopt.c", "c/getopt1.c"],
+      "include": ["headers"],
+      "defines": ["HAVE_STDLIB_H", "HAVE_STRING_H"],
+      "flags": ["-std=gnu17"]
+    },
+    {
+      "id": "jansson",
+      "split": "holdout",
+      "language": "c",
+      "license": "MIT",
+      "origin": {"archive": {
+        "name": "jansson-2.14.1.tar.bz2",
+        "url": "https://github.com/akheron/jansson/releases/download/v2.14.1/jansson-2.14.1.tar.bz2",
+        "sha256": "6bd82d3043dadbcd58daaf903d974891128d22aab7dada5d399cb39094af49ce",
+        "prefix": "jansson-2.14.1"}},
+      "sources": ["src/*.c"],
+      "include": ["src", "android"],
+      "defines": ["HAVE_CONFIG_H"],
+      "config_headers": {"jansson_private_config.h": [
+        "HAVE_STDINT_H=1", "HAVE_UNISTD_H=1", "HAVE_FCNTL_H=1", "HAVE_SYS_TIME_H=1",
+        "HAVE_SYS_TYPES_H=1", "HAVE_SYS_STAT_H=1", "HAVE_SCHED_H=1", "HAVE_LOCALE_H=1",
+        "HAVE_GETTIMEOFDAY=1", "HAVE_LOCALECONV=1", "HAVE_OPEN=1", "HAVE_CLOSE=1",
+        "HAVE_READ=1", "HAVE_SCHED_YIELD=1", "HAVE_STRTOLL=1", "HAVE_SYNC_BUILTINS=1",
+        "HAVE_ATOMIC_BUILTINS=1", "USE_URANDOM=1"]},
+      "flags": ["-std=gnu17"]
+    },
+    {
+      "id": "libtomcrypt",
+      "split": "fit",
+      "language": "c",
+      "license": "Unlicense",
+      "origin": {"archive": {
+        "name": "crypt-1.18.2.tar.xz",
+        "url": "https://github.com/libtom/libtomcrypt/releases/download/v1.18.2/crypt-1.18.2.tar.xz",
+        "sha256": "96ad4c3b8336050993c5bc2cf6c057484f2b0f9f763448151567fbab5e767b84",
+        "prefix": "libtomcrypt-1.18.2"}},
+      "sources": ["src/**/*.c"],
+      "include": ["src/headers"],
+      "defines": ["LTC_SOURCE"],
+      "flags": ["-std=gnu17"]
+    },
+    {
+      "id": "libyaml",
+      "split": "fit",
+      "language": "c",
+      "license": "MIT",
+      "origin": {"archive": {
+        "name": "yaml-0.2.5.tar.gz",
+        "url": "https://github.com/yaml/libyaml/releases/download/0.2.5/yaml-0.2.5.tar.gz",
+        "sha256": "c642ae9b75fee120b2d96c712538bd2cf283228d2337df2cf2988e3c02678ef4",
+        "prefix": "yaml-0.2.5"}},
+      "sources": ["src/*.c"],
+      "include": ["include", "src"],
+      "defines": ["YAML_VERSION_MAJOR=0", "YAML_VERSION_MINOR=2", "YAML_VERSION_PATCH=5",
+                  "YAML_VERSION_STRING=\"0.2.5\""],
+      "flags": ["-std=gnu17"]
+    },
+    {
+      "id": "lua",
+      "split": "holdout",
+      "language": "c",
+      "license": "MIT",
+      "origin": {"archive": {
+        "name": "lua-5.4.8.tar.gz",
+        "url": "https://www.lua.org/ftp/lua-5.4.8.tar.gz",
+        "sha256": "4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae",
+        "prefix": "lua-5.4.8"}},
+      "sources": ["src/*.c"],
+      "exclude": ["src/lua.c", "src/luac.c"],
+      "defines": ["LUA_USE_POSIX"],
+      "flags": ["-std=gnu17"]
+    },
+    {
+      "id": "lz4",
+      "split": "holdout",
+      "language": "c",
+      "license": "BSD-2-Clause",
+      "origin": {"archive": {
+        "name": "lz4-1.10.0.tar.gz",
+        "url": "https://github.com/lz4/lz4/releases/download/v1.10.0/lz4-1.10.0.tar.gz",
+        "sha256": "537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b",
+        "prefix": "lz4-1.10.0"}},
+      "sources": ["lib/*.c"],
+      "flags": ["-std=gnu17"]
+    },
+    {
+      "id": "lzfse",
+      "split": "holdout",
+      "language": "c",
+      "license": "BSD-3-Clause",
+      "origin": {"repository": "Ghidra/Features/FileFormats/src/lzfse/c"},
+      "sources": ["*.c"],
+      "exclude": ["lzfse_main.c"],
+      "flags": ["-std=gnu17"]
+    },
+    {
+      "id": "mujs",
+      "split": "fit",
+      "language": "c",
+      "license": "ISC",
+      "origin": {"archive": {
+        "name": "mujs-1.3.6.tar.gz",
+        "url": "https://mujs.com/downloads/mujs-1.3.6.tar.gz",
+        "sha256": "7cf3a5e622cff41903efff0334518fc94af063256752c38ba4618a5191e44f18",
+        "prefix": "mujs-1.3.6"}},
+      "sources": ["js*.c", "json.c", "regexp.c", "utf.c"],
+      "flags": ["-std=gnu17"]
+    },
+    {
+      "id": "zlib",
+      "split": "fit",
+      "language": "c",
+      "license": "Zlib",
+      "origin": {"repository": "Ghidra/Features/Decompiler/src/decompile/zlib"},
+      "sources": ["*.c"],
+      "defines": ["NO_GZIP"],
+      "flags": ["-std=gnu17"]
+    },
+    {
+      "id": "zstd",
+      "split": "fit",
+      "language": "c",
+      "license": "BSD-3-Clause",
+      "origin": {"archive": {
+        "name": "zstd-1.5.7.tar.gz",
+        "url": "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz",
+        "sha256": "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3",
+        "prefix": "zstd-1.5.7"}},
+      "sources": ["lib/common/*.c", "lib/compress/*.c", "lib/decompress/*.c"],
+      "defines": ["ZSTD_DISABLE_ASM"],
+      "flags": ["-std=gnu17"]
+    }
+  ]
+}
