@@ -63,6 +63,7 @@ public final class StackStrings {
 	// The engine assembles at most 1 MiB of distinct stack bytes per group.
 	private static final long MAXIMUM_GROUP_BYTES = (1 << 20) - MAXIMUM_VALUE_BYTES;
 	private static final int MAXIMUM_TEXT = 1_024;
+	private static final int MAXIMUM_NAME_CHARACTERS = 1_024;
 	// Earlier writes examined per function when stores of unknown values overwrite them;
 	// past it such a store ends the run instead.
 	private static final long FORGET_BUDGET = 1L << 22;
@@ -630,8 +631,9 @@ public final class StackStrings {
 			record.addProperty("address", hex(entry));
 			String name = function.getName(true).replaceAll("\\s+", " ").strip();
 			StringBuilder printable = new StringBuilder();
-			name.codePoints().forEach(point -> printable.appendCodePoint(Character.isISOControl(point) ? '?' : point));
-			record.addProperty("name", printable.length() > 1_024 ? printable.substring(0, 1_024) : printable.toString());
+			name.codePoints().limit(MAXIMUM_NAME_CHARACTERS)
+				.forEach(point -> printable.appendCodePoint(Character.isISOControl(point) ? '?' : point));
+			record.addProperty("name", printable.toString());
 			return record;
 		}
 

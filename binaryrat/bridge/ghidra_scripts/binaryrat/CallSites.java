@@ -4,6 +4,7 @@ package binaryrat;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -17,6 +18,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.stream.Stream;
 
+import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
@@ -53,8 +55,9 @@ import ghidra.util.task.TaskMonitor;
 /**
  * Every call to a function, each shown as its caller's decompiled C statement with the
  * argument values the decompiler proved constant. Calls through thunks of the function count
- * as calls to it. Each caller is decompiled once under a memory-watched lease. Read-only: the
- * Program's modification number is checked around every step and any change fails the run.
+ * as calls to it. Each caller is decompiled once under a memory-watched lease. The report keeps
+ * whole sites in address order within its limits. The Program's modification number is checked
+ * around every step and any change fails the run.
  */
 public final class CallSites {
 	public static final String ANALYSIS_MODE = "read_only_call_sites";
@@ -68,8 +71,11 @@ public final class CallSites {
 	public static final int MAXIMUM_STATEMENT = 1_024;
 	public static final int MAXIMUM_ARGUMENTS = 64;
 	public static final int MAXIMUM_STRING = 120;
+	// The Python report decoder enforces the same UTF-8 byte limit.
+	private static final int MAXIMUM_REPORT_BYTES = 8 * 1024 * 1024;
 	private static final int MAXIMUM_REASON = 300;
 	private static final long MAXIMUM_INSTRUCTION_BYTES = 64;
+	private static final Gson JSON = new GsonBuilder().serializeNulls().create();
 
 	public static final String DECOMPILED = "decompiled";
 	public static final String NO_FUNCTION = "no_function";
@@ -84,8 +90,16 @@ public final class CallSites {
 	/** Recovers a report and returns it as JSON text (for PyGhidra callers). */
 	public static String recoverJson(Program program, Function function, int timeoutSeconds,
 			int maximumSites, int maximumCallers, TaskMonitor monitor) throws Exception {
-		return new GsonBuilder().serializeNulls().create()
-			.toJson(recover(program, function, timeoutSeconds, maximumSites, maximumCallers, monitor));
+		return encodeReport(recover(program, function, timeoutSeconds, maximumSites, maximumCallers, monitor));
+	}
+
+	/** Encodes the report with the same JSON format used to measure its byte limit. */
+	public static String encodeReport(JsonObject report) {
+		return JSON.toJson(report);
+	}
+
+	private static int encodedBytes(JsonObject object) {
+		return encodeReport(object).getBytes(StandardCharsets.UTF_8).length;
 	}
 
 	/**
@@ -112,6 +126,51 @@ public final class CallSites {
 
 	/** One incoming call reference: where the call is and which target address it reaches. */
 	private record Site(Address address, Address target) {
+	}
+
+	/** Keep a prefix within the byte budget, even when records arrive grouped by caller. */
+	private static final class SiteRecords {
+		private record SizedSite(JsonObject record, int bytes, Address attemptedCaller) {
+		}
+
+		private final TreeMap<Address, SizedSite> entries = new TreeMap<>();
+		private int available;
+		private Address firstOmitted;
+
+		SiteRecords(int available) {
+			this.available = available;
+		}
+
+		boolean mayInclude(Site site) {
+			return firstOmitted == null || site.address().compareTo(firstOmitted) < 0;
+		}
+
+		void add(Site site, JsonObject record, Address attemptedCaller) {
+			// Charge one byte per site for its separator, including one spare byte for the first site.
+			int bytes = encodedBytes(record) + 1;
+			entries.put(site.address(), new SizedSite(record, bytes, attemptedCaller));
+			available -= bytes;
+			while (available < 0) {
+				var last = entries.pollLastEntry();
+				available += last.getValue().bytes();
+				firstOmitted = last.getKey();
+			}
+		}
+
+		void finish(JsonObject report) {
+			JsonArray sites = report.getAsJsonArray("sites");
+			Set<Address> callers = new LinkedHashSet<>();
+			for (SizedSite site : entries.values()) {
+				sites.add(site.record());
+				if (site.attemptedCaller() != null) {
+					callers.add(site.attemptedCaller());
+				}
+			}
+			if (firstOmitted != null) {
+				report.addProperty("truncated", true);
+			}
+			report.addProperty("decompiled_callers", callers.size());
+		}
 	}
 
 	/** State of one recovery; never shared between threads. */
@@ -175,29 +234,6 @@ public final class CallSites {
 				truncated = true;
 			}
 
-			// Each caller is decompiled once for all of its sites, in order of its first site.
-			Map<Address, JsonObject> records = new TreeMap<>();
-			Map<Function, List<Site>> byCaller = new LinkedHashMap<>();
-			for (Site site : sites) {
-				Function caller = program.getFunctionManager().getFunctionContaining(site.address());
-				if (caller == null) {
-					records.put(site.address(), siteRecord(site, null, NO_FUNCTION,
-						"the call is not inside a defined function"));
-				}
-				else if (!SummaryLayouts.supportedFunction(program, caller)) {
-					records.put(site.address(), siteRecord(site, caller, UNSUPPORTED_CALLER,
-						"the caller is external, a thunk, uninitialized or above 64 KiB"));
-				}
-				else {
-					byCaller.computeIfAbsent(caller, key -> new ArrayList<>()).add(site);
-				}
-			}
-			int decompiled = 0;
-			if (!byCaller.isEmpty()) {
-				decompiled = decompileCallers(byCaller, targets, records);
-			}
-			checkCurrent();
-
 			JsonObject report = new JsonObject();
 			report.addProperty("schema_version", 1);
 			report.addProperty("analysis_mode", ANALYSIS_MODE);
@@ -210,15 +246,6 @@ public final class CallSites {
 			report.addProperty("language_id", program.getLanguageID().toString());
 			report.addProperty("compiler_spec_id", program.getCompilerSpec().getCompilerSpecID().toString());
 			JsonArray targetRecords = new JsonArray();
-			for (Address target : targets) {
-				JsonObject record = new JsonObject();
-				record.addProperty("address_space", target.getAddressSpace().getName());
-				record.addProperty("address", hex(target));
-				Function at = program.getFunctionManager().getFunctionAt(target);
-				record.addProperty("name", at == null ? null : text(at.getName(true)));
-				record.addProperty("thunk", !target.equals(root.getEntryPoint()));
-				targetRecords.add(record);
-			}
 			report.add("targets", targetRecords);
 			report.addProperty("timeout_seconds", timeout);
 			report.addProperty("site_limit", maximumSites);
@@ -226,18 +253,56 @@ public final class CallSites {
 			report.addProperty("references_scanned", Math.min(scanned, MAXIMUM_REFERENCES));
 			report.addProperty("call_references", callReferences);
 			report.addProperty("other_references", other);
+			report.addProperty("truncated", false);
+			report.addProperty("decompiled_callers", maximumCallers);
+			report.add("sites", new JsonArray());
+			// Reserve the widest count and boolean above, plus the headless file's final newline.
+			int available = MAXIMUM_REPORT_BYTES - encodedBytes(report) - 1;
 			report.addProperty("truncated", truncated);
-			report.addProperty("decompiled_callers", decompiled);
-			JsonArray siteRecords = new JsonArray();
-			for (JsonObject record : records.values()) {
-				siteRecords.add(record);
+			for (Address target : targets) {
+				checkCurrent();
+				JsonObject record = new JsonObject();
+				record.addProperty("address_space", target.getAddressSpace().getName());
+				record.addProperty("address", hex(target));
+				Function at = program.getFunctionManager().getFunctionAt(target);
+				record.addProperty("name", at == null ? null : text(at.getName(true)));
+				record.addProperty("thunk", !target.equals(root.getEntryPoint()));
+				available -= encodedBytes(record) + (targetRecords.isEmpty() ? 0 : 1);
+				if (available < 0) {
+					throw new IOException("call-site target metadata exceeds the 8 MiB report limit");
+				}
+				targetRecords.add(record);
 			}
-			report.add("sites", siteRecords);
+			SiteRecords records = new SiteRecords(available);
+			// Each caller is decompiled once for all of its sites, in order of its first site.
+			Map<Function, List<Site>> byCaller = new LinkedHashMap<>();
+			for (Site site : sites) {
+				if (!records.mayInclude(site)) {
+					break;
+				}
+				Function caller = program.getFunctionManager().getFunctionContaining(site.address());
+				if (caller == null) {
+					records.add(site, siteRecord(site, null, NO_FUNCTION,
+						"the call is not inside a defined function"), null);
+				}
+				else if (!SummaryLayouts.supportedFunction(program, caller)) {
+					records.add(site, siteRecord(site, caller, UNSUPPORTED_CALLER,
+						"the caller is external, a thunk, uninitialized or above 64 KiB"), null);
+				}
+				else {
+					byCaller.computeIfAbsent(caller, key -> new ArrayList<>()).add(site);
+				}
+			}
+			if (!byCaller.isEmpty()) {
+				decompileCallers(byCaller, targets, records);
+			}
+			records.finish(report);
+			checkCurrent();
 			return report;
 		}
 
-		private int decompileCallers(Map<Function, List<Site>> byCaller, Set<Address> targets,
-				Map<Address, JsonObject> records) throws Exception {
+		private void decompileCallers(Map<Function, List<Site>> byCaller, Set<Address> targets,
+				SiteRecords records) throws Exception {
 			Path workspace = Files.createTempDirectory("binaryrat-callsites-");
 			int decompiled = 0;
 			try (EngineClient engine = EngineClient.start(EngineClient.findExecutable(), workspace)) {
@@ -249,11 +314,18 @@ public final class CallSites {
 						this::configure, limits)) {
 					for (Map.Entry<Function, List<Site>> entry : byCaller.entrySet()) {
 						checkCurrent();
+						if (!records.mayInclude(entry.getValue().get(0))) {
+							break;
+						}
 						Function caller = entry.getKey();
 						if (decompiled >= maximumCallers) {
 							for (Site site : entry.getValue()) {
-								records.put(site.address(), siteRecord(site, caller, CALLER_LIMIT,
-									"the caller decompile limit of " + maximumCallers + " was reached"));
+								monitor.checkCancelled();
+								if (!records.mayInclude(site)) {
+									break;
+								}
+								records.add(site, siteRecord(site, caller, CALLER_LIMIT,
+									"the caller decompile limit of " + maximumCallers + " was reached"), null);
 							}
 							continue;
 						}
@@ -264,9 +336,12 @@ public final class CallSites {
 						String failure = failure(run, results);
 						for (Site site : entry.getValue()) {
 							monitor.checkCancelled();
-							records.put(site.address(), failure != null ?
+							if (!records.mayInclude(site)) {
+								break;
+							}
+							records.add(site, failure != null ?
 								siteRecord(site, caller, DECOMPILE_FAILED, failure) :
-								decompiledSite(site, caller, results, targets));
+								decompiledSite(site, caller, results, targets), caller.getEntryPoint());
 						}
 					}
 				}
@@ -281,7 +356,6 @@ public final class CallSites {
 					// A scanner can still hold a temporary file; the finished result matters more.
 				}
 			}
-			return decompiled;
 		}
 
 		/** Why a caller's decompilation cannot be read, or null when it completed. */
@@ -582,12 +656,20 @@ public final class CallSites {
 	private static String printable(String value) {
 		StringBuilder builder = new StringBuilder(value.length());
 		value.codePoints().forEach(point -> builder.appendCodePoint(
-			Character.isISOControl(point) ? '?' : point));
+			Character.isISOControl(point) || point >= Character.MIN_SURROGATE &&
+				point <= Character.MAX_SURROGATE ? '?' : point));
 		return builder.toString();
 	}
 
 	private static String clip(String value, int limit) {
-		return value.length() <= limit ? value : value.substring(0, limit - 3) + "...";
+		if (value.length() <= limit) {
+			return value;
+		}
+		int end = limit - 3;
+		if (Character.isHighSurrogate(value.charAt(end - 1)) && Character.isLowSurrogate(value.charAt(end))) {
+			end--;
+		}
+		return value.substring(0, end) + "...";
 	}
 
 	private static long reserve(String name, long fallback) {

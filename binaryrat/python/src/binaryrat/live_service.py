@@ -10,7 +10,6 @@ from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field, is_dataclass
 import json
 from itertools import chain
-import math
 import re
 import secrets
 import socket
@@ -199,7 +198,7 @@ class LiveClient:
 
     def __init__(self, endpoint: LiveEndpoint, *, timeout: float = 65):
         if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-                or not math.isfinite(timeout) or not 0 < timeout <= 3600):
+                or not 0 < timeout <= 3600):
             raise ValueError("timeout must be between zero and 3600 seconds")
         self._endpoint = endpoint
         self._timeout = timeout

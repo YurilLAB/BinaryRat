@@ -16,6 +16,7 @@ BinaryRat reports without starting a JVM or opening the Ghidra project.
 binaryrat-diff before.serial.jsonl after.serial.jsonl
 binaryrat-diff before.serial.jsonl after.serial.jsonl --json
 binaryrat-diff before.serial.jsonl after.serial.jsonl --patch
+binaryrat-diff before.serial.jsonl after.serial.jsonl --patch --function ram:401000
 binaryrat-explain read_packed.json --offset 0x1
 ```
 
@@ -25,10 +26,15 @@ address space and entry offset and checks that each file describes a single
 revision of the same SHA-256-identified executable. For a useful comparison,
 keep the same load addresses and export selection. A function present in only
 one capture is reported as added or removed. `--patch` adds a unified diff of
-each changed prototype, error and C text (`--context N` lines around each hunk,
-3 by default; with `--json` it is the `patch` field). It reads both files a second
-time and keeps only the earlier text of the changed functions in memory. The exit
-code is 0 for identical records, 1 for differences and 2 for invalid inputs.
+each changed prototype, error and C text with `--context N` lines around each hunk
+(default 3). With `--json` it is the `patch` field. Changes that have identical
+display lines, such as line-ending differences, show raw text digests. The patch
+option rereads both files, verifies they still contain the same bytes, and keeps
+only the earlier text of the changed functions in memory. Repeat `--function SPACE:HEX` to review
+specific entries, including functions at the same offset in different overlays.
+The counts cover the selected entries and the command still validates both full
+exports. An entry absent from both files is an error. The exit code is 0 for
+identical records, 1 for differences and 2 for invalid inputs.
 
 `binaryrat-explain` shows which recorded instructions support a proposed
 field. Supply a byte offset, or omit `--offset` to inspect the layout for the

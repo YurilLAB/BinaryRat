@@ -153,7 +153,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--install-dir", metavar="GHIDRA_DIR")
     parser.add_argument("--backend", choices=("auto", "scheduled", "stock"), default="scheduled",
                         help="choose the Ghidra backend (default: scheduled)")
-    parser.add_argument("--timeout-seconds", type=int, default=30)
+    parser.add_argument("--timeout-seconds", type=int,
+                        help="seconds per decompile (default 30), or for the full stack-string scan "
+                             "(no timeout by default)")
     parser.add_argument("--max-heap-mb", type=int, default=1024)
     parser.add_argument("--json", action="store_true",
                         help="emit the result and status as JSON, one JSON object per listed function, "
@@ -185,21 +187,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.stack_strings:
                 entry = _resolve(view, args.function).entry if args.function is not None else None
                 strings = view.stack_strings(entry, minimum_length=args.min_length or 4,
-                                             max_functions=args.max_functions or 10_000)
+                                             max_functions=args.max_functions or 10_000,
+                                             timeout_seconds=args.timeout_seconds)
                 print(json.dumps(strings.document, ensure_ascii=True) if args.json else
                       "\n".join(explain_stack_strings(strings)))
                 return 0 if strings.strings else 1
             function = _resolve(view, args.function)
+            timeout_seconds = 30 if args.timeout_seconds is None else args.timeout_seconds
             if args.call_sites:
                 report = view.call_sites(function.entry, max_sites=args.max_sites or 64,
                                          max_callers=args.max_callers or 32,
-                                         timeout_seconds=args.timeout_seconds)
+                                         timeout_seconds=timeout_seconds)
                 if args.json:
                     print(json.dumps(report.document, ensure_ascii=True))
                 else:
                     print("\n".join(explain_call_sites(report)))
                 return 0 if report.sites else 1
-            run = view.decompile_with_metrics(function.entry, timeout_seconds=args.timeout_seconds)
+            run = view.decompile_with_metrics(function.entry, timeout_seconds=timeout_seconds)
     except (CancelledError, KeyboardInterrupt):
         return 130
     except (LiveProgramError, LookupError, OSError, TypeError, ValueError) as cause:

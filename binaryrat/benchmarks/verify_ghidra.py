@@ -489,8 +489,10 @@ def check_call_sites(headless: Path, script_directory: Path, destination: Path, 
     verify_extension.py runs the same proof against the installed table.
     """
     report_path = destination / "call-sites.json"
+    limit_path = destination / "call-sites.json.limit.json"
     log = destination / "call-sites.log"
     report_path.unlink(missing_ok=True)
+    limit_path.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="call sites-", dir=destination) as directory:
         measured = measured_run([
             str(headless), directory, "fixture", "-deleteProject", "-scriptPath", str(script_directory),
@@ -498,12 +500,17 @@ def check_call_sites(headless: Path, script_directory: Path, destination: Path, 
     content = log.read_text(encoding="utf-8", errors="replace")
     passed = re.findall(r"BINARYRAT_CALL_SITES_OK sites=(\d+) statuses=6 .* checks=(\d+) .* "
                         r"table=(true|false)", content)
-    if measured["returncode"] or "REPORT SCRIPT ERROR" in content or len(passed) != 1 or not report_path.is_file():
+    if (measured["returncode"] or "REPORT SCRIPT ERROR" in content or len(passed) != 1 or
+            not report_path.is_file() or not limit_path.is_file()):
         raise RuntimeError(f"call-site proof failed; see {log}")
     parsed = load_call_sites_report(report_path)
     if len(parsed.sites) != int(passed[0][0]) or len(parsed.sites) != 10:
         raise RuntimeError(f"call-site report does not match the proof; see {report_path}")
+    limited = load_call_sites_report(limit_path)
+    if not limited.truncated or limited.call_references != 49 or not 1 < len(limited.sites) < 49:
+        raise RuntimeError(f"call-site report did not truncate at the byte limit; see {limit_path}")
     return {"passed": True, "sites": len(parsed.sites), "cancellation_checks": int(passed[0][1]),
+            "byte_limited_sites": len(limited.sites), "byte_limited_report_bytes": limit_path.stat().st_size,
             "statuses": sorted({site.status for site in parsed.sites}), "table": passed[0][2] == "true",
             "log": log.name, "wall_seconds": measured["wall_seconds"]}
 

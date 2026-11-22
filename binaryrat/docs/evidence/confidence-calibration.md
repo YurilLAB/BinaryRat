@@ -137,13 +137,17 @@ labels right when the compiler changes a signature: GCC's clones with removed
 arguments describe only the parameters they still take. A proposed byte range is
 correct when it is exactly one declared member, array element or base subobject
 of the pointee at any nesting depth. A range that spans members, covers part of
-one, or lies beyond the pointee is incorrect.
+one, or lies beyond a fixed-size pointee is incorrect. A flexible array has no
+declared end, including when its enclosing structure is a terminal member of
+another structure or a member of a union under GCC's C extension.
 
 **Exclusions, all counted in the report.** Functions with identical
 instructions, linked addresses masked, are kept once across all families before
 the split. Ranges that touch bit-field storage are not judged. Pointees that are
 incomplete in the function's unit or have virtual bases give no case. A
 parameter the survey did not see is an abstention: a case without proposals.
+The oracle also abstains if one range needs more than 32,768 distinct layout
+states to be checked.
 
 ### Archived CI measurement
 

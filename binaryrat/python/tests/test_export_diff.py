@@ -12,9 +12,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from binaryrat.export_diff import _fingerprint, _patches, compare_exports, main
-from binaryrat.exports import parse_export
+from binaryrat import export_diff
+from binaryrat.export_diff import compare_exports, main
 from binaryrat.exports import ExportError
 
 
@@ -245,23 +246,89 @@ class ExportDiffTests(unittest.TestCase):
             compare_exports(self.before, self.after, patch_context=True)
 
     def test_patch_refuses_an_export_replaced_between_passes(self):
-        self.write(self.before, [row(c="a\n")])
-        self.write(self.after, [row(c="b\n")])
-        with self.before.open(encoding="utf-8") as stream:
-            old = _fingerprint(next(parse_export(stream)))
-        with self.after.open(encoding="utf-8") as stream:
-            record = next(parse_export(stream))
-        new = _fingerprint(record)
-        entry = record.function.entry
-        self.assertIn(entry, _patches(self.before, self.after, 1 << 20, {entry: (old, new)}, 3))
-        # The second pass must see the same records the first pass fingerprinted.
-        for prints in ((new, new), (old, old)):
-            with self.subTest(prints=prints), self.assertRaisesRegex(ExportError, "changed while"):
-                _patches(self.before, self.after, 1 << 20, {entry: prints}, 3)
-        missing = dict(entry=entry)
-        with self.assertRaisesRegex(ExportError, "changed while"):
-            from binaryrat.models import Address
-            _patches(self.before, self.after, 1 << 20, {Address("ram", 0x99): (old, new)}, 3)
+        before = [row(c="a\n"), row("20")]
+        after = [row(c="b\n"), row("20")]
+        cases = [
+            (self.before, [row("20")]),
+            (self.before, [row(c="edited again\n"), row("20")]),
+            (self.before, [dict(record, revision=6) for record in before]),
+            (self.after, [dict(record, program_id="sha256:" + "ef" * 32) for record in after]),
+            (self.after, [row(c="b\n"), row("20", name="changed unselected function")]),
+        ]
+        replacement = self.before.with_suffix(".next")
+        make_patches = export_diff._patches
+        for path, records in cases:
+            with self.subTest(path=path.name, records=records):
+                self.write(self.before, before)
+                self.write(self.after, after)
+                self.write(replacement, records)
+
+                def replace(*args):
+                    replacement.replace(path)
+                    return make_patches(*args)
+
+                with patch.object(export_diff, "_patches", side_effect=replace):
+                    status, out, err = self.cli("--patch", "--json", "--function", "ram:10")
+                self.assertEqual((status, out), (2, ""))
+                self.assertIn(f"{path}: the export changed", err)
+
+    def test_patch_keeps_both_names_when_a_function_is_renamed(self):
+        self.write(self.before, [row(c="before\n", name="old_name")])
+        self.write(self.after, [row(c="after\n", name="new_name")])
+        report = compare_exports(self.before, self.after, patch_context=0)
+        self.assertEqual(report["changes"][0]["patch"].splitlines()[:2],
+                         ["--- before ram:10 old_name", "+++ after ram:10 new_name"])
+
+    def test_patch_shows_raw_digests_when_only_line_endings_change(self):
+        for before, after in (("a\nb\n", "a\r\nb\r\n"), ("a\n", "a"), ("a\r\nb\n", "a\nb\r\n")):
+            with self.subTest(before=before, after=after):
+                self.write(self.before, [row(c=before, error=before)])
+                self.write(self.after, [row(c=after, error=after)])
+                status, out, err = self.cli("--patch", "--json")
+                self.assertEqual((status, err), (1, ""))
+                change = json.loads(out)["changes"][0]
+                self.assertEqual(change["fields"], ["c", "error"])
+                for label in ("C text", "Error text"):
+                    for sign, value in (("-", before), ("+", after)):
+                        digest = hashlib.sha256(value.encode()).hexdigest()
+                        self.assertIn(f"{sign}/* {label} raw SHA-256: {digest} */", change["patch"])
+
+    def test_function_selection_distinguishes_overlays_and_counts_selected_entries(self):
+        self.write(self.before, [row("10"), row("10", address_space="overlay"),
+                                 row("20"), row("30"), row("40")])
+        self.write(self.after, [row("10", c="changed main"),
+                                row("10", c="changed overlay", address_space="overlay"),
+                                row("30"), row("40", c="unselected change"), row("50")])
+        status, out, err = self.cli(
+            "--json", "--patch", "--function", "overlay:0X0010", "--function", "overlay:10",
+            "--function", "ram:20", "--function", "ram:30", "--function", "ram:50",
+        )
+        self.assertEqual((status, err), (1, ""))
+        report = json.loads(out)
+        self.assertEqual(report["counts"], {"added": 1, "removed": 1, "changed": 1, "unchanged": 1})
+        self.assertEqual([(c["address_space"], c["address"], c["kind"]) for c in report["changes"]],
+                         [("overlay", "10", "changed"), ("ram", "20", "removed"),
+                          ("ram", "50", "added")])
+        self.assertIn("+changed overlay", report["changes"][0]["patch"])
+        self.assertEqual(self.cli("--function", "ram:30")[0], 0)
+
+    def test_function_selection_rejects_missing_entries_and_validates_both_files(self):
+        self.write(self.before, [row("10")])
+        self.write(self.after, [row("10")])
+        status, out, err = self.cli("--function", "ram:10", "--function", "overlay:10")
+        self.assertEqual((status, out), (2, ""))
+        self.assertIn("overlay:10", err)
+        for malformed in ("10", ":10", "ram:-1", "ram:10000000000000000"):
+            with self.subTest(malformed=malformed):
+                with self.assertRaises(SystemExit) as raised:
+                    self.cli("--function", malformed)
+                self.assertEqual(raised.exception.code, 2)
+        for bad in (row("20", revision=6), row("10000000000000000"), row("0010")):
+            with self.subTest(bad=bad):
+                self.write(self.after, [row("10"), bad])
+                status, out, err = self.cli("--function", "ram:10")
+                self.assertEqual((status, out), (2, ""))
+                self.assertTrue(err)
 
     @staticmethod
     def apply_patch(before, patch):

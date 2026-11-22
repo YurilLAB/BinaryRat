@@ -1,7 +1,7 @@
 """Live Program facade tests. Apache-2.0; Copyright 2026 YurilLAB."""
 
 from concurrent.futures import CancelledError
-from contextlib import ExitStack, redirect_stderr
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import io
 from hashlib import sha256
 import json
@@ -124,6 +124,21 @@ class LiveProgramInputTests(unittest.TestCase):
         self.assertEqual(view._page(range(100002), str, 100000, 1),
                          Page(("100000",), None, truncated=True))
 
+    def test_stack_string_cli_forwards_requested_timeout(self):
+        base = ["fixture.gpr", "/program", "--stack-strings", "--json"]
+        with patch("binaryrat.decompile_cli.open_program") as open_view:
+            view = open_view.return_value.__enter__.return_value
+            view.stack_strings.return_value = Mock(document={"strings": []}, strings=())
+            for options, timeout in (([], None), (["--timeout-seconds", "7"], 7)):
+                with self.subTest(timeout=timeout), redirect_stdout(io.StringIO()):
+                    self.assertEqual(decompile_main(base + options), 1)
+                    view.stack_strings.assert_called_with(None, minimum_length=4, max_functions=10_000,
+                                                          timeout_seconds=timeout)
+            view.stack_strings.side_effect = TimeoutError("BinaryRat stack-string scan timed out")
+            with redirect_stderr(io.StringIO()) as error:
+                self.assertEqual(decompile_main(base + ["--timeout-seconds", "7"]), 2)
+                self.assertIn("stack-string scan timed out", error.getvalue())
+
     def test_transport_rejects_oversize_and_partial_frames(self):
         self.assertEqual(_encode({"x": "a"}, 10), b'{"x":"a"}\n')
         with self.assertRaises(LiveProtocolError):
@@ -168,6 +183,14 @@ class LiveProgramInputTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Circular reference"):
                 client.data_type(cycle, "Name")
             connect.assert_not_called()
+
+    def test_client_rejects_out_of_range_timeouts(self):
+        endpoint = LiveEndpoint(12345, "a" * 43)
+        for timeout in (0, 3601, True, "1", float("inf"), float("-inf"), float("nan"), 10**1000):
+            with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "between zero and 3600"):
+                LiveClient(endpoint, timeout=timeout)
+        for timeout in (0.5, 3600):
+            self.assertIsInstance(LiveClient(endpoint, timeout=timeout), LiveClient)
 
     def test_live_stack_strings_bounds_and_errors(self):
         token = secrets.token_urlsafe(32)
@@ -460,6 +483,52 @@ class LiveGhidraTests(unittest.TestCase):
                 sleep(0.01)
             self.assertTrue(monitor.isCancelled())
         self.assertFalse(any(thread.name == "binaryrat-live-cancel" for thread in active_threads()))
+
+    def test_stack_string_deadline_bounds_wait_for_program_view(self):
+        from ghidra.framework import Application
+
+        if Application.getModuleRootDir("BinaryRat") is None:
+            self.skipTest("stack strings require the BinaryRat extension")
+        with open_program(self.marker, self.strings_path) as view:
+            started = Event()
+            finished = Event()
+            outcomes = Queue(1)
+
+            def scan():
+                started.set()
+                try:
+                    outcomes.put(view.stack_strings(timeout_seconds=1))
+                except Exception as cause:
+                    outcomes.put(cause)
+                finally:
+                    finished.set()
+
+            worker = Thread(target=scan, daemon=True)
+            try:
+                with view._read():
+                    worker.start()
+                    self.assertTrue(started.wait(5), "stack-string scan did not start")
+                    self.assertTrue(finished.wait(2), "expired scan is still waiting for the Program view")
+                self.assertIsInstance(outcomes.get(timeout=5), TimeoutError)
+            finally:
+                worker.join(5)
+            self.assertEqual(view.stack_strings(timeout_seconds=5).strings[0].text, "live")
+
+    def test_extension_reports_with_stock_decompilation_selected(self):
+        from ghidra.framework import Application
+
+        if Application.getModuleRootDir("BinaryRat") is None:
+            self.skipTest("analysis reports require the BinaryRat extension")
+        for path, method, args in (
+            (self.strings_path, "stack_strings", ()),
+            (self.program_path, "call_sites", (self.target,)),
+            (self.layout_path, "solve_layout", (self.holder,)),
+        ):
+            with self.subTest(method=method), open_program(self.marker, path) as default:
+                expected = getattr(default, method)(*args)
+                with open_program(self.marker, path, backend="stock") as view:
+                    self.assertEqual(view.decompilation_backend, "stock")
+                    self.assertEqual(getattr(view, method)(*args), expected)
 
     def test_incomplete_shared_project_is_rejected(self):
         from ghidra.framework.data import DefaultProjectData
@@ -974,7 +1043,7 @@ class LiveGhidraTests(unittest.TestCase):
                         dict(timeout_seconds=61), dict(timeout_seconds=True)):
                 with self.subTest(bad=bad), self.assertRaises(ValueError):
                     view.stack_strings(**bad)
-            with patch("binaryrat.live.monotonic", side_effect=(0, 2)):
+            with patch("binaryrat.live.monotonic", side_effect=(0, 0, 2)):
                 with self.assertRaisesRegex(TimeoutError, "stack-string scan timed out"):
                     view.stack_strings(timeout_seconds=1)
             with self.assertRaises(LookupError):
@@ -992,7 +1061,8 @@ class LiveGhidraTests(unittest.TestCase):
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertEqual(listed.stdout.splitlines(), [
             "Stack strings in 1 function: 1", f'{Address("ram", self.strings_entry.offset + 4)}  builds_text  stack -0x10  "live"'])
-        as_json = subprocess.run([*base, self.strings_path, "builds_text", *options, "--json"], encoding="utf-8",
+        as_json = subprocess.run([*base, self.strings_path, "builds_text", *options, "--timeout-seconds", "30",
+                                  "--json"], encoding="utf-8",
                                  capture_output=True, timeout=180)
         self.assertEqual(as_json.returncode, 0, as_json.stderr)
         self.assertEqual(json.loads(as_json.stdout), one.document)
@@ -1005,7 +1075,7 @@ class LiveGhidraTests(unittest.TestCase):
         runner = [executable] if executable is not None else [sys.executable, "-m", "binaryrat.live_service"]
         process = subprocess.Popen(
             [*runner, str(self.marker), self.strings_path, "--install-dir", str(self.install),
-             "--idle-timeout", "30", "--max-heap-mb", "512"],
+             "--backend", "stock", "--idle-timeout", "30", "--max-heap-mb", "512"],
             stdout=subprocess.PIPE, text=True, encoding="utf-8",
         )
         ready = Queue(1)
@@ -1020,7 +1090,9 @@ class LiveGhidraTests(unittest.TestCase):
         reader = Thread(target=read_until_ready, daemon=True)
         reader.start()
         try:
-            client = LiveClient(LiveEndpoint.from_ready_line(ready.get(timeout=90)))
+            endpoint = LiveEndpoint.from_ready_line(ready.get(timeout=90))
+            self.assertEqual(endpoint.backend, "stock")
+            client = LiveClient(endpoint)
             self.assertEqual(client.stack_strings(), whole)
             self.assertEqual(client.stack_strings(self.strings_entry), one_for_client)
             self.assertEqual(client.stack_strings(minimum_length=5).strings, ())

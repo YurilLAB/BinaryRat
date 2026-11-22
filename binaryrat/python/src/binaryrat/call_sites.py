@@ -148,7 +148,7 @@ def _int(obj: Any, key: str, where: str, minimum: int = _INT64[0], maximum: int 
 
 
 def _printable(value: str) -> bool:
-    return not any(ord(ch) < 32 or 127 <= ord(ch) < 160 for ch in value)
+    return not any(code < 32 or 127 <= code < 160 or 0xD800 <= code <= 0xDFFF for code in map(ord, value))
 
 
 def _text(obj: Any, key: str, where: str, *, optional: bool = False, limit: int = 4096) -> str | None:
@@ -166,7 +166,8 @@ def _null(obj: Any, key: str, where: str) -> None:
 
 
 def _address(obj: Any, prefix: str, where: str) -> Address:
-    space = _text(obj, f"{prefix}address_space", where, limit=64)
+    # Ghidra overlay names can be longer than ordinary processor address-space names.
+    space = _text(obj, f"{prefix}address_space", where, limit=MAX_REPORT_BYTES)
     offset = _get(obj, f"{prefix}address", str, where)
     if _HEX.fullmatch(offset) is None:
         _fail(f"{where}: {prefix}address must be bare lowercase hex")
@@ -370,13 +371,15 @@ def _bounded_int(token: str) -> int:
 
 def decode_call_sites_report(data: bytes | str) -> CallSitesReport:
     """Decode strict JSON (no duplicate keys, NaN or huge integers) and validate it."""
-    raw = data.encode("utf-8") if isinstance(data, str) else data
-    if len(raw) > MAX_REPORT_BYTES:
+    if len(data) > MAX_REPORT_BYTES:
         raise CallSitesReportError("call-site report exceeds 8 MiB")
     try:
+        raw = data.encode("utf-8") if isinstance(data, str) else data
+        if len(raw) > MAX_REPORT_BYTES:
+            raise CallSitesReportError("call-site report exceeds 8 MiB")
         document = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object,
                               parse_constant=_no_constant, parse_int=_bounded_int)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as cause:
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as cause:
         raise CallSitesReportError(f"invalid call-site report JSON: {cause}") from None
     return parse_call_sites_report(document)
 

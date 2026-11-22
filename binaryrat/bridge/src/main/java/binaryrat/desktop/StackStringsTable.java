@@ -73,6 +73,7 @@ public final class StackStringsTable {
 		}
 		var tables = tool.getService(TableService.class);
 		var programs = tool.getService(ProgramManager.class);
+		String summary = summary(program, report);
 		AtomicReference<TableChooserDialog> created = new AtomicReference<>();
 		DomainObjectListener changed = event -> {
 			if (program.getModificationNumber() != revision) {
@@ -100,16 +101,10 @@ public final class StackStringsTable {
 			if (table == null) {
 				throw new CancelledException();
 			}
-			Set<String> functions = new HashSet<>();
 			for (Row row : rows) {
 				monitor.checkCancelled();
-				functions.add(row.function());
 				table.add(new StringRow(row));
 			}
-			String summary = rows.size() + (rows.size() == 1 ? " string" : " strings") + " in " +
-				functions.size() + (functions.size() == 1 ? " function" : " functions") +
-				(report.get("truncated").getAsBoolean() ? " (list truncated)" : "") +
-				". Double-click a row to open its first store in the Listing.";
 			Boolean visible = Swing.runNow(() -> {
 				if (monitor.isCancelled() || programs.getCurrentProgram() != program || program.isClosed()) {
 					return false;
@@ -147,16 +142,24 @@ public final class StackStringsTable {
 		}
 	}
 
+	private static String summary(Program program, JsonObject report) throws IOException {
+		var strings = report.getAsJsonArray("strings");
+		Set<Address> functions = new HashSet<>();
+		for (JsonElement element : strings) {
+			functions.add(readAddress(program, element.getAsJsonObject().getAsJsonObject("function")));
+		}
+		return strings.size() + (strings.size() == 1 ? " string" : " strings") + " in " +
+			functions.size() + (functions.size() == 1 ? " function" : " functions") +
+			(report.get("truncated").getAsBoolean() ? " (list truncated)" : "") +
+			". Double-click a row to open its first store in the Listing.";
+	}
+
 	/** The rows of a report, each at the lowest address of the stores behind its text. */
 	public static List<Row> rows(Program program, JsonObject report) throws IOException {
 		List<Row> rows = new ArrayList<>();
 		for (JsonElement element : report.getAsJsonArray("strings")) {
 			JsonObject found = element.getAsJsonObject();
-			AddressSpace space = program.getAddressFactory().getAddressSpace(found.get("address_space").getAsString());
-			if (space == null) {
-				throw new IOException("stack string in an unknown address space");
-			}
-			Address address = space.getAddress(Long.parseUnsignedLong(found.get("address").getAsString(), 16));
+			Address address = readAddress(program, found);
 			long offset = found.get("stack_offset").getAsLong();
 			String text = QUOTE.toJson(found.get("text").getAsString()) +
 				(found.get("text_truncated").getAsBoolean() ? "..." : "");
@@ -166,6 +169,14 @@ public final class StackStringsTable {
 				found.get("terminated").getAsBoolean() ? "yes" : "no"));
 		}
 		return rows;
+	}
+
+	private static Address readAddress(Program program, JsonObject location) throws IOException {
+		AddressSpace space = program.getAddressFactory().getAddressSpace(location.get("address_space").getAsString());
+		if (space == null) {
+			throw new IOException("stack string in an unknown address space");
+		}
+		return space.getAddress(Long.parseUnsignedLong(location.get("address").getAsString(), 16));
 	}
 
 	private static void readable(TableChooserDialog table) {

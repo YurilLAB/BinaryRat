@@ -3,18 +3,22 @@
 
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 
-import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 import binaryrat.CallSites;
 import ghidra.app.script.GhidraScript;
@@ -85,6 +89,7 @@ public class BinaryRatCallSitesProof extends GhidraScript {
 			require(CallSites.recover(program, callee, 60, CallSites.DEFAULT_SITES,
 				CallSites.DEFAULT_CALLERS, monitor).equals(report), "a second run gave a different report");
 			boolean table = table(report);
+			byteLimit(output);
 			rejected();
 			CountingMonitor counter = new CountingMonitor(Integer.MAX_VALUE, () -> {
 			});
@@ -94,8 +99,7 @@ public class BinaryRatCallSitesProof extends GhidraScript {
 			cancellation(checks);
 			programChange(checks);
 			if (output != null) {
-				Files.writeString(output, new GsonBuilder().serializeNulls().setPrettyPrinting().create()
-					.toJson(report) + "\n", StandardCharsets.UTF_8);
+				Files.writeString(output, CallSites.encodeReport(report) + "\n", StandardCharsets.UTF_8);
 			}
 			println("BINARYRAT_CALL_SITES_OK sites=" + report.getAsJsonArray("sites").size() +
 				" statuses=" + statuses.size() + " thunk=true limits=true checks=" + checks +
@@ -104,6 +108,104 @@ public class BinaryRatCallSitesProof extends GhidraScript {
 		}
 		finally {
 			program.release(this);
+		}
+	}
+
+	/** A real call-site report that exceeds the shared JSON budget with all of its rows. */
+	private void byteLimit(Path output) throws Exception {
+		var space = program.getAddressFactory().getDefaultAddressSpace();
+		var flat = new FlatProgramAPI(program, monitor);
+		var memory = program.getMemory();
+		long target = 0x40000;
+		int symbol = 0x50000;
+		int callerCount = 12;
+		int sitesPerCaller = 4;
+		List<String> addresses = new ArrayList<>();
+		Function wide;
+		int transaction = program.startTransaction("Build large call-site report fixture");
+		boolean commit = false;
+		try {
+			memory.createInitializedBlock(".text.wide", space.getAddress(target),
+				(callerCount + 1) * 0x1000, (byte) 0xcc, monitor, false).setExecute(true);
+			var data = memory.createInitializedBlock(".rodata.wide", space.getAddress(symbol),
+				8, (byte) 0, monitor, false);
+			data.setWrite(false);
+			data.setExecute(false);
+			flat.createData(space.getAddress(symbol), IntegerDataType.dataType);
+			// The HTML-sensitive characters expand under Gson escaping; some remaining characters
+			// take multiple bytes in UTF-8. A Java character count would undercount them.
+			program.getSymbolTable().createLabel(space.getAddress(symbol),
+				"fixture_" + "<".repeat(700) + "é".repeat(280), SourceType.USER_DEFINED);
+			bytes(target, "31c0c3");
+			wide = function(flat, target, "many_parameters");
+			wide.setReturnType(IntegerDataType.dataType, SourceType.USER_DEFINED);
+			ParameterImpl[] parameters = new ParameterImpl[64];
+			for (int index = 0; index < parameters.length; index++) {
+				parameters[index] = new ParameterImpl("arg" + index,
+					new PointerDataType(IntegerDataType.dataType), program);
+			}
+			wide.replaceParameters(FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true,
+				SourceType.USER_DEFINED, parameters);
+			for (int index = 0; index < callerCount; index++) {
+				long entry = target + (index + 1) * 0x1000;
+				ByteBuffer body = ByteBuffer.allocate(0x1000).order(ByteOrder.LITTLE_ENDIAN);
+				body.put(new byte[] { 0x48, (byte) 0x83, (byte) 0xec, 8 }); // sub rsp, 8
+				for (int site = 0; site < sitesPerCaller; site++) {
+					for (int register : new int[] { 0xbf, 0xbe, 0xba, 0xb9 }) {
+						body.put((byte) register).putInt(symbol);
+					}
+					body.put((byte) 0x41).put((byte) 0xb8).putInt(symbol); // mov r8d, symbol
+					body.put((byte) 0x41).put((byte) 0xb9).putInt(symbol); // mov r9d, symbol
+					for (int argument = 6; argument < parameters.length; argument++) {
+						body.put((byte) 0x68).putInt(symbol); // push symbol
+					}
+					long address = entry + body.position();
+					addresses.add(Long.toHexString(address));
+					body.put((byte) 0xe8).putInt((int) (target - (address + 5)));
+					body.put(new byte[] { 0x48, (byte) 0x81, (byte) 0xc4 }).putInt(8 * 58); // add rsp, 464
+				}
+				body.put(new byte[] { 0x48, (byte) 0x83, (byte) 0xc4, 8, (byte) 0xc3 }); // add rsp, 8; ret
+				memory.setBytes(space.getAddress(entry), body.array());
+				function(flat, entry, "wide_caller_" + index);
+			}
+			// The orphan is recorded before the decompiled rows but follows them by address.
+			long orphan = target + callerCount * 0x1000 + 0xf00;
+			byte[] orphanBody = ByteBuffer.allocate(6).order(ByteOrder.LITTLE_ENDIAN).put((byte) 0xe8)
+				.putInt((int) (target - (orphan + 5))).put((byte) 0xc3).array();
+			memory.setBytes(space.getAddress(orphan), orphanBody);
+			require(flat.disassemble(space.getAddress(orphan)), "could not disassemble wide report orphan");
+			addresses.add(Long.toHexString(orphan));
+			// A cut after the first half of this supplementary character would make invalid UTF-8.
+			lonely.setName("n".repeat(1020) + "\ud83d\udc00tail", SourceType.USER_DEFINED);
+			commit = true;
+		}
+		finally {
+			program.endTransaction(transaction, commit);
+		}
+		String content = CallSites.recoverJson(program, wide, 60, 64, callerCount, monitor);
+		int size = content.getBytes(StandardCharsets.UTF_8).length;
+		JsonObject report = JsonParser.parseString(content).getAsJsonObject();
+		var sites = report.getAsJsonArray("sites");
+		println("BinaryRat wide-call fixture bytes=" + size + " sites=" + sites.size() +
+			" args=" + sites.get(0).getAsJsonObject().getAsJsonArray("arguments").size());
+		require(size <= 8 * 1024 * 1024, "the produced report exceeds the Python decoder limit: " + size);
+		require(report.get("truncated").getAsBoolean() && report.get("call_references").getAsInt() == addresses.size() &&
+			sites.size() > 1 && sites.size() < addresses.size(), "byte truncation and total references");
+		require(report.get("decompiled_callers").getAsInt() == (sites.size() + sitesPerCaller - 1) / sitesPerCaller,
+			"only callers represented in the report count towards its decompiled caller total");
+		for (int index = 0; index < sites.size(); index++) {
+			JsonObject site = sites.get(index).getAsJsonObject();
+			require(site.get("address").getAsString().equals(addresses.get(index)) &&
+				site.get("status").getAsString().equals(CallSites.DECOMPILED) &&
+				site.getAsJsonArray("arguments").size() == 64, "the report keeps complete sites in address order");
+		}
+		String clipped = CallSites.recoverJson(program, lonely, 60, 1, 1, monitor);
+		require(StandardCharsets.UTF_8.newEncoder().canEncode(clipped) &&
+			JsonParser.parseString(clipped).getAsJsonObject().getAsJsonObject("function")
+				.get("name").getAsString().equals("n".repeat(1020) + "..."), "Unicode clipping");
+		if (output != null) {
+			Files.writeString(output.resolveSibling(output.getFileName() + ".limit.json"), content,
+				StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
 		}
 	}
 

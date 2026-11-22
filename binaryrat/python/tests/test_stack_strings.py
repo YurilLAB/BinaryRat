@@ -81,6 +81,22 @@ class StackStringsReportTests(unittest.TestCase):
         with self.assertRaisesRegex(StackStringsReportError, "one-function"):
             parse_stack_strings_report(document)
 
+    def test_name_at_unicode_character_limit(self):
+        document = _report()
+        name = "a" * 1023 + "\U0001f400"
+        document["strings"][0]["function"]["name"] = name
+        report = decode_stack_strings_report(json.dumps(document))
+        self.assertEqual(report.strings[0].function_name, name)
+        output = json.dumps(report.document, ensure_ascii=False).encode("utf-8")
+        self.assertEqual(decode_stack_strings_report(output), report)
+        for invalid in (name + "z", "a" * 1023 + "\ud83d", "a" * 1023 + "\udc00"):
+            with self.subTest(invalid=ascii(invalid[-2:])):
+                document["strings"][0]["function"]["name"] = invalid
+                with self.assertRaisesRegex(StackStringsReportError, "nonempty printable text"):
+                    decode_stack_strings_report(json.dumps(document))
+        with self.assertRaisesRegex(StackStringsReportError, "invalid stack-string report JSON"):
+            decode_stack_strings_report(json.dumps(document, ensure_ascii=False))
+
     def test_overlay_spaces_sharing_an_offset_stay_apart(self):
         # BinaryRatStackStringsProof's overlay banks: bankA::1000 and bankB::1000 beside ram:1000.
         def banked(space: str, text: str) -> dict:

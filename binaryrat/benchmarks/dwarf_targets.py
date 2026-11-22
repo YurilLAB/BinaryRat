@@ -8,6 +8,7 @@ compiler says each parameter lives at the entry address, so a changed or shorten
 every structure, union or class such a parameter points to.
 """
 
+from collections.abc import Callable
 from pathlib import Path
 
 from elftools.dwarf.descriptions import describe_form_class
@@ -37,6 +38,7 @@ MAX_LAYOUT_BYTES = 1 << 32
 MAX_MEMBERS = 4096
 MAX_TYPE_DEPTH = 64
 MAX_TYPES = 200_000
+MAX_RANGE_STATES = 32_768
 MAX_FUNCTIONS = 200_000
 MAX_PARAMETERS = 64
 MAX_EXPRESSION_BYTES = 64
@@ -138,11 +140,15 @@ class _Reader:
 
     def array(self, die, depth: int) -> dict:
         counts = []
+        flexible = False
         for child in die.iter_children():
             if child.tag != "DW_TAG_subrange_type":
                 continue
             if depth + len(counts) + 1 >= MAX_TYPE_DEPTH:
                 raise ValueError("DWARF array nesting exceeds the oracle limit")
+            if not counts:
+                flexible = ("DW_AT_count" not in child.attributes and
+                            "DW_AT_upper_bound" not in child.attributes)
             length = self.constant(child, "DW_AT_count")
             if length is None:
                 last = self.constant(child, "DW_AT_upper_bound")
@@ -158,7 +164,10 @@ class _Reader:
         for index in range(len(counts) - 1, 0, -1):
             element = self.remember(f"{die.offset:x}[{index}]",
                                     self.array_dimension(element, counts[index]))
-        return self.array_dimension(element, counts[0])
+        outer = self.array_dimension(element, counts[0])
+        if flexible and self.types[element]["size"]:
+            outer["flexible_tail"] = True
+        return outer
 
     def array_dimension(self, element: str, count: int | None) -> dict:
         width = self.types[element]["size"]
@@ -175,6 +184,7 @@ class _Reader:
         if self.flag(die, "DW_AT_declaration") or size is None or size > MAX_LAYOUT_BYTES:
             return node
         node["size"] = size
+        last_member = None
         for child in die.iter_children():
             if child.tag not in ("DW_TAG_member", "DW_TAG_inheritance"):
                 continue
@@ -184,6 +194,7 @@ class _Reader:
             if len(node["members"]) + len(node["bitfields"]) >= MAX_MEMBERS:
                 node["dynamic"] = True
                 break
+            last_member = None
             width = self.constant(child, "DW_AT_bit_size")
             if width is not None:
                 span = self.bitfield_bytes(child, width, kind, depth)
@@ -196,8 +207,15 @@ class _Reader:
             if offset is None or self.constant(child, "DW_AT_virtuality"):
                 node["dynamic"] = True  # virtual base or computed member location
                 continue
-            node["members"].append({"offset": offset, "name": self.text(child, "DW_AT_name"),
-                                    "type": self.intern(self.referenced(child), depth + 1)})
+            last_member = {"offset": offset, "name": self.text(child, "DW_AT_name"),
+                           "type": self.intern(self.referenced(child), depth + 1)}
+            node["members"].append(last_member)
+        # GCC permits a flexible array's enclosing structure to sit in a union
+        # or at the end of another structure. Its sizeof still excludes the tail.
+        terminal = node["members"] if kind == "union" else (last_member,)
+        for member in terminal:
+            if member is not None and self.types[member["type"]].get("flexible_tail"):
+                member["flexible_tail"] = node["flexible_tail"] = True
         return node
 
     def member_offset(self, member, kind: str) -> int | None:
@@ -383,6 +401,10 @@ def target_status(types: dict, type_id: str) -> str | None:
     return None
 
 
+class _RangeBudgetExceeded(Exception):
+    pass
+
+
 def classify_range(types: dict, type_id: str, offset: int, width: int) -> str:
     """Labels a byte range inside a pointee: member, none, bitfield or unsupported.
 
@@ -392,12 +414,30 @@ def classify_range(types: dict, type_id: str, offset: int, width: int) -> str:
     """
     if type(offset) is not int or type(width) is not int or offset < 0 or width < 1:
         return "none"
-    return _inside(types, types[type_id], offset, width, 0)
+    # Overlapping union views can lead to the same subobject many times.
+    memo: dict[tuple[str, int, int], str] = {}
+    visited = 0
 
+    def visit(key: str, relative: int, depth: int) -> str:
+        nonlocal visited
+        if depth > MAX_TYPE_DEPTH:
+            return "unsupported"
+        state = (key, relative, depth)
+        if state not in memo:
+            if visited >= MAX_RANGE_STATES:
+                raise _RangeBudgetExceeded
+            visited += 1
+            memo[state] = _inside(types, types[key], relative, width, depth, visit)
+        return memo[state]
 
-def _inside(types: dict, node: dict, offset: int, width: int, depth: int) -> str:
-    if depth > MAX_TYPE_DEPTH:
+    try:
+        return visit(type_id, offset, 0)
+    except _RangeBudgetExceeded:
         return "unsupported"
+
+
+def _inside(types: dict, node: dict, offset: int, width: int, depth: int,
+            visit: Callable[[str, int, int], str]) -> str:
     if node["kind"] in ("struct", "union", "class"):
         if node["dynamic"]:
             return "unsupported"
@@ -414,9 +454,9 @@ def _inside(types: dict, node: dict, offset: int, width: int, depth: int) -> str
                 return "member"
             if size is None and child["kind"] != "array":
                 continue
-            if size is not None and relative + width > size:
+            if size is not None and relative + width > size and not member.get("flexible_tail"):
                 continue
-            found = _inside(types, child, relative, width, depth + 1)
+            found = visit(member["type"], relative, depth + 1)
             if found == "member":
                 return found
             if found != "none":
@@ -436,5 +476,5 @@ def _inside(types: dict, node: dict, offset: int, width: int, depth: int) -> str
             return "member"
         if relative + width > size:
             return "none"
-        return _inside(types, element, relative, width, depth + 1)
+        return visit(node["element"], relative, depth + 1)
     return "none"

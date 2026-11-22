@@ -99,7 +99,8 @@ def _int(obj: Any, key: str, where: str, minimum: int = _INT64[0], maximum: int 
 
 def _name(obj: Any, key: str, where: str) -> str:
     value = _get(obj, key, str, where)
-    if not value or len(value) > 1024 or any(ord(ch) < 32 or 127 <= ord(ch) < 160 for ch in value):
+    if not value or len(value) > 1024 or any(
+            point < 32 or 127 <= point < 160 or 0xD800 <= point <= 0xDFFF for point in map(ord, value)):
         _fail(f"{where}: {key} must be nonempty printable text")
     return value
 
@@ -225,13 +226,13 @@ def _bounded_int(token: str) -> int:
 
 def decode_stack_strings_report(data: bytes | str) -> StackStringsReport:
     """Decode strict JSON (no duplicate keys, NaN or huge integers) and validate it."""
-    raw = data.encode("utf-8") if isinstance(data, str) else data
-    if len(raw) > MAX_REPORT_BYTES:
-        raise StackStringsReportError("stack-string report exceeds 16 MiB")
     try:
+        raw = data.encode("utf-8") if isinstance(data, str) else data
+        if len(raw) > MAX_REPORT_BYTES:
+            raise StackStringsReportError("stack-string report exceeds 16 MiB")
         document = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object,
                               parse_constant=_no_constant, parse_int=_bounded_int)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as cause:
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as cause:
         raise StackStringsReportError(f"invalid stack-string report JSON: {cause}") from None
     return parse_stack_strings_report(document)
 

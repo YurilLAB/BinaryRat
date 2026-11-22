@@ -39,8 +39,8 @@ import ghidra.util.task.TaskMonitorAdapter;
  * width, a 64-bit immediate, UTF-16, a rewritten slot, an XOR-decoded constant, vector loads
  * from read-only and writable memory, sub-registers, a call that clobbers registers, branches,
  * a loop join, limits, cancellation and a Program change during the run. Includes fall-through
- * controls for x86-64 and AArch64. Runs as a headless project-only preScript, from a checkout
- * or against the installed extension.
+ * controls for x86-64 and AArch64 and the Unicode function name limit. Runs as a headless
+ * project-only preScript, from a checkout or against the installed extension.
  */
 public class BinaryRatStackStringsProof extends GhidraScript {
 	private static final String TABLE = "binaryrat.desktop.StackStringsTable";
@@ -84,6 +84,7 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 			programChange(checks);
 			JsonObject overlay = overlays(report);
 			fallThrough();
+			longUnicodeName();
 			if (output != null) {
 				var gson = new GsonBuilder().serializeNulls().setPrettyPrinting().create();
 				Files.writeString(output, gson.toJson(report) + "\n", StandardCharsets.UTF_8);
@@ -92,7 +93,7 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 			println("BINARYRAT_STACK_STRINGS_OK strings=" + report.getAsJsonArray("strings").size() +
 				" checks=" + checks + " joins=true calls=true read_only=true limits=true cancellation=true" +
 				" program_change=true deterministic=true overlays=true table=" + table +
-				" fall_through_x86_64=true fall_through_aarch64=true");
+				" fall_through_x86_64=true fall_through_aarch64=true unicode_name=true");
 		}
 		finally {
 			program.release(this);
@@ -367,6 +368,28 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 			"e80a8b52284bab72e80700b9c0035fd6", 8, 1, 0, (byte) 0);
 	}
 
+	private void longUnicodeName() throws Exception {
+		String prefix = "a".repeat(1023) + "\uD83D\uDC00";
+		int transaction = program.startTransaction("Use a long Unicode function name");
+		boolean commit = false;
+		try {
+			builder.setName(prefix + "tail", SourceType.USER_DEFINED);
+			commit = true;
+		}
+		finally {
+			program.endTransaction(transaction, commit);
+		}
+		JsonObject report = StackStrings.recover(program, builder, 4, 1, monitor);
+		require(prefix.equals(report.getAsJsonObject("function").get("name").getAsString()),
+			"the selected function name lost its 1024th Unicode character");
+		var strings = report.getAsJsonArray("strings");
+		require(strings.size() == 7, "the renamed function lost rows");
+		for (JsonElement row : strings) {
+			String name = row.getAsJsonObject().getAsJsonObject("function").get("name").getAsString();
+			require(prefix.equals(name), "a row lost the function name's 1024th Unicode character");
+		}
+	}
+
 	private void assertFallThrough(String languageId, String compilerId, String firstCode, String secondCode,
 			int storeOffset, int stackOperand, int stackOffset, byte fill) throws Exception {
 		var language = DefaultLanguageService.getLanguageService().getLanguage(new LanguageID(languageId));
@@ -541,6 +564,24 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 			}
 			require(matches == 1, "overlay table rows for \"" + texts[index] + "\": " + matches);
 		}
+		int rename = program.startTransaction("Give the banked functions the same name");
+		boolean renamed = false;
+		try {
+			for (Function function : banked) {
+				function.setName("banked", SourceType.USER_DEFINED);
+			}
+			renamed = true;
+		}
+		finally {
+			program.endTransaction(rename, renamed);
+		}
+		JsonObject matchingNames = StackStrings.recover(program, null, 4, StackStrings.DEFAULT_FUNCTIONS, monitor);
+		require(strings(matchingNames).stream().filter(value -> value.startsWith("banked ")).count() == 2,
+			"two overlay functions must share the same display name");
+		var summary = table.getDeclaredMethod("summary", Program.class, JsonObject.class);
+		require(summary.trySetAccessible(), "stack-string table summary is unavailable");
+		String message = (String) summary.invoke(null, program, matchingNames);
+		require(message.startsWith("15 strings in 6 functions."), "stack-string table summary: " + message);
 		return report;
 	}
 

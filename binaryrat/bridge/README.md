@@ -270,13 +270,13 @@ caller past the decompile limit.
 Headless, `BinaryRatCallSites.java OUTPUT_JSON ENTRY_HEX|SPACE:HEX|name:FUNCTION
 [TIMEOUT_SECONDS] [MAX_SITES=64] [MAX_CALLERS=32]` writes the report
 (`analysis_mode` `read_only_call_sites`) without replacing a file. Each caller
-is decompiled once under a memory-watched lease, the Program revision is
-checked around every step, and the reference, site, caller and argument limits
-are reported rather than silently applied. The script, PyGhidra
+is decompiled once under a memory-watched lease, and the Program revision is
+checked around every step. The shared 8 MiB JSON budget retains complete rows
+in address order and marks a shortened report as truncated. The script, PyGhidra
 (`ProgramView.call_sites`), `binaryrat-decompile --call-sites` and the
 `binaryrat-live` service share one Java service, `binaryrat.CallSites`.
-`BinaryRatCallSitesProof.java` checks the statuses, thunks, limits,
-cancellation and Program changes on a disposable x86-64 Program.
+`BinaryRatCallSitesProof.java` checks the statuses, thunks, limits, UTF-8
+report sizing, cancellation and Program changes on a disposable x86-64 Program.
 
 ## Stack strings
 

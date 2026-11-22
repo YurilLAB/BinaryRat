@@ -143,6 +143,13 @@ def _check_cancel(cancel: Event | None) -> None:
         raise CancelledError("Ghidra read cancelled")
 
 
+def _require_extension(feature: str) -> None:
+    from ghidra.framework import Application
+
+    if Application.getModuleRootDir("BinaryRat") is None:
+        raise LiveProgramError(f"{feature} require the BinaryRat extension")
+
+
 @contextmanager
 def _monitor(cancel: Event | None, deadline: float | None = None) -> Iterator[Any]:
     from ghidra.util.task import TaskMonitor, TaskMonitorAdapter
@@ -283,14 +290,22 @@ class ProgramView:
             raise StaleProgramError("Ghidra Program changed while the view was open")
 
     @contextmanager
-    def _read(self) -> Iterator[Any]:
-        with self._lock:
+    def _read(self, *, deadline: float | None = None) -> Iterator[Any]:
+        if deadline is None:
+            self._lock.acquire()
+        else:
+            remaining = deadline - monotonic()
+            if remaining <= 0 or not self._lock.acquire(timeout=remaining):
+                raise TimeoutError("Ghidra read timed out waiting for the Program view")
+        try:
             program = self._program
             if program is None:
                 raise LiveProgramError("Program view is closed")
             self._check(program)
             yield program
             self._check(program)
+        finally:
+            self._lock.release()
 
     @staticmethod
     def _native_address(program: Any, address: Address) -> Any:
@@ -561,8 +576,7 @@ class ProgramView:
                                        ("timeout_seconds", timeout_seconds, 1, _MAX_SUMMARY_TIMEOUT_SECONDS)):
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer from {low} to {high}")
-        if self._scheduled_service is None:
-            raise LiveProgramError("Summary layouts require the BinaryRat extension")
+        _require_extension("Summary layouts")
         from ghidra.util.exception import CancelledException
         from jpype import JClass, JException
 
@@ -606,8 +620,7 @@ class ProgramView:
                                         _MAX_CALL_SITE_TIMEOUT_SECONDS)):
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer from {low} to {high}")
-        if self._scheduled_service is None:
-            raise LiveProgramError("Call sites require the BinaryRat extension")
+        _require_extension("Call sites")
         from ghidra.util.exception import CancelledException
         from jpype import JClass, JException
 
@@ -655,8 +668,7 @@ class ProgramView:
         if timeout_seconds is not None and (
                 type(timeout_seconds) is not int or not 1 <= timeout_seconds <= _MAX_STACK_STRINGS_TIMEOUT_SECONDS):
             raise ValueError(f"timeout_seconds must be an integer from 1 to {_MAX_STACK_STRINGS_TIMEOUT_SECONDS}")
-        if self._scheduled_service is None:
-            raise LiveProgramError("Stack strings require the BinaryRat extension")
+        _require_extension("Stack strings")
         from ghidra.util.exception import CancelledException
         from jpype import JClass, JException
 
@@ -666,7 +678,7 @@ class ProgramView:
             if deadline is not None and monotonic() >= deadline:
                 raise TimeoutError("BinaryRat stack-string scan timed out")
 
-        with self._read() as program:
+        with self._read(deadline=deadline) as program:
             check_deadline()
             function = None
             if entry is not None:

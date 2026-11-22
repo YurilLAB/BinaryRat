@@ -12,7 +12,6 @@ import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.stream.Stream;
 
-import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
@@ -91,7 +90,7 @@ public class BinaryRatCallSites extends GhidraScript {
 		Path workspace = Files.createTempDirectory(output.getParent(), ".binaryrat-callsites-");
 		try {
 			Path staged = workspace.resolve("report.json");
-			String content = new GsonBuilder().serializeNulls().setPrettyPrinting().create().toJson(report);
+			String content = CallSites.encodeReport(report);
 			Files.writeString(staged, content + "\n", StandardCharsets.UTF_8);
 			checkCurrent();
 			// A hard link publishes the complete report and refuses an existing destination.

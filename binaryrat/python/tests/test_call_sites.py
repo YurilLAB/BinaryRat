@@ -11,6 +11,7 @@ import json
 import random
 import unittest
 from contextlib import redirect_stderr
+from unittest.mock import patch
 
 from binaryrat import Address
 from binaryrat.call_sites import (
@@ -80,6 +81,42 @@ def _encode(document: dict) -> str:
 
 
 class CallSitesReportTests(unittest.TestCase):
+    def test_long_overlay_address_space_keeps_its_identity(self):
+        document = _report()
+        space = "bank_" + "x" * 65
+        for field in ("function", "root_function"):
+            document[field]["address_space"] = space
+        for target in document["targets"]:
+            target["address_space"] = space
+        for site in document["sites"]:
+            site["address_space"] = site["target_address_space"] = space
+            if site["caller"] is not None:
+                site["caller"]["address_space"] = space
+        report = decode_call_sites_report(_encode(document))
+        self.assertEqual(report.root_function, Address(space, 0x1080))
+        self.assertEqual(report.sites[1].site, Address(space, 0x100A))
+        self.assertEqual(report.sites[1].target, report.root_function)
+        self.assertEqual(report.sites[1].caller, Address(space, 0x1000))
+
+    def test_utf8_byte_budget_and_invalid_unicode(self):
+        document = _report()
+        argument = document["sites"][1]["arguments"][1]
+        argument["string"] = '"café🐀"'
+        text = json.dumps(document, ensure_ascii=False)
+        raw = text.encode("utf-8")
+        for payload in (text, raw):
+            with patch("binaryrat.call_sites.MAX_REPORT_BYTES", len(raw)):
+                self.assertEqual(decode_call_sites_report(payload).document, document)
+            with patch("binaryrat.call_sites.MAX_REPORT_BYTES", len(raw) - 1):
+                with self.assertRaisesRegex(CallSitesReportError, "exceeds 8 MiB"):
+                    decode_call_sites_report(payload)
+
+        argument["string"] = '"\ud800"'
+        with self.assertRaisesRegex(CallSitesReportError, "invalid call-site report JSON"):
+            decode_call_sites_report(json.dumps(document, ensure_ascii=False))
+        with self.assertRaisesRegex(CallSitesReportError, "printable text"):
+            decode_call_sites_report(json.dumps(document))
+
     def test_valid_report_decodes_and_renders(self):
         report = decode_call_sites_report(_encode(_report()))
         self.assertEqual((report.root_function, report.root_name), (Address("ram", 0x1080), "callee"))

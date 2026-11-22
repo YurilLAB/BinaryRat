@@ -99,6 +99,12 @@ class RangeTests(unittest.TestCase):
         self.assertEqual(classify_range(types, previous, 0, 4), "unsupported")
         self.assertEqual(classify_range(types, "n3", 0, 4), "member")
 
+    def test_exhausting_the_work_budget_abstains_from_judging_the_range(self):
+        self.assertEqual(classify_range(TYPES, "pairs", 2, 2), "member")
+        with patch("dwarf_targets.MAX_RANGE_STATES", 1):
+            self.assertEqual(classify_range(TYPES, "pairs", 2, 2), "unsupported")
+            self.assertEqual(classify_range(TYPES, "pairs", 0, 4), "member")
+
     def test_target_status(self):
         self.assertIsNone(target_status(TYPES, "outer"))
         self.assertIsNone(target_status(TYPES, "bits"))
@@ -361,6 +367,9 @@ SOURCE = r"""
 struct inner { short low; short high; };
 struct outer { int tag; struct inner pair; long values[3]; unsigned flag : 3; unsigned rest : 5; };
 struct listed { int count; int items[]; };
+struct wrapped { int tag; struct listed payload; };
+union listing { long alternative; struct listed payload; };
+struct wrapped_union { long tag; union listing tail; };
 struct matrix { int rows[2][3]; short cube[2][2][3]; };
 union both { int number; float real; };
 struct opaque;
@@ -376,6 +385,8 @@ KEEP long seven(long a, long b, long c, long d, long e, long f, struct outer *la
 { return a + b + c + d + e + f + last->tag; }
 KEEP long by_value(struct big copy, struct outer *item) { return copy.a + item->tag; }
 KEEP int flexible(struct listed *list) { return list->items[2] + list->count; }
+KEEP int flexible_wrapped(struct wrapped *value) { return value->payload.items[3]; }
+KEEP int flexible_union(struct wrapped_union *value) { return value->tail.payload.items[3]; }
 KEEP int read_matrix(struct matrix *matrix) { return matrix->rows[1][2] + matrix->cube[1][1][2]; }
 static KEEP int pick(int unused, struct outer *item) { item->tag += 1; return item->pair.low; }
 int use_pick(struct outer *item) { return pick(1, item) + pick(2, item); }
@@ -461,6 +472,42 @@ class CompiledTests(unittest.TestCase):
         for offset, width in ((4, 12), (16, 12), (40, 6), (48, 2)):
             with self.subTest(offset=offset, width=width):
                 self.assertEqual(classify_range(types, matrix, offset, width), "none")
+
+    def test_terminal_flexible_members_remain_accessible_through_structs_and_unions(self):
+        types = self.oracle["types"]
+        for function, offset in (("flexible_wrapped", 20), ("flexible_union", 24)):
+            with self.subTest(function=function):
+                target = self.parameter(function, "value")["type"]
+                self.assertLess(types[target]["size"], offset + 4)
+                self.assertEqual(classify_range(types, target, offset, 4), "member")
+                self.assertEqual(classify_range(types, target, offset + 1, 4), "none")
+                self.assertEqual(classify_range(types, target, offset, 8), "none")
+
+    def test_overlapping_union_views_reuse_the_same_range_verdict(self):
+        root = Path(self.scratch.name)
+        source = root / "overlap.c"
+        library = root / "overlap.so"
+        declarations = ["union view0 { long bits; };"]
+        for depth in range(1, 17):
+            declarations.append(f"union view{depth} {{ union view{depth - 1} left, right; }};")
+        declarations.append("unsigned pick_byte(const union view16 *p) "
+                            "{ return ((const unsigned char *)p)[1]; }")
+        source.write_text("\n".join(declarations), encoding="utf-8")
+        subprocess.run(["gcc", "-O2", "-g", "-gdwarf-4", "-fPIC", "-shared", str(source), "-o",
+                        str(library)], check=True)
+        oracle = read_dwarf_targets(library)
+        target = next(function for function in oracle["functions"] if function["name"] == "pick_byte")
+
+        class CountingTypes(dict):
+            reads = 0
+
+            def __getitem__(self, key):
+                self.reads += 1
+                return super().__getitem__(key)
+
+        types = CountingTypes(oracle["types"])
+        self.assertEqual(classify_range(types, target["parameters"][0]["type"], 1, 1), "none")
+        self.assertLessEqual(types.reads, 4 * len(types))
 
     def test_stripped_or_foreign_files_are_refused(self):
         stripped = Path(self.scratch.name) / "stripped.so"
