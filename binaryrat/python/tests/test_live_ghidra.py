@@ -19,14 +19,14 @@ from tempfile import TemporaryDirectory
 from time import monotonic, sleep
 import tracemalloc
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from binaryrat import (
     Address, LayoutRecoveryError, LiveProgramError, Page, StaleProgramError, decompile_program,
     open_program,
 )
 from binaryrat.decompile_cli import _parse_function, _resolve, main as decompile_main
-from binaryrat.live import ProgramView, _monitor
+from binaryrat.live import ProgramView, StackStringsError, _monitor
 from binaryrat.live_service import (
     LIVE_PROTOCOL_VERSION,
     READY_PREFIX,
@@ -34,9 +34,11 @@ from binaryrat.live_service import (
     LiveEndpoint,
     LiveProtocolError,
     LiveRequestError,
+    _Service,
     _encode,
     _frame,
 )
+from binaryrat.stack_strings import StackStringsReportError
 
 
 _INSTALL_DIR = os.environ.get("BINARYRAT_GHIDRA_INSTALL_DIR")
@@ -166,6 +168,67 @@ class LiveProgramInputTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Circular reference"):
                 client.data_type(cycle, "Name")
             connect.assert_not_called()
+
+    def test_live_stack_strings_bounds_and_errors(self):
+        token = secrets.token_urlsafe(32)
+        entry = Address("ram", 16)
+        view = Mock(spec=ProgramView)
+        report = {
+            "schema_version": 1, "analysis_mode": "read_only_stack_strings", "program_id": None,
+            "revision": 3, "language_id": "x86:LE:64:default", "compiler_spec_id": "gcc",
+            "function": None, "minimum_length": 4, "function_limit": 32, "functions_scanned": 0,
+            "functions_skipped": 0, "functions_partial": 0, "stack_writes": 0, "truncated": False, "strings": [],
+        }
+        view.stack_strings.return_value.document = report
+        with _Service(view, token) as service:
+            worker = Thread(target=service.serve_forever, daemon=True, kwargs={"poll_interval": 0.01})
+            worker.start()
+            try:
+                client = LiveClient(LiveEndpoint(service.server_address[1], token), timeout=5)
+                self.assertEqual(client.stack_strings().document, report)
+                view.stack_strings.assert_called_once_with(None, minimum_length=4, max_functions=32,
+                                                           timeout_seconds=30)
+                self.assertEqual(client._request("stack_strings"), report)
+                client.stack_strings(entry, minimum_length=64, max_functions=64, timeout_seconds=60)
+                view.stack_strings.assert_called_with(entry, minimum_length=64, max_functions=64,
+                                                      timeout_seconds=60)
+                view.stack_strings.reset_mock()
+                for bad in (dict(minimum_length=0), dict(minimum_length=65), dict(minimum_length=True),
+                            dict(max_functions=0), dict(max_functions=65), dict(max_functions="32"),
+                            dict(timeout_seconds=0), dict(timeout_seconds=61), dict(timeout_seconds=True),
+                            dict(timeout_seconds=None), dict(entry="ram:10"),
+                            dict(entry={"space": "ram", "offset": 16, "name": "fixture"}),
+                            dict(project_file="another.gpr")):
+                    with self.subTest(bad=bad), self.assertRaisesRegex(LiveRequestError, "bad_request"):
+                        client._request("stack_strings", **bad)
+                unauthorized = LiveClient(LiveEndpoint(service.server_address[1], secrets.token_urlsafe(32)))
+                with self.assertRaisesRegex(LiveRequestError, "unauthorized"):
+                    unauthorized.stack_strings()
+                view.stack_strings.assert_not_called()
+
+                for cause, code in ((TimeoutError("internal details"), "timed_out"),
+                                    (StackStringsError("internal details"), "stack_strings_failed"),
+                                    (StackStringsReportError("internal details"), "stack_strings_failed"),
+                                    (StaleProgramError("internal details"), "stale_program"),
+                                    (LookupError("internal details"), "not_found")):
+                    view.stack_strings.side_effect = cause
+                    with self.subTest(code=code), self.assertRaises(LiveRequestError) as failure:
+                        client.stack_strings(entry)
+                    self.assertEqual(failure.exception.code, code)
+                    self.assertNotIn("internal details", str(failure.exception))
+                view.stack_strings.side_effect = None
+                view.stack_strings.return_value.document = {"strings": "x" * (1 << 20)}
+                with self.assertRaisesRegex(LiveRequestError, "response_too_large"):
+                    client.stack_strings()
+                view.stack_strings.return_value.document = report | {"revision": "invalid"}
+                with self.assertRaises(StackStringsReportError):
+                    client.stack_strings()
+                view.stack_strings.return_value.document = report
+                self.assertEqual(client.stack_strings().revision, 3)
+            finally:
+                service.shutdown()
+                worker.join(5)
+            self.assertFalse(worker.is_alive())
 
 
 @unittest.skipUnless(_INSTALL_DIR or _REQUIRE_SHARED_SERVICE,
@@ -386,6 +449,14 @@ class LiveGhidraTests(unittest.TestCase):
             cancellation.set()
             deadline = monotonic() + 2
             while not monitor.isCancelled() and monotonic() < deadline:
+                sleep(0.01)
+            self.assertTrue(monitor.isCancelled())
+        self.assertFalse(any(thread.name == "binaryrat-live-cancel" for thread in active_threads()))
+
+    def test_monitor_cancels_at_the_scan_deadline(self):
+        with _monitor(None, monotonic() + 0.05) as monitor:
+            grace = monotonic() + 2
+            while not monitor.isCancelled() and monotonic() < grace:
                 sleep(0.01)
             self.assertTrue(monitor.isCancelled())
         self.assertFalse(any(thread.name == "binaryrat-live-cancel" for thread in active_threads()))
@@ -890,17 +961,22 @@ class LiveGhidraTests(unittest.TestCase):
                     view.stack_strings()
             self.skipTest("stack strings require the BinaryRat extension")
         with open_program(self.marker, self.strings_path) as view:
-            whole = view.stack_strings()
+            whole = view.stack_strings(max_functions=32, timeout_seconds=30)
             self.assertEqual((whole.revision, whole.functions_scanned), (view.info.revision, 1))
             self.assertEqual([(item.function, item.stack_offset, item.text, item.terminated, item.render())
                               for item in whole.strings], [(self.strings_entry, -16, "live", True, '"live"')])
-            one = view.stack_strings(self.strings_entry)
+            one = view.stack_strings(self.strings_entry, timeout_seconds=30)
             self.assertEqual((one.function, one.strings), (self.strings_entry, whole.strings))
+            one_for_client = view.stack_strings(self.strings_entry, max_functions=32, timeout_seconds=30)
             self.assertEqual(view.stack_strings(minimum_length=5).strings, ())
             for bad in (dict(minimum_length=0), dict(minimum_length=65), dict(max_functions=0),
-                        dict(max_functions=200_001), dict(minimum_length=True)):
+                        dict(max_functions=200_001), dict(minimum_length=True), dict(timeout_seconds=0),
+                        dict(timeout_seconds=61), dict(timeout_seconds=True)):
                 with self.subTest(bad=bad), self.assertRaises(ValueError):
                     view.stack_strings(**bad)
+            with patch("binaryrat.live.monotonic", side_effect=(0, 2)):
+                with self.assertRaisesRegex(TimeoutError, "stack-string scan timed out"):
+                    view.stack_strings(timeout_seconds=1)
             with self.assertRaises(LookupError):
                 view.stack_strings(Address("ram", self.strings_entry.offset + 1))
         with open_program(self.marker, self.program_path) as view:
@@ -923,6 +999,43 @@ class LiveGhidraTests(unittest.TestCase):
         empty = subprocess.run([*base, self.program_path, *options], encoding="utf-8", capture_output=True,
                                timeout=180)
         self.assertEqual(empty.returncode, 1, empty.stderr)
+        self.assertEqual(before, self.snapshot())
+
+        executable = shutil.which("binaryrat-live")
+        runner = [executable] if executable is not None else [sys.executable, "-m", "binaryrat.live_service"]
+        process = subprocess.Popen(
+            [*runner, str(self.marker), self.strings_path, "--install-dir", str(self.install),
+             "--idle-timeout", "30", "--max-heap-mb", "512"],
+            stdout=subprocess.PIPE, text=True, encoding="utf-8",
+        )
+        ready = Queue(1)
+
+        def read_until_ready():
+            for line in process.stdout:
+                if line.startswith(READY_PREFIX):
+                    ready.put(line)
+                    return
+            ready.put("")
+
+        reader = Thread(target=read_until_ready, daemon=True)
+        reader.start()
+        try:
+            client = LiveClient(LiveEndpoint.from_ready_line(ready.get(timeout=90)))
+            self.assertEqual(client.stack_strings(), whole)
+            self.assertEqual(client.stack_strings(self.strings_entry), one_for_client)
+            self.assertEqual(client.stack_strings(minimum_length=5).strings, ())
+            with self.assertRaisesRegex(LiveRequestError, "not_found"):
+                client.stack_strings(Address("ram", self.strings_entry.offset + 1))
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            reader.join(5)
+            process.stdout.close()
         self.assertEqual(before, self.snapshot())
 
     def test_live_service_reuses_jvm_across_independent_clients(self):

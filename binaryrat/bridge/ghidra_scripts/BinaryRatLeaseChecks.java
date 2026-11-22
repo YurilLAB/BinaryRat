@@ -18,7 +18,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 
 import binaryrat.DecompOutput;
 import binaryrat.EngineClient;
@@ -61,6 +64,7 @@ public class BinaryRatLeaseChecks extends GhidraScript {
             blocker.addProperty("reserve_bytes", 256L << 20);
             blocker.addProperty("timeout_ms", 60000);
             require(engine.call("sched.acquire", blocker).get("granted").getAsBoolean(), "blocker grant");
+            checkRequestDepth(engine, scheduler);
             AtomicReference<Throwable> failure = new AtomicReference<>();
             Function selected = fixture;
             Thread waiter = new Thread(() -> {
@@ -228,6 +232,49 @@ public class BinaryRatLeaseChecks extends GhidraScript {
             options.grabFromProgram(currentProgram);
             d.setOptions(options);
         }, new ScheduledDecompiler.Limits(1, 256L << 20, 0, 0, 60, 5000, 60000));
+    }
+
+    private static void checkRequestDepth(EngineClient engine, ScheduledDecompiler scheduler)
+            throws Exception {
+        var waiting = engine.send("sched.acquire", request("request-depth-fixture"));
+        waitFor(scheduler, "queued", 1);
+
+        // The request itself is the 64th container. Brackets in UTF-8 strings do not count.
+        JsonElement value = new JsonPrimitive("[{\"name\\with\\escapes\": 1}] α界🐀".repeat(70));
+        for (int depth = 1; depth < 64; depth++) {
+            if (depth % 2 == 0) {
+                JsonObject object = new JsonObject();
+                object.add("nested", value);
+                value = object;
+            }
+            else {
+                JsonArray array = new JsonArray();
+                array.add(value);
+                value = array;
+            }
+        }
+        JsonObject fields = new JsonObject();
+        fields.add("fixture", value);
+        require(engine.call("ping", fields).has("capabilities"), "depth-64 request was not accepted");
+        JsonArray extra = new JsonArray();
+        extra.add(value);
+        fields.add("fixture", extra);
+        try {
+            engine.call("ping", fields);
+            throw new AssertionError("depth-65 request was not rejected");
+        }
+        catch (IOException expected) {
+            require(expected.getMessage().equals("engine request nests deeper than 64 levels"),
+                "depth-65 request was not rejected locally");
+        }
+        require(!waiting.isDone(), "invalid request completed an unrelated queued lease");
+        require(engine.call("ping", new JsonObject()).has("capabilities"),
+            "depth refusal poisoned the shared engine");
+        engine.call("sched.cancel", request("request-depth-fixture"));
+        var response = EngineClient.await(waiting, 5);
+        require(!response.get("granted").getAsBoolean() && response.get("status").getAsString().equals("cancelled"),
+            "the unrelated queued lease lost its response");
+        waitFor(scheduler, "queued", 0);
     }
 
     private void checkCancellationDuringStartup(ScheduledDecompiler pool, Function function,

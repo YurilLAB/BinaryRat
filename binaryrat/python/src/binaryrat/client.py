@@ -131,7 +131,8 @@ class EngineClient:
                 row = json.loads(response)
                 # The engine answers a line it could not read with a null ID. Replies come in
                 # order, so that refusal belongs to this request and the pipe is still in step.
-                unread = isinstance(row, dict) and row.get("id") is None and row.get("ok") is False
+                unread = (isinstance(row, dict) and "id" in row and row["id"] is None
+                          and row.get("ok") is False)
                 if not isinstance(row, dict) or (row.get("id") != request_id and not unread):
                     raise ProtocolError("response id does not match request")
                 if type(row.get("protocol_version")) is not int or row["protocol_version"] != 1:

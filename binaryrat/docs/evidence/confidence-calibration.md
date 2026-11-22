@@ -63,17 +63,22 @@ Unsupported bins abstain. The fit uses only fit-partition cases and labels.
 The held-out report gives case and proposal counts, abstention coverage, and
 the fraction of numerically scored proposals with fitted estimates. Brier
 error averages squared error within each family and then across families.
-Compare the fitted Brier estimate with `paired_raw_brier` on the same scored
-proposals. The raw evidence-strength comparison treats the support score as
-a numerical baseline. Reliability bins report the observed correctness rate,
-mean score, proposal count, and family support. `reliability_error` is the
-expected calibration error over those bins with every family weighted equally.
+Compare the fitted estimates with `paired_raw_brier` and
+`paired_raw_reliability_error` on the same scored proposals. The raw
+evidence-strength comparison treats the support score as a numerical baseline.
+Each family has total weight one. It contributes to a bin in proportion to
+the share of that family's proposals in the bin. Observed correctness and mean score
+use those same contributions within each bin. `reliability_error` is the
+mass-weighted mean of the absolute gaps between these rates. The console
+comparison uses paired proposals, and the JSON report also retains diagnostics
+for every raw score.
 `thresholds` gives, for each fixed score, the precision of the proposals at or
 above it and the share of correct proposals it keeps. That recall counts
 proposed fields only: fields the analysis never proposed are not in the dataset.
 An empty group reports a null estimate. Approximate 95% intervals resample the
-held-out family means with a fixed seed, conditional on the fitted model and a
-minimum of eight families. Sparse holdouts remain descriptive.
+contributing held-out families with a fixed seed and require at least eight.
+Reliability-bin intervals retain each family's contribution to that bin.
+The fitted model stays fixed during resampling. Sparse holdouts remain descriptive.
 
 ## Packed structure diagnostic
 
@@ -140,54 +145,36 @@ the split. Ranges that touch bit-field storage are not judged. Pointees that are
 incomplete in the function's unit or have virtual bases give no case. A
 parameter the survey did not see is an abstention: a case without proposals.
 
-### Result
+### Archived CI measurement
 
-Measured with GCC 15.2.0 and Ghidra 12.2 in November 2026. CI repeats the
-measurement on every commit and uploads the report.
+GitHub Actions recorded these cases with GCC and Ghidra 12.2 in November
+2026. The corrected evaluator recomputed the metrics from the archived
+`cases.json`. Its labels predate the DWARF fix for multidimensional arrays.
+Use the full calibration command above to regenerate cases with the current
+oracle. [Archived cases and report](https://github.com/YurilLAB/BinaryRat/actions/runs/44996105423/artifacts/14745296688)
 
 | | Fit families | Held-out families |
 |---|---|---|
 | Families | bzip2, libtomcrypt, libyaml, MuJS, zlib, zstd | expat, GNU demangler, jansson, Lua, lz4, lzfse |
-| Cases (pointer parameters) | 1,704 | 1,385 |
-| Cases with proposals | 1,087 | 863 |
-| Proposed fields | 7,858 | 3,134 |
-
-The DWARF files describe 3,509 functions with code; 2,716 have an aggregate
-pointer parameter in an argument register. 82 duplicate functions and 257
-parameters with an incomplete pointee were left out, and one proposal touched
-bit-field storage. Of 3,089 cases, 469 had no
-Ghidra function at the entry address (mostly static functions reached only
-through pointers), 572 had no exact field access, 95 were not register
-parameters in the decompiler's view, and 3 functions exceeded a survey limit.
+| Cases (pointer parameters) | 1,701 | 1,384 |
+| Cases with proposals | 1,084 | 864 |
+| Proposed fields | 8,056 | 3,152 |
 
 The fit on six families maps the support count to an estimate:
 
 | Accesses supporting the field | Raw score | Fitted estimate |
 |---|---|---|
-| 1 | 0.50 | 0.791 |
-| 2 | 0.67 | 0.855 |
-| 3 to 8 | 0.75 to 0.89 | 0.909 |
-| 9 or more | 0.90 and above | 0.919 |
-
-On the six held-out families:
-
-| Support | Proposals | Fitted estimate | Observed correct |
-|---|---|---|---|
-| 1 access | 1,662 | 0.791 | 0.800 |
-| 2 accesses | 641 | 0.855 | 0.857 |
-| 3 or more | 831 | 0.911 | 0.904 |
+| 1 | 0.50 | 0.763 |
+| 2 | 0.67 | 0.844 |
+| 3 or more | 0.75 and above | 0.902 |
 
 | Held-out metric | Raw score | Fitted estimate |
 |---|---|---|
-| Reliability error | 0.215 | 0.007 |
-| Brier error | 0.188 | 0.130 |
+| Reliability error | 0.21781 | 0.03651 |
+| Brier error | 0.19095 | 0.13475 |
 
-A fitted estimate of at least 0.8 keeps 1,472 proposals at precision 0.88 and
-52% of the correct proposals. At least 0.9 keeps 831 at precision 0.90 and 31%.
-
-The raw score understates: a field seen in one access is right about four times
-in five. Correctness differs between projects, from 0.70 of jansson's proposals
-to 0.98 of MuJS's, so one project is not a sample of another.
+All 3,152 held-out proposals received fitted estimates. With six held-out
+families, the comparison is descriptive.
 
 ### Limits
 

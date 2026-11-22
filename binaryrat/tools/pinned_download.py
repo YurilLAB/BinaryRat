@@ -14,6 +14,7 @@ import hashlib
 import http.client
 from pathlib import Path
 import sys
+from tempfile import NamedTemporaryFile
 import time
 from typing import Callable
 import urllib.error
@@ -54,28 +55,33 @@ def fetch(url: str, destination: Path, sha256: str, *, attempts: int = ATTEMPTS,
     if destination.is_file() and file_sha256(destination) == sha256:
         return destination
     destination.parent.mkdir(parents=True, exist_ok=True)
-    partial = destination.with_name(destination.name + ".part")
     last: BaseException | None = None
     for attempt in range(1, attempts + 1):
+        partial = None
         try:
             digest = hashlib.sha256()
-            with opener(url, timeout=timeout) as source, partial.open("wb") as target:
-                for chunk in iter(lambda: source.read(CHUNK), b""):
-                    digest.update(chunk)
-                    target.write(chunk)
+            with NamedTemporaryFile(mode="wb", dir=destination.parent, prefix=".binaryrat-",
+                                    suffix=".part", delete=False) as target:
+                partial = Path(target.name)
+                with opener(url, timeout=timeout) as source:
+                    for chunk in iter(lambda: source.read(CHUNK), b""):
+                        digest.update(chunk)
+                        target.write(chunk)
             if digest.hexdigest() != sha256:
                 raise DownloadError(f"SHA-256 mismatch: got {digest.hexdigest()}")
             partial.replace(destination)
             return destination
         except (OSError, http.client.HTTPException, DownloadError) as error:
             last = error
-            partial.unlink(missing_ok=True)
             if permanent(error) or attempt == attempts:
                 break
-            delay = first_delay * 3 ** (attempt - 1)
-            print(f"download attempt {attempt}/{attempts} of {url} failed: {error}; "
-                  f"retrying in {delay:g} s", file=sys.stderr, flush=True)
-            sleep(delay)
+        finally:
+            if partial is not None:
+                partial.unlink(missing_ok=True)
+        delay = first_delay * 3 ** (attempt - 1)
+        print(f"download attempt {attempt}/{attempts} of {url} failed: {last}; "
+              f"retrying in {delay:g} s", file=sys.stderr, flush=True)
+        sleep(delay)
     raise DownloadError(f"could not download {url}: {last}")
 
 

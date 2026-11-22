@@ -119,6 +119,8 @@ class _Reader:
         return key
 
     def remember(self, key: str, node: dict) -> str:
+        if key not in self.types and len(self.types) >= MAX_TYPES:
+            raise ValueError("DWARF type count exceeds the oracle limit")
         self.types.setdefault(key, node)
         return key
 
@@ -126,33 +128,44 @@ class _Reader:
         if die.tag in AGGREGATES:
             return self.aggregate(die, depth)
         if die.tag == "DW_TAG_array_type":
-            element = self.intern(self.referenced(die), depth + 1)
-            count: int | None = 1
-            dimensions = 0
-            for child in die.iter_children():
-                if child.tag != "DW_TAG_subrange_type":
-                    continue
-                dimensions += 1
-                length = self.constant(child, "DW_AT_count")
-                if length is None:
-                    last = self.constant(child, "DW_AT_upper_bound")
-                    first = self.constant(child, "DW_AT_lower_bound") or 0
-                    length = None if last is None else last - first + 1
-                # A missing or computed bound is a flexible or variable-length array.
-                count = None if length is None or count is None or length < 0 else count * length
-            if not dimensions:
-                count = None
-            width = self.types[element]["size"]
-            size = width * count if width and count is not None else None
-            if size is not None and size > MAX_LAYOUT_BYTES:
-                size = count = None
-            return {"kind": "array", "size": size, "element": element, "count": count}
+            return self.array(die, depth)
         if die.tag in SCALARS:
             size = self.constant(die, "DW_AT_byte_size")
             if size is None and die.tag in POINTERS:
                 size = die.cu["address_size"]
             return {"kind": "scalar", "size": size if size and size <= MAX_LAYOUT_BYTES else None}
         return {"kind": "unknown", "size": None}
+
+    def array(self, die, depth: int) -> dict:
+        counts = []
+        for child in die.iter_children():
+            if child.tag != "DW_TAG_subrange_type":
+                continue
+            if depth + len(counts) + 1 >= MAX_TYPE_DEPTH:
+                raise ValueError("DWARF array nesting exceeds the oracle limit")
+            length = self.constant(child, "DW_AT_count")
+            if length is None:
+                last = self.constant(child, "DW_AT_upper_bound")
+                first = self.constant(child, "DW_AT_lower_bound") or 0
+                length = None if last is None else last - first + 1
+            # A missing or computed bound is a flexible or variable-length dimension.
+            counts.append(length if length is not None and length >= 0 else None)
+        if not counts:
+            counts.append(None)
+        element = self.intern(self.referenced(die), depth + len(counts))
+        # C and C++ DWARF list dimensions from outermost to innermost. Model each
+        # dimension so an exact row can be matched as an element of the outer array.
+        for index in range(len(counts) - 1, 0, -1):
+            element = self.remember(f"{die.offset:x}[{index}]",
+                                    self.array_dimension(element, counts[index]))
+        return self.array_dimension(element, counts[0])
+
+    def array_dimension(self, element: str, count: int | None) -> dict:
+        width = self.types[element]["size"]
+        size = width * count if width is not None and count is not None else None
+        if size is not None and size > MAX_LAYOUT_BYTES:
+            size = None
+        return {"kind": "array", "size": size, "element": element, "count": count}
 
     def aggregate(self, die, depth: int) -> dict:
         kind = AGGREGATES[die.tag]
@@ -412,6 +425,8 @@ def _inside(types: dict, node: dict, offset: int, width: int, depth: int) -> str
     if node["kind"] == "array":
         element = types[node["element"]]
         size = element["size"]
+        if size is None and element["kind"] == "array":
+            return "unsupported"
         if not size:
             return "none"
         index, relative = divmod(offset, size)

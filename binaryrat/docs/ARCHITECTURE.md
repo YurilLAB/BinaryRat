@@ -321,7 +321,7 @@ Status in November 2026. Done means automated checks or recorded evidence exist.
 |---|---|---|
 | 1. Baseline | Hash-pinned Ghidra 12.2 and Temurin JDK; fork source builds on Linux and Windows for every commit; GCC, Clang, AArch64 and MSVC x64/ARM64 corpora with separate DWARF/PDB oracles; byte-exact comparator; whole-program profiler; twelve calibration families built from hash-pinned sources | More families, compilers and targets; external benchmarks (milestone 1) |
 | 2. Execution | Leases with CPU/RAM admission, deadlines, cancels and resident-memory limits on real decompilations; live cache with replay; `cache-proof` rounds, cold/warm and reopen checks; stock-verified export | Per-function memory estimates; `cache-proof` rounds for options and language/cspec; an injected mid-extraction change |
-| 3. Services/scripting | `SummaryLayouts` and `CallSites` Java services shared by scripts, PyGhidra and the live service; the `DecompilationSession` scheduling service; typed, versioned DTOs; a read-only JVM shared by local clients; analyst commands | One proposal service for GUI and Python review; an agent interface (milestone 2); writable JVM ownership |
+| 3. Services/scripting | `SummaryLayouts`, `CallSites` and `StackStrings` Java services shared by scripts, PyGhidra and the live service; the `DecompilationSession` scheduling service; typed, versioned DTOs; a read-only JVM shared by local clients; analyst commands | One proposal service for GUI and Python review; an agent interface (milestone 2); writable JVM ownership |
 | 4. Types | P-code layout evidence with bounded direct-call forwarding and union views; SCC summary solver; Itanium and MSVC RTTI evidence; a program-wide layout survey; field scores fitted on six source families and checked on six others | Flows through memory and indirect calls; calibration of evidence carried from callees; fitted estimates in reports; a registered RTTI analyzer; summary results in the GUI evidence table and reviewed creation |
 | 5. Application | Reviewed creation of a new structure and a reviewed call-site prototype override, both with native undo | Types applied to existing targets; provenance journal; per-proposal revert |
 | 6. Scale | No-return analyzer core patch, faster on a focused fixture; join-flush core patch; 384-function LLVM parity | A completed whole-program run on a code-heavy 100 MB+ input (the LLVM run reached its deadline); speedup evidence |
@@ -363,9 +363,9 @@ on the held-out families.
 
 ### 2. Agent interface (gate 3)
 
-- A read-only MCP server over the existing `binaryrat-live` service and typed
-  Python API: a few broad tools plus Python, not one tool per query. Add a
-  stack-strings method to the live service first.
+- Build a read-only MCP server over the existing `binaryrat-live` service and
+  typed Python API. The loopback client now exposes bounded stack-string
+  evidence for a saved Program.
 - Binary-derived text (strings, names, comments) is returned as data with its
   address, never as instructions.
 - Selective retrieval: what changed since the agent's last visit, answered from
@@ -390,6 +390,11 @@ on the held-out families.
 
 - Apply reviewed types to existing parameters, variables and fields through one
   review service for CodeBrowser, Python and agents.
+- Show the affected target, current type and evidence before approval. Navigate
+  to the address-space-qualified instruction after checking the Program revision. Keep a
+  call-site correction scoped to its caller and instruction. A callee signature
+  change requires its own proposal and review. Hex-Rays exposes these as
+  distinct actions. [Hex-Rays Set Call Type](https://docs.hex-rays.com/9.0/user-guide/decompiler/interactive/cmd_set_call_type) · [Synchronized views](https://docs.hex-rays.com/ida-9.2/user-guide/user-interface/subviews#synchronized-views)
 - Event-driven provenance journal and conflict-aware per-proposal revert.
 - After each applied change, compare with a fresh stock decompilation of the
   changed Program and rerun the milestone 1 benchmarks.
@@ -398,6 +403,11 @@ on the held-out families.
 
 - Finish the no-return candidate on whole programs. Profile the Call-Fixup
   Installer, and instruction decoding apart from `CodeManager.addInstructions`.
+- Measure time to the first useful result, p95 selected-function latency under
+  background analysis, and cancellation latency on the same fixtures. Include
+  options actually applied, unavailable analyzers and completion status in a
+  machine-readable profile record. Binary Ninja documents which analyses its
+  modes defer and prioritizes user-directed analysis. [Binary Ninja analysis workflow](https://docs.binary.ninja/guide/index.html#analysis) · [Analysis settings](https://docs.binary.ninja/guide/settings.html)
 - Per-function memory estimates for admission.
 - A completed stock-versus-BinaryRat whole-program run on a code-heavy 100 MB+
   input, with repeated measurements, before any speedup claim.
@@ -407,14 +417,22 @@ on the held-out families.
 Each feature proposes facts with evidence and leaves stock output unchanged
 unless an analyst applies a change through review.
 
-- Patch diff: match functions with Version Tracking correlators, then show
-  stock-verified decompilation diffs with each match's correlator and score.
+- Version comparison starts with read-only function matches. Show each binary
+  hash and function address, the correlator, its score and competing matches
+  alongside the stock-verified decompilation diff. Keep scores comparable within
+  each correlator. Require analyst confirmation for ambiguous matches and
+  separate approval for any annotation transfer. Test duplicates, moved
+  functions and destination Programs with existing analyst annotations.
+  [Ghidra Version Tracking matches](https://github.com/NationalSecurityAgency/ghidra/blob/Ghidra_12.2_build/Ghidra/Features/VersionTracking/src/main/help/help/topics/VersionTrackingPlugin/providers/VT_Matches_Table.html) · [BinDiff matched functions](https://www.zynamics.com/bindiff/manual/#sectMatchedFunctions)
 - Signature libraries built from the corpus (libc, zlib, OpenSSL, Rust std) with
   measured precision and recall; WARP import and export; a shared BSim database.
 - Mixed boolean-arithmetic simplification over p-code with an equivalence proof
   attached to every rewrite, shown beside the stock output. Review the license
   of CoBRA's C++ library before adopting it.
-- Decoded and loop-built strings from the p-code emulator, beyond constant stores.
+- Add decoded and loop-built strings from the p-code emulator. Preserve their
+  observation trace and report the recovery method alongside constant stack
+  writes. FLOSS documents distinct recovery categories for analysts.
+  [FLOSS string types](https://github.com/mandiant/flare-floss) · [FLOSS report format](https://github.com/mandiant/flare-floss/blob/master/doc/results_document.md)
 - Firmware base-address candidates scored by the pointers they resolve, and SVD
   peripheral import as a reviewed change.
 - Rust data-layout evidence. Go needs no BinaryRat pass: Ghidra 12.2 already

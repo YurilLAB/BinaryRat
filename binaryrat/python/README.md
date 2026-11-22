@@ -163,14 +163,16 @@ status with the reason. Validation and errors follow `solve_layout`;
 `load_call_sites_report(path)` reads a saved report and a refused listing raises
 `CallSitesError`.
 
-`view.stack_strings(entry=None, minimum_length=4, max_functions=10_000)` lists
+`view.stack_strings(entry=None, minimum_length=4, max_functions=10_000, timeout_seconds=None)` lists
 text built on the stack with constant stores, in one function or in every
 function, through the extension's Java `binaryrat.StackStrings` service and the
 engine's `strings.stack` op. Each `StackString` has its function, stack offset,
 encoding (`ascii` or `utf16le`), text, terminator and the instructions that
 wrote it; `render()` quotes it as a C literal. `load_stack_strings_report(path)`
-reads a saved report and a refused scan raises `StackStringsError`. The engine
-client exposes the op directly as `EngineClient.stack_strings(groups)`.
+reads a saved report and a refused scan raises `StackStringsError`. A timeout
+from 1 to 60 seconds requests cooperative cancellation and raises
+`TimeoutError` when exceeded. The engine client exposes the op directly as
+`EngineClient.stack_strings(groups)`.
 
 ## Decompile from the CLI
 
@@ -249,6 +251,14 @@ validated report as `view.solve_layout`, at most 64 summaries per request; give 
 timeout that covers the whole recovery. A refused recovery is the error `layout_failed`.
 `client.call_sites(entry)` returns the same report as `view.call_sites`, at most 256 sites
 and 64 decompiled callers per request; a refused listing is the error `call_sites_failed`.
+`client.stack_strings(entry=None, minimum_length=4, max_functions=32, timeout_seconds=30)`
+returns a validated stack-string report from the saved Program. Pass a function
+entry to select one function or omit it to scan up to 64 functions in entry order.
+Set `max_functions` between 1 and 64 and `timeout_seconds` between 1 and 60.
+A refused scan returns `stack_strings_failed`, an expired scan returns
+`timed_out`, and a report above the response limit returns `response_too_large`.
+Set the client timeout to cover the scan and the native engine's separate
+bounded request and shutdown waits.
 The daemon starts with a 1,024 MiB JVM heap ceiling. Use `--max-heap-mb`
 to configure it.
 It closes its Program and listener after the idle interval or on Ctrl+C.

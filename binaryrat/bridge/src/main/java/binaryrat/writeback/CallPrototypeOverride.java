@@ -315,11 +315,11 @@ public final class CallPrototypeOverride {
                     boolean commit = false;
                     try {
                         if (site.override() != null) {
-                            // The stock writer keeps markers in the override namespace, so remove
-                            // the reviewed one first. Both edits share this undo step.
-                            DataTypeSymbol previous = HighFunctionDBUtil.readOverride(site.override());
-                            site.override().delete();
-                            previous.cleanupUnusedOverride();
+                            // Replace the marker while retaining the old definition, which other
+                            // Program datatypes can use independently of the override.
+                            if (!site.override().delete()) {
+                                throw new IOException("Ghidra did not remove the previous call override");
+                            }
                         }
                         HighFunctionDBUtil.writeOverride(site.caller(), site.address(), prototype);
                         if (!matchesOverride(site.caller(), site.address(), prototype)) {

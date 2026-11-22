@@ -241,17 +241,26 @@ def _family_means(rows: list[Scored], measure) -> list[float]:
     return [mean(samples[family]) for family in sorted(samples)]
 
 
-def _estimate(values: list[float]) -> dict:
+def _weighted_mean(samples: list[tuple[float, float]]) -> float:
+    return math.fsum(value * weight for value, weight in samples) / math.fsum(
+        weight for _, weight in samples)
+
+
+def _estimate(values: list[float], weights: list[float] | None = None) -> dict:
     if not values:
         return {"estimate": None, "family_bootstrap_95": None}
+    samples = values if weights is None else list(zip(values, weights, strict=True))
+    estimate = mean if weights is None else _weighted_mean
     interval = None
     if len(values) >= MIN_INTERVAL_FAMILIES:
+        bootstrap_mean = (_weighted_mean if weights is not None else
+                          lambda sample: math.fsum(sample) / len(sample))
         randomizer = random.Random(BOOTSTRAP_SEED)
-        replicates = sorted(math.fsum(randomizer.choices(values, k=len(values))) / len(values)
+        replicates = sorted(bootstrap_mean(randomizer.choices(samples, k=len(samples)))
                             for _ in range(BOOTSTRAP_REPLICATES))
         interval = [replicates[int(0.025 * (BOOTSTRAP_REPLICATES - 1))],
                     replicates[int(0.975 * (BOOTSTRAP_REPLICATES - 1))]]
-    return {"estimate": mean(values), "family_bootstrap_95": interval}
+    return {"estimate": estimate(samples), "family_bootstrap_95": interval}
 
 
 def _squared_error(row: Scored) -> float:
@@ -263,16 +272,10 @@ def _reliability_error(rows: list[Scored]) -> float | None:
     if not rows:
         return None
     totals = Counter(row.family for row in rows)
-    error = 0.0
-    for bucket in _buckets(rows):
-        if not bucket:
-            continue
-        counts = Counter(row.family for row in bucket)
-        weight = math.fsum(counts[family] / totals[family] for family in counts) / len(totals)
-        observed = mean(_family_means(bucket, lambda row: int(row.correct)))
-        predicted = mean(_family_means(bucket, lambda row: row.score))
-        error += weight * abs(observed - predicted)
-    return error
+    # The bin's mass cancels the denominator of its conditional mean error.
+    return math.fsum(abs(math.fsum((row.correct - row.score) / totals[row.family]
+                                  for row in bucket))
+                     for bucket in _buckets(rows)) / len(totals)
 
 
 def _thresholds(rows: list[Scored]) -> list[dict]:
@@ -296,14 +299,18 @@ def _thresholds(rows: list[Scored]) -> list[dict]:
 
 def _metrics(rows: list[Scored]) -> dict:
     reliability = []
+    totals = Counter(row.family for row in rows)
     for index, bucket in enumerate(_buckets(rows)):
+        counts = Counter(row.family for row in bucket)
+        weights = [counts[family] / totals[family] for family in sorted(counts)]
         observed = _family_means(bucket, lambda row: int(row.correct))
         predicted = _family_means(bucket, lambda row: row.score)
         reliability.append({"lower": index / BIN_COUNT, "upper": (index + 1) / BIN_COUNT,
                             "families": len(observed), "proposals": len(bucket),
-                            "mean_score": mean(predicted) if predicted else None,
-                            "observed_correct": _estimate(observed)})
-    return {"proposals": len(rows), "families": len({row.family for row in rows}),
+                            "mean_score": _weighted_mean(list(zip(predicted, weights, strict=True)))
+                            if predicted else None,
+                            "observed_correct": _estimate(observed, weights)})
+    return {"proposals": len(rows), "families": len(totals),
             "brier": _estimate(_family_means(rows, _squared_error)),
             "reliability_error": _reliability_error(rows), "thresholds": _thresholds(rows),
             "reliability": reliability}
@@ -339,6 +346,7 @@ def evaluate(dataset: object) -> dict:
         raw = _scored(holdout)
         paired = [row for row in raw if _bin(row.score) in predictions]
         calibrated = [Scored(row.family, predictions[_bin(row.score)], row.correct) for row in paired]
+        raw_metrics = _metrics(raw)
         calibration_metrics = _metrics(calibrated)
         status = "insufficient_holdout_predictions"
         if calibrated:
@@ -349,9 +357,12 @@ def evaluate(dataset: object) -> dict:
             "holdout": _counts(holdout, predictions) | {
                 "status": status,
                 "paired_score_coverage": len(paired) / len(raw) if raw else None,
-                "raw_diagnostic": _metrics(raw),
+                "raw_diagnostic": raw_metrics,
                 "calibrated": calibration_metrics,
                 "paired_raw_brier": _estimate(_family_means(paired, _squared_error)),
+                "paired_raw_reliability_error": (raw_metrics["reliability_error"]
+                                                if len(paired) == len(raw)
+                                                else _reliability_error(paired)),
             },
         }
     return {

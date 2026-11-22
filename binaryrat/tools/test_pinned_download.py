@@ -3,12 +3,15 @@
 SPDX-License-Identifier: Apache-2.0
 Copyright 2026 YurilLAB. New BinaryRat tests.
 """
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import http.client
 import io
 from pathlib import Path
 import tempfile
+from threading import Event, current_thread
 import unittest
+from unittest.mock import patch
 import urllib.error
 
 import pinned_download
@@ -69,7 +72,7 @@ class FetchTests(unittest.TestCase):
         self.fetch(replay)
         self.assertEqual(len(calls), 2)
         self.assertEqual(self.target.read_bytes(), PAYLOAD)
-        self.assertFalse(self.target.with_name("file.bin.part").exists())
+        self.assertEqual(set(self.target.parent.iterdir()), {self.target})
 
     def test_short_body_without_an_error_fails_the_hash_and_is_retried(self):
         opener = Opener(PAYLOAD[:-1], PAYLOAD)
@@ -83,7 +86,7 @@ class FetchTests(unittest.TestCase):
             self.fetch(opener, attempts=3)
         self.assertEqual(opener.calls, 3)
         self.assertFalse(self.target.exists())
-        self.assertFalse(self.target.with_name("file.bin.part").exists())
+        self.assertEqual(list(self.target.parent.iterdir()), [])
 
     def test_missing_file_is_not_retried(self):
         missing = urllib.error.HTTPError("https://example.invalid", 404, "Not Found", {}, None)
@@ -112,6 +115,56 @@ class FetchTests(unittest.TestCase):
         self.target.write_bytes(b"older release")
         self.fetch(Opener(PAYLOAD))
         self.assertEqual(self.target.read_bytes(), PAYLOAD)
+
+    def test_concurrent_interrupted_request_cannot_replace_verified_bytes(self):
+        payload = PAYLOAD * 80
+        digest = hashlib.sha256(payload).hexdigest()
+        verified = Event()
+        started_second_transfer = Event()
+        first_returned = Event()
+        first_thread = None
+        replace = Path.replace
+
+        class InterruptedTransfer(io.BytesIO):
+            def read(self, size=-1):
+                data = super().read(size)
+                if data:
+                    return data
+                started_second_transfer.set()
+                if not first_returned.wait(5):
+                    raise AssertionError("first transfer did not return")
+                raise ConnectionResetError("simulated interrupted transfer")
+
+        def fetch(opener):
+            return pinned_download.fetch("https://example.invalid/file.bin", self.target, digest,
+                                         opener=opener, attempts=1)
+
+        def first():
+            nonlocal first_thread
+            first_thread = current_thread()
+            try:
+                return fetch(Opener(payload)).read_bytes()
+            finally:
+                first_returned.set()
+
+        def publish(source, destination):
+            if current_thread() is first_thread:
+                verified.set()
+                if not started_second_transfer.wait(5):
+                    raise AssertionError("second transfer did not start")
+            return replace(source, destination)
+
+        with patch.object(Path, "replace", publish), ThreadPoolExecutor(max_workers=2) as threads:
+            completed = threads.submit(first)
+            self.assertTrue(verified.wait(5))
+            interrupted = threads.submit(fetch, lambda *_args, **_options:
+                                         InterruptedTransfer(payload[:640 * 1024]))
+            with self.assertRaisesRegex(pinned_download.DownloadError, "interrupted transfer"):
+                interrupted.result(timeout=10)
+            self.assertEqual(completed.result(timeout=10), payload)
+
+        self.assertEqual(self.target.read_bytes(), payload)
+        self.assertEqual(set(self.target.parent.iterdir()), {self.target})
 
     def test_malformed_pin_is_rejected_before_any_request(self):
         opener = Opener(PAYLOAD)

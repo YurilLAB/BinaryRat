@@ -8,13 +8,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from elftools.dwarf.dwarf_expr import DWARFExprParser
 from elftools.dwarf.locationlists import BaseAddressEntry, LocationEntry, LocationExpr
 from elftools.dwarf.structs import DWARFStructs
 
-from dwarf_targets import (ARGUMENT_REGISTERS, _Reader, classify_range, read_dwarf_targets,
-                           target_status)
+from dwarf_targets import (ARGUMENT_REGISTERS, MAX_TYPE_DEPTH, _Reader, classify_range,
+                           read_dwarf_targets, target_status)
 
 
 def scalar(size):
@@ -254,6 +255,35 @@ def subprogram(name, low, parameters):
                                      "DW_AT_low_pc": Attribute(low, "DW_FORM_addr")}, parameters)
 
 
+def array_type(counts):
+    scalar = Die("DW_TAG_base_type", {"DW_AT_byte_size": Attribute(4, "DW_FORM_data1")})
+    dimensions = [Die("DW_TAG_subrange_type", {"DW_AT_count": Attribute(count, "DW_FORM_data1")}
+                      if count is not None else {}) for count in counts]
+    return Die("DW_TAG_array_type", {"DW_AT_type": Attribute(0, "DW_FORM_ref4")}, dimensions,
+               {"DW_AT_type": scalar})
+
+
+class ArrayShapeTests(unittest.TestCase):
+    def test_flexible_outer_dimension_keeps_its_row_size(self):
+        instance = reader()
+        target = instance.intern(array_type([None, 3]))
+        self.assertIsNone(instance.types[target]["size"])
+        self.assertEqual(classify_range(instance.types, target, 120, 12), "member")
+        self.assertEqual(classify_range(instance.types, target, 128, 4), "member")
+        self.assertEqual(classify_range(instance.types, target, 124, 12), "none")
+
+    def test_unknown_inner_dimension_abstains(self):
+        instance = reader()
+        target = instance.intern(array_type([2, None]))
+        self.assertEqual(classify_range(instance.types, target, 4, 4), "unsupported")
+
+    def test_dimension_depth_and_materialized_type_count_are_bounded(self):
+        with self.assertRaisesRegex(ValueError, "array nesting"):
+            reader().intern(array_type([1] * MAX_TYPE_DEPTH))
+        with patch("dwarf_targets.MAX_TYPES", 2), self.assertRaisesRegex(ValueError, "type count"):
+            reader().intern(array_type([2, 3]))
+
+
 class EntryLocationTests(unittest.TestCase):
     def number(self, location, start=0x1000, base=0):
         probe = parameter("p", location, None)
@@ -331,6 +361,7 @@ SOURCE = r"""
 struct inner { short low; short high; };
 struct outer { int tag; struct inner pair; long values[3]; unsigned flag : 3; unsigned rest : 5; };
 struct listed { int count; int items[]; };
+struct matrix { int rows[2][3]; short cube[2][2][3]; };
 union both { int number; float real; };
 struct opaque;
 struct big { long a, b, c; };
@@ -345,6 +376,7 @@ KEEP long seven(long a, long b, long c, long d, long e, long f, struct outer *la
 { return a + b + c + d + e + f + last->tag; }
 KEEP long by_value(struct big copy, struct outer *item) { return copy.a + item->tag; }
 KEEP int flexible(struct listed *list) { return list->items[2] + list->count; }
+KEEP int read_matrix(struct matrix *matrix) { return matrix->rows[1][2] + matrix->cube[1][1][2]; }
 static KEEP int pick(int unused, struct outer *item) { item->tag += 1; return item->pair.low; }
 int use_pick(struct outer *item) { return pick(1, item) + pick(2, item); }
 """
@@ -418,6 +450,17 @@ class CompiledTests(unittest.TestCase):
     def test_incomplete_pointee_is_reported_not_guessed(self):
         handle = self.parameter("opaque_user", "handle")["type"]
         self.assertIn("incomplete", target_status(self.oracle["types"], handle))
+
+    def test_multidimensional_members_include_whole_subarrays(self):
+        types = self.oracle["types"]
+        matrix = self.parameter("read_matrix", "matrix")["type"]
+        for offset, width in ((0, 24), (0, 12), (12, 12), (20, 4),
+                              (24, 24), (36, 12), (42, 6), (46, 2)):
+            with self.subTest(offset=offset, width=width):
+                self.assertEqual(classify_range(types, matrix, offset, width), "member")
+        for offset, width in ((4, 12), (16, 12), (40, 6), (48, 2)):
+            with self.subTest(offset=offset, width=width):
+                self.assertEqual(classify_range(types, matrix, offset, width), "none")
 
     def test_stripped_or_foreign_files_are_refused(self):
         stripped = Path(self.scratch.name) / "stripped.so"

@@ -21,6 +21,7 @@ from typing import Any, TypeVar
 from .call_sites import CallSitesReport, parse_call_sites_report
 from .live import (
     _MAX_PAGE_OFFSET,
+    _MAX_STACK_STRINGS_TIMEOUT_SECONDS,
     CallSitesError,
     CrossReference,
     DataTypeInfo,
@@ -31,10 +32,12 @@ from .live import (
     ProgramFunction,
     ProgramInfo,
     ProgramView,
+    StackStringsError,
     StaleProgramError,
     open_program,
 )
 from .models import Address
+from .stack_strings import StackStringsReport, StackStringsReportError, parse_stack_strings_report
 from .summary_layout import SummaryLayoutReport, parse_summary_report
 
 LIVE_PROTOCOL_VERSION = 1
@@ -50,6 +53,8 @@ _MAX_SERVICE_SUMMARIES = 64
 # Call-site reports carry statements; these keep a reply well under the response limit.
 _MAX_SERVICE_SITES = 256
 _MAX_SERVICE_CALLERS = 64
+_DEFAULT_SERVICE_STACK_FUNCTIONS = 32
+_MAX_SERVICE_STACK_FUNCTIONS = 64
 _T = TypeVar("_T")
 
 
@@ -287,6 +292,16 @@ class LiveClient:
             timeout_seconds=timeout_seconds,
         ))
 
+    def stack_strings(
+        self, entry: Address | None = None, *, minimum_length: int = 4,
+        max_functions: int = _DEFAULT_SERVICE_STACK_FUNCTIONS, timeout_seconds: int = 30,
+    ) -> StackStringsReport:
+        """List stack strings in one function or a bounded batch in the served Program."""
+        return parse_stack_strings_report(self._request(
+            "stack_strings", entry=None if entry is None else asdict(entry), minimum_length=minimum_length,
+            max_functions=max_functions, timeout_seconds=timeout_seconds,
+        ))
+
 
 class _Service(TCPServer):
     """Serial, bounded requests over IPv4 loopback."""
@@ -308,6 +323,7 @@ class _Service(TCPServer):
             # The validated report document is sent unchanged.
             "solve_layout": (lambda **arguments: view.solve_layout(**arguments).document, "entry"),
             "call_sites": (lambda **arguments: view.call_sites(**arguments).document, "entry"),
+            "stack_strings": (self._stack_strings, "entry"),
         }
         super().__init__((_HOST, 0), _Connection)
 
@@ -315,6 +331,22 @@ class _Service(TCPServer):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
+
+    def _stack_strings(
+        self, entry: Address | None = None, *, minimum_length: int = 4,
+        max_functions: int = _DEFAULT_SERVICE_STACK_FUNCTIONS, timeout_seconds: int = 30,
+    ) -> dict[str, Any]:
+        if (type(minimum_length) is not int or not 1 <= minimum_length <= 64 or
+                type(max_functions) is not int or not 1 <= max_functions <= _MAX_SERVICE_STACK_FUNCTIONS or
+                type(timeout_seconds) is not int or not 1 <= timeout_seconds <= _MAX_STACK_STRINGS_TIMEOUT_SECONDS):
+            raise LiveRequestError("bad_request")
+        try:
+            return self._view.stack_strings(entry, minimum_length=minimum_length, max_functions=max_functions,
+                                            timeout_seconds=timeout_seconds).document
+        except TimeoutError as cause:
+            raise LiveRequestError("timed_out") from cause
+        except (StackStringsError, StackStringsReportError) as cause:
+            raise LiveRequestError("stack_strings_failed") from cause
 
     def reply(self, request: dict[str, Any]) -> Any:
         version, token = request.get("version"), request.get("token")
@@ -339,9 +371,10 @@ class _Service(TCPServer):
         operation, address_key = self._operations[method]
         if address_key is not None:
             address = arguments.get(address_key)
-            if not isinstance(address, dict) or set(address) != {"space", "offset"}:
-                raise LiveRequestError("bad_request")
-            arguments = arguments | {address_key: Address(**address)}
+            if address is not None or method != "stack_strings":
+                if not isinstance(address, dict) or set(address) != {"space", "offset"}:
+                    raise LiveRequestError("bad_request")
+                arguments = arguments | {address_key: Address(**address)}
         if method in ("decompile", "solve_layout", "call_sites"):
             timeout = arguments.get("timeout_seconds", 30)
             if type(timeout) is not int or not 1 <= timeout <= _MAX_DECOMPILE_SECONDS:

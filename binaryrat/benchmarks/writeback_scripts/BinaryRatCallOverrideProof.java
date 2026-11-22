@@ -15,11 +15,11 @@ import ghidra.program.database.ProgramDB;
 import ghidra.program.flatapi.FlatProgramAPI;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.CategoryPath;
+import ghidra.program.model.data.FunctionDefinition;
 import ghidra.program.model.lang.CompilerSpecID;
 import ghidra.program.model.lang.LanguageID;
 import ghidra.program.model.listing.FlowOverride;
 import ghidra.program.model.listing.Function;
-import ghidra.program.model.listing.FunctionSignature;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.pcode.PcodeOp;
@@ -255,8 +255,12 @@ public class BinaryRatCallOverrideProof extends GhidraScript {
     }
 
     private void replacement() throws Exception {
-        require(override(callerEntry) != null && override(indirectCall) == null &&
+        var original = override(callerEntry);
+        require(original != null && override(indirectCall) == null &&
             overrideTypes() == 1, "replacement starts from the direct override only");
+        var types = program.getDataTypeManager();
+        long originalId = types.getID(original);
+        String originalPrototype = original.getPrototypeString(true);
         var review = candidate(callerEntry);
         long before = revision();
         expect(IOException.class, "already uses", () ->
@@ -269,18 +273,25 @@ public class BinaryRatCallOverrideProof extends GhidraScript {
         require(result.replacedOverride() && replaced != null &&
             replaced.getReturnType().getName().equals("long") &&
             replaced.getCallingConventionName().equals(other) && markers(callerEntry) == 1 &&
-            overrideTypes() == 1, "replacement left " + markers(callerEntry) + " markers and " +
+            overrideTypes() == 2, "replacement left " + markers(callerEntry) + " markers and " +
                 overrideTypes() + " override types: " + replaced);
+        require(types.getDataType(originalId) instanceof FunctionDefinition retained &&
+            originalPrototype.equals(retained.getPrototypeString(true)),
+            "replacement failed to preserve the previous Program datatype");
         expect(IOException.class, "Program changed", () ->
             CallPrototypeOverride.apply(program, review, "short callee(short value)", monitor));
         program.undo();
         var restored = override(callerEntry);
         require(restored != null && restored.getReturnType().getName().equals("int") &&
-            markers(callerEntry) == 1 && overrideTypes() == 1,
+            types.getID(restored) == originalId && markers(callerEntry) == 1 && overrideTypes() == 1,
             "one undo did not restore the previous override: " + restored);
         program.redo();
-        require(override(callerEntry).getReturnType().getName().equals("long"),
-            "redo did not restore the replacement");
+        var redone = override(callerEntry);
+        require(redone != null && redone.getReturnType().getName().equals("long") &&
+            markers(callerEntry) == 1 && overrideTypes() == 2 &&
+            types.getDataType(originalId) instanceof FunctionDefinition retained &&
+            originalPrototype.equals(retained.getPrototypeString(true)),
+            "redo did not restore the replacement and retain the previous datatype");
         program.undo();
 
         int transaction = program.startTransaction("Unreadable override marker");
@@ -380,7 +391,7 @@ public class BinaryRatCallOverrideProof extends GhidraScript {
         return program.getDataTypeManager().getDataTypeCount(true);
     }
 
-    private FunctionSignature override(Address address) {
+    private FunctionDefinition override(Address address) {
         var caller = program.getFunctionManager().getFunctionAt(callerEntry);
         var scope = HighFunction.findOverrideSpace(caller);
         var symbols = program.getSymbolTable().getSymbolsAsIterator(address);
@@ -389,8 +400,8 @@ public class BinaryRatCallOverrideProof extends GhidraScript {
             if (symbol.getSymbolType() == SymbolType.LABEL &&
                 symbol.getParentNamespace().equals(scope) && symbol.getName().startsWith("prt_")) {
                 var data = HighFunctionDBUtil.readOverride(symbol);
-                if (data != null && data.getDataType() instanceof FunctionSignature signature) {
-                    return signature;
+                if (data != null && data.getDataType() instanceof FunctionDefinition definition) {
+                    return definition;
                 }
             }
         }

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -87,6 +88,7 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(result["holdout"]["paired_score_coverage"], 0.5)
         self.assertEqual(result["holdout"]["calibration_predictions"], 2)
         self.assertAlmostEqual(result["holdout"]["paired_raw_brier"]["estimate"], 0.04)
+        self.assertAlmostEqual(result["holdout"]["paired_raw_reliability_error"], 0.2)
         self.assertNotEqual(result["holdout"]["raw_diagnostic"]["brier"]["estimate"],
                             result["holdout"]["paired_raw_brier"]["estimate"])
 
@@ -202,6 +204,14 @@ class CalibrationTests(unittest.TestCase):
         self.assertTrue(all(item["accepted_proposals"] == 0 and item["precision"]["estimate"] is None
                             for item in empty["raw_diagnostic"]["thresholds"]))
 
+    def test_reliability_conditions_each_family_weight_on_the_share_in_the_bin(self):
+        held = [case("a", "holdout", [(0.5, True)] * 9 + [(1, True)]),
+                case("b", "holdout", [(0.5, False)] + [(1, True)] * 9)]
+        raw = evaluate(dataset(held))["kinds"][FIELD]["holdout"]["raw_diagnostic"]
+        self.assertAlmostEqual(raw["reliability"][5]["observed_correct"]["estimate"], 0.9)
+        self.assertAlmostEqual(raw["reliability"][5]["mean_score"], 0.5)
+        self.assertAlmostEqual(raw["reliability_error"], 0.2)
+
     def test_seeded_metrics_never_leave_probability_or_coverage_bounds(self):
         rng = random.Random(20261118)
         for count in range(1, 21):
@@ -229,6 +239,20 @@ class CalibrationTests(unittest.TestCase):
                     for key in ("precision", "recall_of_correct_proposals"):
                         value = item[key]["estimate"]
                         self.assertTrue(value is None or 0 <= value <= 1, (key, value))
+            # Independent ECE oracle with exact rational proposal weights.
+            families = {}
+            for entry in cases:
+                if entry["split"] == "holdout" and entry["proposals"]:
+                    families.setdefault(entry["source_family"], []).extend(entry["proposals"])
+            if families:
+                signed_errors = [Fraction(0) for _ in range(10)]
+                for proposals in families.values():
+                    weight = Fraction(1, len(proposals) * len(families))
+                    for proposal in proposals:
+                        score = proposal["score"]
+                        signed_errors[_bin(score)] += weight * (int(proposal["correct"]) - Fraction(score))
+                expected = sum(map(abs, signed_errors))
+                self.assertAlmostEqual(result["raw_diagnostic"]["reliability_error"], float(expected))
 
 
 if __name__ == "__main__":

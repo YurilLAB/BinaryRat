@@ -31,9 +31,13 @@ for line in sys.stdin:
         reply["id"] = "some-other-request"
     if op == "future-version":
         reply["protocol_version"] = 2
-    if op == "error":
+    if op in ("error", "error-no-id", "error-null-id"):
         reply = {"id": row["id"], "protocol_version": 1, "ok": False,
                  "error": {"code": "bad_request", "message": "test error"}}
+        if op == "error-no-id":
+            del reply["id"]
+        if op == "error-null-id":
+            reply["id"] = None
     print(json.dumps(reply), flush=True)
 '''
 
@@ -85,14 +89,15 @@ class ClientTests(unittest.TestCase):
             client.ping()
 
     def test_engine_error_does_not_poison_valid_connection(self):
-        with EngineClient() as client:
-            with self.assertRaises(EngineError) as caught:
-                client.request("error")
-            self.assertEqual(caught.exception.code, "bad_request")
-            self.assertEqual(client.ping()["op"], "ping")
+        for operation in ("error", "error-null-id"):
+            with self.subTest(operation=operation), EngineClient() as client:
+                with self.assertRaises(EngineError) as caught:
+                    client.request(operation)
+                self.assertEqual(caught.exception.code, "bad_request")
+                self.assertEqual(client.ping()["op"], "ping")
 
     def test_invalid_peers_are_rejected_and_connection_is_closed(self):
-        for operation in ("malformed", "wrong-id", "future-version"):
+        for operation in ("malformed", "wrong-id", "future-version", "error-no-id"):
             with self.subTest(operation=operation), EngineClient() as client:
                 with self.assertRaises(ProtocolError):
                     client.request(operation)

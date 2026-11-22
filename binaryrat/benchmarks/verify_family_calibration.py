@@ -127,6 +127,18 @@ def check(report: dict, summary: dict) -> list[str]:
     return problems
 
 
+def print_comparison(held: dict) -> None:
+    calibrated = held["calibrated"]
+    comparisons = (
+        ("raw", held["paired_raw_brier"], held["paired_raw_reliability_error"]),
+        ("calibrated", calibrated["brier"], calibrated["reliability_error"]),
+    )
+    for label, brier, error in comparisons:
+        print(f"held-out {label} on paired rows families={calibrated['families']} "
+              f"proposals={calibrated['proposals']} brier={brier['estimate']:.4f} "
+              f"reliability_error={error:.4f}", flush=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for argument in ("ghidra", "engine", "families", "output"):
@@ -195,11 +207,7 @@ def main() -> int:
     finally:
         (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
-    held = calibration["kinds"][KIND]["holdout"]
-    for label, metrics in (("raw", held["raw_diagnostic"]), ("calibrated", held["calibrated"])):
-        print(f"held-out {label}: families={metrics['families']} proposals={metrics['proposals']} "
-              f"brier={metrics['brier']['estimate']:.4f} "
-              f"reliability_error={metrics['reliability_error']:.4f}", flush=True)
+    print_comparison(calibration["kinds"][KIND]["holdout"])
     return 0
 
 

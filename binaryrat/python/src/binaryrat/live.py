@@ -11,6 +11,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Thread
+from time import monotonic
 from typing import Any, Generic, Literal, TypeVar
 
 from .call_sites import (
@@ -37,6 +38,7 @@ _SCHEDULED_TIMEOUT_SECONDS = 86_400
 # binaryrat.SummaryLayouts limits: summaries per run and seconds per decompile.
 _MAX_SUMMARIES = 256
 _MAX_SUMMARY_TIMEOUT_SECONDS = 600
+_MAX_STACK_STRINGS_TIMEOUT_SECONDS = 60
 
 DecompilationBackend = Literal["auto", "scheduled", "stock"]
 
@@ -142,10 +144,10 @@ def _check_cancel(cancel: Event | None) -> None:
 
 
 @contextmanager
-def _monitor(cancel: Event | None) -> Iterator[Any]:
+def _monitor(cancel: Event | None, deadline: float | None = None) -> Iterator[Any]:
     from ghidra.util.task import TaskMonitor, TaskMonitorAdapter
 
-    if cancel is None:
+    if cancel is None and deadline is None:
         yield TaskMonitor.DUMMY
         return
     _check_cancel(cancel)
@@ -153,8 +155,12 @@ def _monitor(cancel: Event | None) -> Iterator[Any]:
     finished = Event()
 
     def forward() -> None:
-        while not finished.wait(0.05):
-            if cancel.is_set():
+        while True:
+            remaining = 0.05 if deadline is None else max(0.0, deadline - monotonic())
+            if finished.wait(min(remaining, 0.05) if cancel is not None else remaining):
+                return
+            if ((cancel is not None and cancel.is_set()) or
+                    (deadline is not None and monotonic() >= deadline)):
                 monitor.cancel()
                 return
 
@@ -630,6 +636,7 @@ class ProgramView:
 
     def stack_strings(
         self, entry: Address | None = None, *, minimum_length: int = 4, max_functions: int = 10_000,
+        timeout_seconds: int | None = None,
     ) -> StackStringsReport:
         """Strings that functions build on the stack with constant stores, read-only.
 
@@ -638,34 +645,49 @@ class ProgramView:
         decompiler, register constants are followed through straight-line code, and the
         engine assembles the stores Ghidra's stack analysis marked as stack writes. Scans one
         function, or every function (up to ``max_functions``) when ``entry`` is None.
+        A timeout requests cancellation of the scan and raises TimeoutError if it expires.
         Requires the BinaryRat extension.
         """
         for name, value, low, high in (("minimum_length", minimum_length, 1, 64),
                                        ("max_functions", max_functions, 1, _MAX_STACK_STRING_FUNCTIONS)):
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer from {low} to {high}")
+        if timeout_seconds is not None and (
+                type(timeout_seconds) is not int or not 1 <= timeout_seconds <= _MAX_STACK_STRINGS_TIMEOUT_SECONDS):
+            raise ValueError(f"timeout_seconds must be an integer from 1 to {_MAX_STACK_STRINGS_TIMEOUT_SECONDS}")
         if self._scheduled_service is None:
             raise LiveProgramError("Stack strings require the BinaryRat extension")
         from ghidra.util.exception import CancelledException
         from jpype import JClass, JException
 
+        deadline = None if timeout_seconds is None else monotonic() + timeout_seconds
+
+        def check_deadline() -> None:
+            if deadline is not None and monotonic() >= deadline:
+                raise TimeoutError("BinaryRat stack-string scan timed out")
+
         with self._read() as program:
+            check_deadline()
             function = None
             if entry is not None:
                 function = program.getFunctionManager().getFunctionAt(self._native_address(program, entry))
                 if function is None:
                     raise LookupError(f"no function at {entry}")
-            with _monitor(self._cancel) as monitor:
+            with _monitor(self._cancel, deadline) as monitor:
                 try:
                     text = str(JClass("binaryrat.StackStrings").recoverJson(
                         program, function, minimum_length, max_functions, monitor))
                 except CancelledException as cause:
+                    check_deadline()
                     raise CancelledError("BinaryRat stack-string scan cancelled") from cause
                 except JException as cause:
                     if program.isClosed() or int(program.getModificationNumber()) != self._info.revision:
                         raise StaleProgramError("Ghidra Program changed while listing stack strings") from cause
+                    check_deadline()
                     raise StackStringsError(f"BinaryRat stack strings failed: {cause}") from cause
+        check_deadline()
         report = decode_stack_strings_report(text)
+        check_deadline()
         digest = self._info.executable_sha256
         if report.revision != self._info.revision or (
                 digest is not None and report.program_id != "sha256:" + digest.lower()):

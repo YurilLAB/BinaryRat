@@ -40,6 +40,8 @@ import ghidra.framework.Platform;
 public final class EngineClient implements AutoCloseable {
 	// Native serve() accepts 16 MiB per UTF-8 frame (excluding its newline).
 	private static final int MAX_FRAME_BYTES = 16 * 1024 * 1024;
+	// Match maximum_json_depth in native/src/json_depth.hpp, including the request object.
+	private static final int MAX_JSON_DEPTH = 64;
 	// Disk records add a SHA-256 checksum and a small envelope around the same fields.
 	private static final int CACHE_ENVELOPE_BYTES = 256;
 	private static final TypeAdapter<JsonElement> JSON = new Gson().getAdapter(JsonElement.class);
@@ -201,7 +203,7 @@ public final class EngineClient implements AutoCloseable {
 		}
 	}
 
-	/** Encode completely before sending, so an oversized frame leaves the pipe usable. */
+	/** Fully encode and check a frame before sending any of it. */
 	static ByteArrayOutputStream encodeRequest(JsonObject request, int limit) throws IOException {
 		ByteArrayOutputStream bytes = new ByteArrayOutputStream();
 		OutputStream bounded = new OutputStream() {
@@ -220,7 +222,39 @@ public final class EngineClient implements AutoCloseable {
 		// OutputStreamWriter.write(String, ...) copies the entire slice into a char[].
 		// Feed it bounded char buffers even for a single very large C string.
 		try (JsonWriter json = new JsonWriter(new BufferedWriter(
-			new OutputStreamWriter(bounded, StandardCharsets.UTF_8), 1024))) {
+			new OutputStreamWriter(bounded, StandardCharsets.UTF_8), 1024)) {
+			private int depth;
+
+			private void beginContainer() throws IOException {
+				if (++depth > MAX_JSON_DEPTH) {
+					throw new IOException("engine request nests deeper than " + MAX_JSON_DEPTH + " levels");
+				}
+			}
+
+			@Override
+			public JsonWriter beginArray() throws IOException {
+				beginContainer();
+				return super.beginArray();
+			}
+
+			@Override
+			public JsonWriter endArray() throws IOException {
+				depth--;
+				return super.endArray();
+			}
+
+			@Override
+			public JsonWriter beginObject() throws IOException {
+				beginContainer();
+				return super.beginObject();
+			}
+
+			@Override
+			public JsonWriter endObject() throws IOException {
+				depth--;
+				return super.endObject();
+			}
+		}) {
 			JSON.write(json, request);
 		}
 		return bytes;
@@ -234,10 +268,8 @@ public final class EngineClient implements AutoCloseable {
 		request.addProperty("id", id);
 		request.addProperty("op", op);
 		CompletableFuture<JsonObject> result = new CompletableFuture<>();
-		pending.put(id, result);
 		IOException failed = failure;
 		if (failed != null) {
-			pending.remove(id);
 			result.completeExceptionally(failed);
 			return result;
 		}
@@ -245,7 +277,12 @@ public final class EngineClient implements AutoCloseable {
 			int limit = "cache.put".equals(op) ?
 				MAX_FRAME_BYTES - CACHE_ENVELOPE_BYTES : MAX_FRAME_BYTES;
 			synchronized (input) {
-				encodeRequest(request, limit).writeTo(input);
+				var bytes = encodeRequest(request, limit);
+				pending.put(id, result);
+				// The reader can fail while the request is being encoded.
+				failed = failure;
+				if (failed != null) throw failed;
+				bytes.writeTo(input);
 				input.write('\n');
 				input.flush();
 			}

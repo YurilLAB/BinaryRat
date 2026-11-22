@@ -45,11 +45,10 @@ import ghidra.util.task.TaskMonitor;
  * instructions are read in address order, register constants are followed through each
  * straight-line run (moves, extensions, constant arithmetic and loads from read-only
  * memory), and every store that Ghidra's stack analysis marked as a stack write with a
- * known value becomes one write. A run ends at a jump target and after a jump or a call, so
- * strings from different paths, or from before and after a callee used a buffer, are never
- * mixed. A stack store of an unknown value removes the bytes it covers, and p-code that an
- * instruction runs conditionally (a conditional move) yields unknown values. The Program's
- * modification number is checked around every step and any change fails the run.
+ * known value becomes one write. A run follows the Listing's fall-through edges and ends at
+ * a jump target or after a jump or a call. A stack store of an unknown value removes the
+ * bytes it covers. P-code that an instruction runs conditionally yields unknown values.
+ * The Program's modification number is checked around every step and any change fails the run.
  */
 public final class StackStrings {
 	public static final String ANALYSIS_MODE = "read_only_stack_strings";
@@ -198,6 +197,7 @@ public final class StackStrings {
 			List<Write> current = new ArrayList<>();
 			long groupBytes = 0;
 			Address groupStart = null;
+			Address fallThrough = null;
 			boolean endAfter = false;
 			long forgetBudget = FORGET_BUDGET;
 			int index = 0;
@@ -209,13 +209,15 @@ public final class StackStrings {
 				}
 				Address address = instruction.getAddress();
 				boolean join = references.hasReferencesTo(address) && isJoin(references.getReferencesTo(address));
-				if (groupStart == null || endAfter || join || groupBytes > MAXIMUM_GROUP_BYTES) {
+				if (groupStart == null || endAfter || join || !address.equals(fallThrough) ||
+					groupBytes > MAXIMUM_GROUP_BYTES) {
 					finish(function, groupStart, current, groups);
 					current = new ArrayList<>();
 					groupBytes = 0;
 					registers.clear();
 					groupStart = address;
 				}
+				fallThrough = instruction.getFallThrough();
 				FlowType flow = instruction.getFlowType();
 				// A callee may read or rewrite the buffers built so far, so a call ends the run too.
 				endAfter = flow.isJump() || flow.isTerminal() || flow.isCall();

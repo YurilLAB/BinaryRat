@@ -23,10 +23,12 @@ import ghidra.app.script.GhidraScript;
 import ghidra.program.database.ProgramDB;
 import ghidra.program.flatapi.FlatProgramAPI;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.lang.CompilerSpecID;
 import ghidra.program.model.lang.LanguageID;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.symbol.RefType;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.util.DefaultLanguageService;
 import ghidra.util.exception.CancelledException;
@@ -36,8 +38,9 @@ import ghidra.util.task.TaskMonitorAdapter;
  * Edge cases of the stack-string service on a disposable x86-64 Program: immediates of every
  * width, a 64-bit immediate, UTF-16, a rewritten slot, an XOR-decoded constant, vector loads
  * from read-only and writable memory, sub-registers, a call that clobbers registers, branches,
- * a loop join, limits, cancellation and a Program change during the run. Runs as a headless
- * project-only preScript, from a checkout or against the installed extension.
+ * a loop join, limits, cancellation and a Program change during the run. Includes fall-through
+ * controls for x86-64 and AArch64. Runs as a headless project-only preScript, from a checkout
+ * or against the installed extension.
  */
 public class BinaryRatStackStringsProof extends GhidraScript {
 	private static final String TABLE = "binaryrat.desktop.StackStringsTable";
@@ -80,6 +83,7 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 			cancellation(checks);
 			programChange(checks);
 			JsonObject overlay = overlays(report);
+			fallThrough();
 			if (output != null) {
 				var gson = new GsonBuilder().serializeNulls().setPrettyPrinting().create();
 				Files.writeString(output, gson.toJson(report) + "\n", StandardCharsets.UTF_8);
@@ -87,7 +91,8 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 			}
 			println("BINARYRAT_STACK_STRINGS_OK strings=" + report.getAsJsonArray("strings").size() +
 				" checks=" + checks + " joins=true calls=true read_only=true limits=true cancellation=true" +
-				" program_change=true deterministic=true overlays=true table=" + table);
+				" program_change=true deterministic=true overlays=true table=" + table +
+				" fall_through_x86_64=true fall_through_aarch64=true");
 		}
 		finally {
 			program.release(this);
@@ -350,6 +355,74 @@ public class BinaryRatStackStringsProof extends GhidraScript {
 			});
 			changing.cancelInstead = false;
 			expect(IllegalStateException.class, () -> StackStrings.recover(program, null, 4, 100, changing));
+		}
+	}
+
+	private void fallThrough() throws Exception {
+		// mov dword [rbp-8], "ABCD"; mov dword [rbp-4], "WXYZ"; ret
+		assertFallThrough("x86:LE:64:default", "gcc", "c745f841424344", "c745fc5758595ac3",
+			0, 0, -8, (byte) 0xcc);
+		// movz/movk w8, "ABCD"; str w8, [sp]; movz/movk w8, "WXYZ"; str w8, [sp,#4]; ret
+		assertFallThrough("AARCH64:LE:64:v8A", "default", "284888526888a872e80300b9",
+			"e80a8b52284bab72e80700b9c0035fd6", 8, 1, 0, (byte) 0);
+	}
+
+	private void assertFallThrough(String languageId, String compilerId, String firstCode, String secondCode,
+			int storeOffset, int stackOperand, int stackOffset, byte fill) throws Exception {
+		var language = DefaultLanguageService.getLanguageService().getLanguage(new LanguageID(languageId));
+		var fixture = new ProgramDB("Stack string fall-through fixture", language,
+			language.getCompilerSpecByID(new CompilerSpecID(compilerId)), this);
+		try {
+			byte[] firstBytes = HexFormat.of().parseHex(firstCode);
+			byte[] secondBytes = HexFormat.of().parseHex(secondCode);
+			var ram = fixture.getAddressFactory().getDefaultAddressSpace();
+			var memory = fixture.getMemory();
+			var flat = new FlatProgramAPI(fixture, monitor);
+			int transaction = fixture.startTransaction("Create disconnected and contiguous stack stores");
+			boolean commit = false;
+			List<Function> functions = new ArrayList<>();
+			try {
+				memory.createInitializedBlock(".text", ram.getAddress(0x1000), 0x3000, fill, monitor, false)
+					.setExecute(true);
+				for (boolean contiguous : new boolean[] { false, true }) {
+					Address first = ram.getAddress(contiguous ? 0x3000 : 0x1000);
+					Address second = contiguous ? first.add(firstBytes.length) : ram.getAddress(0x2000);
+					memory.setBytes(first, firstBytes);
+					memory.setBytes(second, secondBytes);
+					flat.disassemble(first);
+					if (!contiguous) {
+						flat.disassemble(second);
+					}
+					Address firstStore = first.add(storeOffset);
+					Address secondStore = second.add(storeOffset);
+					var instruction = fixture.getListing().getInstructionAt(firstStore);
+					require(instruction != null && fixture.getListing().getInstructionAt(secondStore) != null &&
+						second.equals(instruction.getFallThrough()) == contiguous, languageId + " fixture flow");
+					AddressSet body = new AddressSet(first, first.add(firstBytes.length - 1));
+					body.addRange(second, second.add(secondBytes.length - 1));
+					Function function = fixture.getFunctionManager().createFunction(
+						contiguous ? "contiguous" : "disconnected", first, body, SourceType.USER_DEFINED);
+					fixture.getReferenceManager().addStackReference(firstStore, stackOperand,
+						stackOffset, RefType.WRITE, SourceType.USER_DEFINED);
+					fixture.getReferenceManager().addStackReference(secondStore, stackOperand,
+						stackOffset + 4, RefType.WRITE, SourceType.USER_DEFINED);
+					functions.add(function);
+				}
+				commit = true;
+			}
+			finally {
+				fixture.endTransaction(transaction, commit);
+			}
+			List<String> disconnected = strings(StackStrings.recover(fixture, functions.get(0), 4, 1, monitor));
+			require(disconnected.equals(List.of("disconnected " + stackOffset + " ABCD ascii false",
+				"disconnected " + (stackOffset + 4) + " WXYZ ascii false")),
+				languageId + " disconnected stack stores: " + disconnected);
+			List<String> contiguous = strings(StackStrings.recover(fixture, functions.get(1), 4, 1, monitor));
+			require(contiguous.equals(List.of("contiguous " + stackOffset + " ABCDWXYZ ascii false")),
+				languageId + " contiguous stack stores: " + contiguous);
+		}
+		finally {
+			fixture.release(this);
 		}
 	}
 

@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+from contextlib import redirect_stdout
+from io import StringIO
 import unittest
 
 from stage_family_calibration import KIND
 from verify_family_calibration import (CROSS_CHECK_TARGETS, check, compare_layout,
-                                       cross_check_targets)
+                                       cross_check_targets, print_comparison)
 
 
 def family(split, proposals=10, cases=4, surveyed=20):
@@ -85,6 +87,22 @@ class StructuralCheckTests(unittest.TestCase):
         for name in ("held0", "held1"):
             moved["families"][name]["split"] = "fit"
         self.assertTrue(any("only 4 held-out" in problem for problem in check(calibration(), moved)))
+
+    def test_console_compares_the_same_proposals_when_coverage_is_partial(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            print_comparison({
+                "raw_diagnostic": {"families": 6, "proposals": 100, "brier": {"estimate": 0.32},
+                                   "reliability_error": 0.41},
+                "paired_raw_brier": {"estimate": 0.27},
+                "paired_raw_reliability_error": 0.36,
+                "calibrated": {"families": 5, "proposals": 80, "brier": {"estimate": 0.25},
+                               "reliability_error": 0.30},
+            })
+        self.assertEqual(output.getvalue().splitlines(), [
+            "held-out raw on paired rows families=5 proposals=80 brier=0.2700 reliability_error=0.3600",
+            "held-out calibrated on paired rows families=5 proposals=80 brier=0.2500 reliability_error=0.3000",
+        ])
 
 
 class CrossCheckTests(unittest.TestCase):
