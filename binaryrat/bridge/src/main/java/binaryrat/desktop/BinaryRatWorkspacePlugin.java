@@ -26,6 +26,7 @@ public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
 
     private final DockingAction export;
     private final DockingAction recover;
+    private final DockingAction recoverSummary;
     private final DockingAction browse;
     private final DockingAction callSites;
     private final DockingAction stackStrings;
@@ -40,6 +41,13 @@ public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
             .buildAndInstall(tool);
         export = scriptAction("Export Decompilation", "BinaryRatExport.java", "2_evidence");
         recover = scriptAction("Recover Layout at Cursor", "BinaryRatRecoverLayouts.java", "2_evidence");
+        var summary = new SummaryLayoutCursor(tool);
+        recoverSummary = new ActionBuilder(SummaryLayoutCursor.ACTION, getName())
+            .menuPath("Tools", "BinaryRat", SummaryLayoutCursor.ACTION)
+            .menuGroup("2_evidence")
+            .enabled(false)
+            .onAction(context -> summary.show(currentLocation))
+            .buildAndInstall(tool);
         browse = scriptAction("Browse Layout Evidence", "BinaryRatBrowseLayout.java", "2_evidence");
         callSites = scriptAction("Call Sites with Arguments", "BinaryRatCallSites.java", "2_evidence");
         stackStrings = scriptAction("Stack Strings", "BinaryRatStackStrings.java", "2_evidence");
@@ -56,6 +64,7 @@ public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
         boolean open = currentProgram != null;
         export.setEnabled(open);
         recover.setEnabled(open && location != null);
+        recoverSummary.setEnabled(open && location != null);
         browse.setEnabled(open);
         callSites.setEnabled(open && location != null);
         stackStrings.setEnabled(open);

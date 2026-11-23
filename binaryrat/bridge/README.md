@@ -70,6 +70,12 @@ The table shows exact field accesses. New reports fingerprint each cited instruc
 
 CI opens the installed extension in CodeBrowser, runs both actions on the packed-structure fixture and checks the resulting Listing address. The `gui-layout/report.json` artifact records the recovery and navigation times, including script compilation and dialogs. [Desktop verification](../benchmarks/verify_gui_layout.py)
 
+### Review a layout across calls
+
+In the BinaryRat workspace, place the cursor inside a function and choose **Tools → BinaryRat → Recover Summary Layout at Cursor**. Select the zero-based parameter to inspect. The evidence table shows accesses from the selected function and supported direct callees. Its **Call path** column shows the address and byte shift of each recorded call. Double-click an access to open its instruction in the Listing.
+
+When the selected parameter has an eligible generic pointer and the evidence supports a fixed layout, choose **Review and Apply Parameter Type**. Review the current type, destination, field widths, and minimum observed extent, then choose **Apply**. Applying creates a new structure, retypes the selected parameter, and records evidence references in a single native Ghidra undo step. The function signature becomes user-defined. Protected signatures, incomplete evidence, and stale previews are refused.
+
 ## Run headless
 
 Use the official `Ghidra_12.2_build` distribution and JDK 25. Run this as a
@@ -190,9 +196,9 @@ solved, and one that moves it, such as a list walk, is withheld and marks the
 report incomplete. A shifted argument such as `value + 1` keeps its exact
 offset. Refused calls (unsupported callee or parameter) are listed with a
 reason, and calls redirected only in p-code are not followed. The report's
-`analysis_mode` is `read_only_summary_layout_evidence`; the evidence table and
-reviewed structure creation read depth-mode reports only. Headless only; the
-summary, decompile, p-code, edge and evidence limits fail closed.
+`analysis_mode` is `read_only_summary_layout_evidence`. The summary, decompile,
+p-code, edge and evidence limits fail closed. CodeBrowser also runs this solver
+for live [summary review](#review-a-layout-across-calls).
 A call is followed only when the decompiler shows its argument; a register
 passed through unchanged in hand-written or optimized code can hide it.
 The script, PyGhidra (`ProgramView.solve_layout`) and the `binaryrat-live`

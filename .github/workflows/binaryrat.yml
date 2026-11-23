@@ -515,10 +515,10 @@ jobs:
           rm -f bfd_arch.cc loadimage_bfd.cc codedata.cc analyzesigs.cc
           sed -i 's/\r$//' ../datatests/*.xml
           make -j2 decomp_test_dbg BFDLIB=
-          # The exit code is the number of failed tests; the unit-test summary goes to stderr.
-          ./decomp_test_dbg -sleighpath "$GITHUB_WORKSPACE" -path ../datatests 2>&1 | tee "$GITHUB_WORKSPACE/build/reports/decompiler-tests.log"
-          grep -Eq '^([1-9][0-9]*)/\1 tests passed\.$' "$GITHUB_WORKSPACE/build/reports/decompiler-tests.log"
-          grep -Eq '^Total tests applied = [1-9]' "$GITHUB_WORKSPACE/build/reports/decompiler-tests.log"
+          # Fixture loading failures can be logged without affecting the harness exit status.
+          log="$GITHUB_WORKSPACE/build/reports/decompiler-tests.log"
+          ./decomp_test_dbg -sleighpath "$GITHUB_WORKSPACE" -path ../datatests 2>&1 | tee "$log"
+          python "$GITHUB_WORKSPACE/binaryrat/tools/verify_decompiler_log.py" "$log"
       - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
         id: bundle_parts
         name: Compile and test the bundled engine and extension

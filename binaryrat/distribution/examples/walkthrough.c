@@ -26,6 +26,16 @@ RETAIN_FUNCTION int measurement_area(const struct Measurement *measurement)
     return measurement_bias(area);
 }
 
+RETAIN_FUNCTION int measurement_summary_leaf(const int *values)
+{
+    return values[0] + values[1];
+}
+
+RETAIN_FUNCTION int measurement_summary(const int *values, int bias)
+{
+    return values[0] + measurement_summary_leaf(values + 1) + bias;
+}
+
 int main(void)
 {
     const struct Measurement readings[] = {{2, 10, 4}, {1, 5, 3}, {3, 7, 2}};

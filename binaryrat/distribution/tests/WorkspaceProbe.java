@@ -5,6 +5,7 @@ package distributionfixture;
 import java.awt.Component;
 import java.awt.Container;
 import java.awt.Window;
+import java.awt.event.MouseEvent;
 import java.awt.event.WindowEvent;
 import java.awt.image.BufferedImage;
 import java.nio.file.Files;
@@ -17,6 +18,7 @@ import java.util.concurrent.FutureTask;
 import java.util.stream.Stream;
 
 import javax.imageio.ImageIO;
+import javax.swing.AbstractButton;
 import javax.swing.Icon;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
@@ -37,6 +39,7 @@ import ghidra.GhidraApplicationLayout;
 import ghidra.GhidraLaunchable;
 import ghidra.app.plugin.core.decompile.DecompilerActionContext;
 import ghidra.app.plugin.core.decompile.PrimaryDecompilerProvider;
+import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.services.CodeViewerService;
 import ghidra.app.services.ProgramManager;
 import ghidra.base.help.GhidraHelpService;
@@ -48,8 +51,13 @@ import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.preferences.Preferences;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.FunctionDefinition;
+import ghidra.program.model.data.IntegerDataType;
+import ghidra.program.model.data.Pointer;
+import ghidra.program.model.data.PointerDataType;
+import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.UnsignedIntegerDataType;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.ParameterImpl;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.HighFunctionDBUtil;
@@ -274,6 +282,162 @@ public final class WorkspaceProbe implements GhidraLaunchable {
         inspectCallSites(tool, program, revision);
         inspectStackStrings(tool, program, revision);
         inspectCorrections(tool, program, function, revision);
+        inspectSummaryLayout(tool, program);
+    }
+
+    private static void inspectSummaryLayout(PluginTool tool, Program program) throws Exception {
+        var root = program.getFunctionManager().getFunctionAt(
+            program.getSymbolTable().getGlobalSymbols("measurement_summary").getFirst().getAddress());
+        var leaf = program.getFunctionManager().getFunctionAt(
+            program.getSymbolTable().getGlobalSymbols("measurement_summary_leaf").getFirst().getAddress());
+        require(root != null && leaf != null, "Summary fixture functions were not analyzed");
+        swing(() -> {
+            int transaction = program.startTransaction("Establish a generic pointer parameter");
+            boolean committed = false;
+            try {
+                for (var function : List.of(root, leaf)) {
+                    function.setCallingConvention(program.getCompilerSpec().getDefaultCallingConvention().getName());
+                    var parameters = new ArrayList<ParameterImpl>();
+                    parameters.add(new ParameterImpl(null,
+                        new PointerDataType(null, program.getDataTypeManager()), program));
+                    if (function.equals(root)) {
+                        parameters.add(new ParameterImpl(null, IntegerDataType.dataType, program));
+                    }
+                    function.replaceParameters(parameters, Function.FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS,
+                        false, SourceType.ANALYSIS);
+                    function.setSignatureSource(SourceType.ANALYSIS);
+                }
+                committed = true;
+            }
+            finally {
+                program.endTransaction(transaction, committed);
+            }
+            return null;
+        });
+        await("analysis idle before the summary review", () ->
+            !AutoAnalysisManager.getAnalysisManager(program).isAnalyzing() &&
+                program.getCurrentTransactionInfo() == null ? Boolean.TRUE : null);
+        String originalType = root.getParameter(0).getDataType().getDisplayName();
+        var originalStorage = root.getParameter(0).getVariableStorage();
+        var peerSignature = root.getParameter(1).getDataType();
+        var peerStorage = root.getParameter(1).getVariableStorage();
+        long revision = program.getModificationNumber();
+        goTo(tool, program, root.getEntryPoint());
+        String actionName = "Recover Summary Layout at Cursor";
+        var action = await("enabled Summary Layout at Cursor action", () -> {
+            var candidate = action(tool, "BinaryRatWorkspacePlugin", actionName);
+            return candidate.isEnabled() ? candidate : null;
+        });
+        SwingUtilities.invokeLater(() -> action.actionPerformed(new DefaultActionContext()));
+        var options = await("summary parameter choice", () -> dialog(actionName));
+        press(options, "Recover");
+        var table = await("summary evidence table with shifted recovery",
+            () -> dialog("BinaryRat Summary Layout Evidence — measurement_summary (parameter 0)"));
+        Address site = await("callee access and address-qualified call path", () -> {
+            var rows = descendants(table).filter(JTable.class::isInstance).map(JTable.class::cast)
+                .findFirst().orElse(null);
+            if (rows == null || rows.getRowCount() < 3) {
+                return null;
+            }
+            int offset = rows.getColumnModel().getColumnIndex("Offset");
+            int route = rows.getColumnModel().getColumnIndex("Call path");
+            int name = rows.getColumnModel().getColumnIndex("Function");
+            int location = rows.getColumnModel().getColumnIndex("Location");
+            for (int row = 0; row < rows.getRowCount(); row++) {
+                if (String.valueOf(rows.getValueAt(row, offset)).equals("+0x8") &&
+                        String.valueOf(rows.getValueAt(row, name)).equals("measurement_summary_leaf") &&
+                        String.valueOf(rows.getValueAt(row, route)).contains("(+4)")) {
+                    var text = String.valueOf(rows.getValueAt(row, location));
+                    var destination = program.getAddressFactory().getAddress(text);
+                    if (destination == null || !leaf.getBody().contains(destination)) {
+                        throw new AssertionError("Summary access did not identify a leaf instruction: " + text);
+                    }
+                    var cell = rows.getCellRect(row, location, true);
+                    rows.scrollRectToVisible(cell);
+                    // GhidraTable navigates on the second release. Do not select the row first,
+                    // which can navigate independently if the tool has selection navigation on.
+                    rows.dispatchEvent(new MouseEvent(rows, MouseEvent.MOUSE_RELEASED,
+                        System.currentTimeMillis(), 0, cell.x + 2, cell.y + 2, 2, false,
+                        MouseEvent.BUTTON1));
+                    return destination;
+                }
+            }
+            return null;
+        });
+        await("leaf access opens in the Listing", () ->
+            site.equals(tool.getService(CodeViewerService.class).getCurrentLocation().getAddress()) ?
+                Boolean.TRUE : null);
+        require(program.getModificationNumber() == revision && !root.isDeleted() &&
+            root.getParameter(0).getDataType().getDisplayName().equals(originalType),
+            "Summary review changed the Program before approval");
+        String reviewName = "Review and Apply Parameter Type";
+        var reviewButton = await("summary review toolbar action", () -> toolbarButton(table, reviewName));
+        SwingUtilities.invokeLater(reviewButton::doClick);
+        var review = await("summary parameter type review", () -> dialog(reviewName));
+        var details = swing(() -> namedIn(review, JTextArea.class, "BinaryRat reviewed summary layout"));
+        require(details != null && !details.isEditable() && details.getText().contains("Current type  " + originalType) &&
+            details.getText().contains("+0x8") && details.getText().contains("Undo"),
+            "Parameter review omitted the current type, inferred extent or undo");
+        swing(() -> {
+            snapshot(review, evidence.resolve("summary-review.png"));
+            return null;
+        });
+        press(review, "Cancel");
+        await("closed summary confirmation", () -> review.isShowing() ? null : Boolean.TRUE);
+        require(program.getModificationNumber() == revision, "Cancelling summary approval changed the Program");
+        SwingUtilities.invokeLater(reviewButton::doClick);
+        var accepted = await("summary confirmation after cancellation", () -> dialog(reviewName));
+        press(accepted, "Apply");
+        var installed = await("one committed parameter correction", () -> {
+            var type = root.getParameter(0).getDataType();
+            return program.getCurrentTransactionInfo() == null && type instanceof Pointer pointer &&
+                pointer.getDataType() instanceof Structure structure ? structure : null;
+        });
+        String name = installed.getPathName();
+        require(installed.getLength() == 12 && installed.getNumDefinedComponents() == 3 &&
+            root.getSignatureSource() == SourceType.USER_DEFINED &&
+            root.getParameter(0).getVariableStorage().equals(originalStorage) &&
+            root.getParameter(1).getDataType().isEquivalent(peerSignature) &&
+            root.getParameter(1).getVariableStorage().equals(peerStorage),
+            "Applied summary changed neighboring arguments or register storage");
+        await("applied summary evidence closes after edit", () -> table.isShowing() ? null : Boolean.TRUE);
+        undo(program);
+        require(root.getParameter(0).getDataType().getDisplayName().equals(originalType) &&
+            root.getSignatureSource() == SourceType.ANALYSIS &&
+            program.getDataTypeManager().getDataType(name) == null,
+            "One native undo did not restore the parameter and remove the new structure");
+        swing(() -> {
+            program.redo();
+            return null;
+        });
+        require(root.getParameter(0).getDataType() instanceof Pointer pointer &&
+            pointer.getDataType() instanceof Structure structure && structure.getPathName().equals(name),
+            "One native redo did not restore the reviewed layout");
+        long reviewedRevision = program.getModificationNumber();
+        await("idle analysis after redo", () ->
+            !AutoAnalysisManager.getAnalysisManager(program).isAnalyzing() &&
+                program.getCurrentTransactionInfo() == null ? Boolean.TRUE : null);
+        goTo(tool, program, root.getEntryPoint());
+        SwingUtilities.invokeLater(() -> action.actionPerformed(new DefaultActionContext()));
+        press(await("summary recovery for the reviewed parameter", () -> dialog(actionName)), "Recover");
+        var protectedTable = await("read-only evidence for the reviewed parameter",
+            () -> dialog("BinaryRat Summary Layout Evidence — measurement_summary (parameter 0)"));
+        await("write refusal for the reviewed signature", () -> {
+            var label = namedIn(protectedTable, JLabel.class, "statusLabel");
+            return label != null && label.getText().contains("signature is user-defined or imported") ?
+                Boolean.TRUE : null;
+        });
+        require(swing(() -> toolbarButton(protectedTable, reviewName)) == null &&
+            program.getModificationNumber() == reviewedRevision,
+            "The reviewed signature was mutable from the second summary");
+        press(protectedTable, "Dismiss");
+        System.out.println("BINARYRAT_WORKSPACE_SUMMARY_LAYOUT_OK");
+    }
+
+    private static AbstractButton toolbarButton(JDialog dialog, String label) {
+        return descendants(dialog).filter(AbstractButton.class::isInstance).map(AbstractButton.class::cast)
+            .filter(button -> button.isEnabled() && button.getToolTipText() != null &&
+                button.getToolTipText().contains(label)).findFirst().orElse(null);
     }
 
     /** Stack Strings: main builds "square units" one character at a time. */

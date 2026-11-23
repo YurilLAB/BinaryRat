@@ -5,10 +5,10 @@ evidence backs it. This page lists those checks and links to the raw evidence.
 
 ## Ghidra integration checks
 
-Use an official Ghidra 12.2 installation and JDK 25. The bridge is compiled by
-Ghidra's script machinery. Except for `cache-proof`, which edits a throwaway
-program, the bridge performs read-only exports from CodeBrowser or headless
-Ghidra after analysis. [Bridge contract](../bridge/README.md#contract)
+Use an official Ghidra 12.2 installation and JDK 25. Ghidra compiles the
+checkout scripts. The integration checks run exports after analysis and use
+disposable Programs for cache mutations and reviewed writes.
+[Bridge contract](../bridge/README.md#contract)
 
 ```sh
 python -m pip install -r binaryrat/requirements-test.txt
@@ -54,12 +54,15 @@ Linux and Windows. Besides the native tests and the integration checks above:
 - The fork-build jobs assemble the complete application for each x64 platform,
   run the extracted bundle with its bundled runtime, import and decompile the
   example, and exercise the default desktop workspace and the included Python wheel.
+  The desktop check follows a shifted call to its field evidence, cancels a type
+  preview, then applies it and checks the existing parameter through Undo and Redo.
 - The Linux and Windows fork builds check that every function prints as a new
   official decompiler process prints it, in any order.
   [Core patch](core-patches/decompiler-join-flush.md)
 - The Linux fork build compiles upstream's own decompiler test program from the
   patched sources and requires all of its unit tests and data tests to pass,
-  including the test-only Toy processor's join tests.
+  including the test-only Toy processor's join tests. It checks both pass totals
+  and rejects fixture-loading and execution errors in the combined log.
 
 ### How CI stays reliable
 

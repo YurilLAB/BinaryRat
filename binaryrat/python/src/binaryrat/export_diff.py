@@ -96,9 +96,8 @@ def _lines(stream: BinaryIO, limit: int, hash_line: Callable[[bytes], None] | No
 
 
 def _records(
-    path: Path, limit: int, program_id: str | None, entries: Set[Address] | None,
-    hash_line: Callable[[bytes], None] | None,
-) -> Iterator[tuple[str, Address, _Fingerprint | None]]:
+    path: Path, limit: int, program_id: str | None, hash_line: Callable[[bytes], None] | None,
+) -> Iterator[tuple[str, Decompilation, tuple[tuple[int, int], ...]]]:
     raw_id = None
     revision = None
     try:
@@ -116,10 +115,7 @@ def _records(
                 if revision is not None and record.revision != revision:
                     raise ExportError("a single export contains mixed revisions")
                 program_id, revision = ident, record.revision
-                entry = record.function.entry
-                ranges = _body_ranges(record)
-                yield ident, entry, (
-                    _fingerprint(record, ranges) if entries is None or entry in entries else None)
+                yield ident, record, _body_ranges(record)
         if revision is None:
             raise ExportError("empty export has no executable identity")
     except (ExportError, RecursionError) as error:
@@ -139,7 +135,7 @@ def _review_lines(record: Decompilation) -> list[str]:
     return lines + record.c.splitlines()
 
 
-def _patches(before: Path, after: Path, limit: int,
+def _patches(before: Path, after: Path, limit: int, program_id: str,
              wanted: dict[Address, tuple[_Fingerprint, _Fingerprint]],
              context: int, input_digests: tuple[bytes, bytes]) -> dict[Address, str]:
     """Diff the prototype, error and C of changed functions in a second pass.
@@ -150,35 +146,34 @@ def _patches(before: Path, after: Path, limit: int,
     earlier: dict[Address, tuple[str, list[str]]] = {}
     patches: dict[Address, str] = {}
     for side, path in enumerate((before, after)):
-        try:
-            digest = hashlib.sha256()
-            with path.open("rb") as stream:
-                for record in parse_export(_lines(stream, limit, digest.update)):
-                    entry = record.function.entry
-                    prints = wanted.get(entry)
-                    if prints is None:
-                        continue
-                    if side == 0:
-                        earlier[entry] = (record.function.name, _review_lines(record))
-                        continue
-                    old_name, old_text = earlier.pop(entry)
-                    new_text = _review_lines(record)
-                    if old_text == new_text:
-                        # Display lines omit their endings. Show the exact text digests
-                        # when a change such as LF to CRLF has no visible line diff.
-                        changed = [field for field in _PATCHED_FIELDS
-                                   if getattr(prints[0], field) != getattr(prints[1], field)]
-                        old_text, new_text = ([
-                            f"/* {_PATCHED_FIELDS[field]} raw SHA-256: {getattr(item, field).hex()} */"
-                            for field in changed
-                        ] for item in prints)
-                    patches[entry] = "\n".join(difflib.unified_diff(
-                        old_text, new_text, f"before {entry} {old_name}",
-                        f"after {entry} {record.function.name}", n=context, lineterm=""))
-            if digest.digest() != input_digests[side]:
-                raise ExportError("the export changed while it was being compared")
-        except (ExportError, RecursionError) as error:
-            raise ExportError(f"{path}: {error}") from error
+        digest = hashlib.sha256()
+        for _, record, _ in _records(path, limit, program_id, digest.update):
+            entry = record.function.entry
+            prints = wanted.get(entry)
+            if prints is None:
+                continue
+            if side == 0:
+                earlier[entry] = (record.function.name, _review_lines(record))
+                continue
+            previous = earlier.pop(entry, None)
+            if previous is None:
+                raise ExportError(f"{path}: the export changed while it was being compared")
+            old_name, old_text = previous
+            new_text = _review_lines(record)
+            if old_text == new_text:
+                # Display lines omit their endings. Show the exact text digests
+                # when a change such as LF to CRLF has no visible line diff.
+                changed = [field for field in _PATCHED_FIELDS
+                           if getattr(prints[0], field) != getattr(prints[1], field)]
+                old_text, new_text = ([
+                    f"/* {_PATCHED_FIELDS[field]} raw SHA-256: {getattr(item, field).hex()} */"
+                    for field in changed
+                ] for item in prints)
+            patches[entry] = "\n".join(difflib.unified_diff(
+                old_text, new_text, f"before {entry} {old_name}",
+                f"after {entry} {record.function.name}", n=context, lineterm=""))
+        if digest.digest() != input_digests[side]:
+            raise ExportError(f"{path}: the export changed while it was being compared")
     return patches
 
 
@@ -200,19 +195,22 @@ def compare_exports(before: Path, after: Path, *, max_record_mib: int = _DEFAULT
     previous: dict[Address, _Fingerprint] = {}
     missing = set(entries) if entries is not None else set()
     program_id = ""
-    for program_id, entry, fingerprint in _records(
-            before, limit, None, entries, before_hash.update if before_hash is not None else None):
-        if fingerprint is not None:
-            previous[entry] = fingerprint
+    for program_id, record, ranges in _records(
+            before, limit, None, before_hash.update if before_hash is not None else None):
+        entry = record.function.entry
+        if entries is None or entry in entries:
+            previous[entry] = _fingerprint(record, ranges)
             missing.discard(entry)
 
     counts = {"added": 0, "removed": 0, "changed": 0, "unchanged": 0}
     changes: dict[Address, FunctionChange] = {}
     patched: dict[Address, tuple[_Fingerprint, _Fingerprint]] = {}
-    for _, entry, current in _records(
-            after, limit, program_id, entries, after_hash.update if after_hash is not None else None):
-        if current is None:
+    for _, record, ranges in _records(
+            after, limit, program_id, after_hash.update if after_hash is not None else None):
+        entry = record.function.entry
+        if entries is not None and entry not in entries:
             continue
+        current = _fingerprint(record, ranges)
         missing.discard(entry)
         old = previous.pop(entry, None)
         if old is None:
@@ -233,7 +231,7 @@ def compare_exports(before: Path, after: Path, *, max_record_mib: int = _DEFAULT
         raise ExportError(f"requested function {str(min(missing))!r} is absent from both exports")
     if patched and patch_context is not None and before_hash is not None and after_hash is not None:
         digests = (before_hash.digest(), after_hash.digest())
-        for entry, patch in _patches(before, after, limit, patched, patch_context, digests).items():
+        for entry, patch in _patches(before, after, limit, program_id, patched, patch_context, digests).items():
             changes[entry]["patch"] = patch
     return DiffReport(schema_version=1, program_id=program_id, counts=counts,
                       changes=[changes[key] for key in sorted(changes)])

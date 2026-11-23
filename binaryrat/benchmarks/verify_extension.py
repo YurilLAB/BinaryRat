@@ -200,6 +200,17 @@ def main() -> None:
             raise RuntimeError(f"packaged call-site correction proof failed (see {correction_log})")
         correction_proof = {"passed": True, "malformed_signature_cases": int(correction_cases[0]),
                             "log": correction_log.name, "wall_seconds": correction["wall_seconds"]}
+        summary_writeback_log = output / "summary-writeback.log"
+        summary_writeback_run = measured_run(
+            [str(headless), str(root), "summary-writeback", "-scriptPath", str(writeback_scripts),
+             "-preScript", "BinaryRatSummaryWriteBackProof.java", "-deleteProject"],
+            summary_writeback_log, 180, environment)
+        summary_writeback_text = summary_writeback_log.read_text(encoding="utf-8", errors="replace")
+        if (summary_writeback_run["returncode"] or "REPORT SCRIPT ERROR" in summary_writeback_text or
+                summary_writeback_text.count("BINARYRAT_SUMMARY_WRITEBACK_OK") != 1):
+            raise RuntimeError(f"packaged summary write-back proof failed (see {summary_writeback_log})")
+        summary_writeback_proof = {"passed": True, "log": summary_writeback_log.name,
+                                   "wall_seconds": summary_writeback_run["wall_seconds"]}
         # The same proof as the checkout run, compiled against the installed BinaryRat.jar
         # (no bridge -scriptPath) so it also checks the desktop table's rows.
         proof_scripts = root / "call-site scripts"
@@ -338,7 +349,8 @@ def main() -> None:
               "packaged_layout_browser": browse_proof, "layout_parser": parser_proof,
               "protected_layout_writeback": writeback_proof, "shared_decompilation": service_proof,
               "interactive_admission": admission_proof, "analysis_profiles": profiles_proof,
-              "call_site_correction": correction_proof, "call_sites": call_sites_proof,
+              "call_site_correction": correction_proof, "summary_writeback": summary_writeback_proof,
+              "call_sites": call_sites_proof,
               "stack_strings": stack_strings_proof, "cache_edges": cache_edges_proof}
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Installed BinaryRat extension passed stock parity and persistence: {report_path}")

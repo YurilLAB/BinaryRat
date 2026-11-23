@@ -47,8 +47,13 @@ final class LayoutReport {
 	}
 
 	static Target target(Program program, JsonObject artifact, int maximumParameter) throws IOException {
+		return target(program, artifact, maximumParameter, "read_only_layout_evidence");
+	}
+
+	static Target target(Program program, JsonObject artifact, int maximumParameter,
+			String analysisMode) throws IOException {
 		integer(artifact.get("schema_version"), 1, 1, "schema_version");
-		if (!"read_only_layout_evidence".equals(string(artifact.get("analysis_mode"), "analysis_mode")) ||
+		if (!analysisMode.equals(string(artifact.get("analysis_mode"), "analysis_mode")) ||
 				!"analyst_selected_object_start".equals(string(artifact.get("assumption"), "assumption"))) {
 			throw new IOException("Expected a BinaryRat read-only layout report");
 		}

@@ -14,6 +14,9 @@ import javax.swing.SwingUtilities;
 
 import binaryrat.writeback.LayoutEvidenceBrowser.Review;
 import binaryrat.writeback.LayoutEvidenceBrowser.Row;
+import docking.ActionContext;
+import docking.action.DockingAction;
+import docking.action.ToolBarData;
 import ghidra.app.services.GoToService;
 import ghidra.app.services.ProgramManager;
 import ghidra.app.tablechooser.AbstractComparableColumnDisplay;
@@ -28,15 +31,18 @@ import ghidra.program.model.listing.Program;
 import ghidra.util.Swing;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
+import resources.Icons;
 
 /** A nonmodal CodeBrowser table of the instructions cited by a checked layout report. */
 public final class LayoutEvidenceTable {
 	public static final String TITLE = "BinaryRat Layout Evidence";
+	public static final String SUMMARY_TITLE = "BinaryRat Summary Layout Evidence";
+	public static final String REVIEW_ACTION = "Review and Apply Parameter Type";
 	/** Preference key for the folder of the latest report, shared by the recover and browse actions. */
 	public static final String DIRECTORY_PREFERENCE = "BinaryRat.LayoutReportDirectory";
 	private static final Map<String, Integer> COLUMN_WIDTHS = Map.of("Location", 130, "Offset", 64,
 		"Width", 52, "Access", 64, "Instruction", 320, "Function", 170, "P-code order", 90,
-		"Overlaps", 70, "Instruction bytes", 110);
+		"Overlaps", 70, "Instruction bytes", 110, "Call path", 240);
 
 	private LayoutEvidenceTable() {
 	}
@@ -93,13 +99,26 @@ public final class LayoutEvidenceTable {
 	 */
 	public static void show(PluginTool tool, Program program, Review review, TaskMonitor monitor)
 			throws IOException, CancelledException {
+		show(tool, program, review, null, null, "", monitor);
+	}
+
+	public static void showSummary(PluginTool tool, Program program, SummaryLayoutEvidenceBrowser.View view,
+			Runnable reviewAction, String refusal, TaskMonitor monitor)
+			throws IOException, CancelledException {
+		show(tool, program, view.evidence(), view, reviewAction, refusal, monitor);
+	}
+
+	private static void show(PluginTool tool, Program program, Review review,
+			SummaryLayoutEvidenceBrowser.View summary, Runnable reviewAction, String refusal,
+			TaskMonitor monitor) throws IOException, CancelledException {
 		if (!supported(tool)) {
 			throw new IOException("Open the layout evidence from a CodeBrowser with table and navigation services.");
 		}
 		var tables = tool.getService(TableService.class);
 		var programs = tool.getService(ProgramManager.class);
 		long revision = review.revision();
-		String title = TITLE + " — " + review.functionName() + " (parameter " + review.parameterIndex() + ")";
+		String title = (summary == null ? TITLE : SUMMARY_TITLE) + " — " +
+			review.functionName() + " (parameter " + review.parameterIndex() + ")";
 		AtomicReference<TableChooserDialog> created = new AtomicReference<>();
 		DomainObjectListener changed = event -> {
 			if (program.getModificationNumber() != revision) {
@@ -126,6 +145,19 @@ public final class LayoutEvidenceTable {
 				addColumn(dialog, "Overlaps", Boolean.class, Row::overlaps);
 				addColumn(dialog, "Instruction bytes", String.class,
 					row -> row.instructionBytesVerified() ? "Verified" : "Unrecorded");
+				if (summary != null) {
+					addColumn(dialog, "Call path", String.class, row -> summary.callPaths().get(row));
+				}
+				if (reviewAction != null) {
+					var action = new DockingAction(REVIEW_ACTION, "BinaryRat") {
+						@Override
+						public void actionPerformed(ActionContext context) {
+							reviewAction.run();
+						}
+					};
+					action.setToolBarData(new ToolBarData(Icons.ADD_ICON, "BinaryRat"));
+					dialog.addAction(action);
+				}
 				return dialog;
 			});
 			if (table == null) {
@@ -139,9 +171,12 @@ public final class LayoutEvidenceTable {
 				offsets.add(row.offset());
 				table.add(new EvidenceRow(row));
 			}
-			String summary = review.rows().size() + (review.rows().size() == 1 ? " access" : " accesses") +
-				" at " + offsets.size() + (offsets.size() == 1 ? " offset" : " offsets") +
-				". Double-click a row to open its instruction in the Listing.";
+			String details = summary == null ?
+				review.rows().size() + (review.rows().size() == 1 ? " access" : " accesses") +
+					" at " + offsets.size() + (offsets.size() == 1 ? " offset. " : " offsets. ") :
+				summary.status();
+			String status = details + (refusal.isBlank() ?
+				"Double-click a row to open its instruction in the Listing." : refusal);
 
 			Boolean visible = Swing.runNow(() -> {
 				if (monitor.isCancelled() || programs.getCurrentProgram() != program || program.isClosed()) {
@@ -152,7 +187,7 @@ public final class LayoutEvidenceTable {
 				if (program.getModificationNumber() != revision) {
 					return false;
 				}
-				table.setStatusText(summary);
+				table.setStatusText(status);
 				readable(table);
 				table.show();
 				return true;

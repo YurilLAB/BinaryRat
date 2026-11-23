@@ -36,6 +36,12 @@
   <li>The evidence table opens when the report is saved. Double-click a row to jump to its instruction. Reopen a saved report later with <b>Browse Layout Evidence</b>.</li>
 </ol>
 <p>The sample contains a structure with count, width and height fields. Its <a href="examples/walkthrough.c">source</a> is provided for reference.</p>
+<h2>Review a layout across calls</h2>
+<ol>
+  <li>Put the cursor inside <code>measurement_summary</code>. Choose <b>Tools → BinaryRat → Recover Summary Layout at Cursor</b> and select parameter 0.</li>
+  <li>Check the field offsets and the <b>Call path</b> column. It shows where the caller shifts the pointer before passing it to <code>measurement_summary_leaf</code>. Double-click an evidence row to open its instruction.</li>
+  <li>When the parameter and evidence are eligible, choose <b>Review and Apply Parameter Type</b>. Review the current and proposed types before selecting <b>Apply</b>. CodeBrowser’s <b>Undo</b> reverts the structure and parameter edit together.</li>
+</ol>
 <h2>List the calls to a function</h2>
 <ol>
   <li>Put the cursor in <code>measurement_bias</code> and choose <b>Tools → BinaryRat → Call Sites with Arguments</b>.</li>

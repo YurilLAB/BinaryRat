@@ -248,16 +248,24 @@ class ExportDiffTests(unittest.TestCase):
     def test_patch_refuses_an_export_replaced_between_passes(self):
         before = [row(c="a\n"), row("20")]
         after = [row(c="b\n"), row("20")]
+        changed = "the export changed"
         cases = [
-            (self.before, [row("20")]),
-            (self.before, [row(c="edited again\n"), row("20")]),
-            (self.before, [dict(record, revision=6) for record in before]),
-            (self.after, [dict(record, program_id="sha256:" + "ef" * 32) for record in after]),
-            (self.after, [row(c="b\n"), row("20", name="changed unselected function")]),
+            (self.before, [row("20")], changed),
+            (self.after, [row("20")], changed),
+            (self.before, [row(c="edited again\n"), row("20")], changed),
+            (self.before, [dict(record, revision=6) for record in before], changed),
+            (self.after, [dict(record, program_id="sha256:" + "ef" * 32) for record in after],
+             "program_id mismatch"),
+            (self.after, [row(c="b\n"), row("20", name="changed unselected function")], changed),
+            (self.before, [row(), row("0010", revision=6)], "mixed revisions"),
+            (self.after, [row(), row("0010")], "duplicate function identity"),
+            (self.after, [row(), row("20", revision=6)], "mixed revisions"),
+            (self.after, [row(), row("20", body_ranges=[["10", "10000000000000000"]])],
+             "64-bit Ghidra offset"),
         ]
         replacement = self.before.with_suffix(".next")
         make_patches = export_diff._patches
-        for path, records in cases:
+        for path, records, message in cases:
             with self.subTest(path=path.name, records=records):
                 self.write(self.before, before)
                 self.write(self.after, after)
@@ -270,7 +278,44 @@ class ExportDiffTests(unittest.TestCase):
                 with patch.object(export_diff, "_patches", side_effect=replace):
                     status, out, err = self.cli("--patch", "--json", "--function", "ram:10")
                 self.assertEqual((status, out), (2, ""))
-                self.assertIn(f"{path}: the export changed", err)
+                self.assertIn(f"{path}:", err)
+                self.assertIn(message, err)
+
+    def test_cli_reports_a_selected_function_repeated_across_revisions_on_reread(self):
+        self.write(self.before, [row(c="a\n")])
+        self.write(self.after, [row(c="b\n")])
+        replacement = self.after.with_suffix(".next")
+        self.write(replacement, [row(c="b\n"), row("0x0010", revision=6, c="c\n")])
+        # Swap the file at the second open in the CLI process to avoid a timing race in the test.
+        program = """\
+from pathlib import Path
+import runpy
+import sys
+from unittest.mock import patch
+
+replacement = Path(sys.argv.pop(1))
+after = Path(sys.argv[2])
+original_open = Path.open
+opens = 0
+
+def open_with_replacement(path, *args, **kwargs):
+    global opens
+    if path == after:
+        opens += 1
+        if opens == 2:
+            replacement.replace(after)
+    return original_open(path, *args, **kwargs)
+
+with patch.object(Path, "open", open_with_replacement):
+    runpy.run_module("binaryrat.export_diff", run_name="__main__", alter_sys=True)
+"""
+        done = subprocess.run(
+            [sys.executable, "-c", program, str(replacement), str(self.before), str(self.after),
+             "--patch", "--json", "--function", "ram:10"],
+            capture_output=True, timeout=60)
+        self.assertEqual((done.returncode, done.stdout), (2, b""))
+        self.assertIn(b"mixed revisions", done.stderr)
+        self.assertNotIn(b"Traceback", done.stderr)
 
     def test_patch_keeps_both_names_when_a_function_is_renamed(self):
         self.write(self.before, [row(c="before\n", name="old_name")])

@@ -79,9 +79,10 @@ def verify(bundle: Path, output: Path) -> None:
                 result.count("BINARYRAT_WORKSPACE_CORRECTIONS_OK") != 1 or
                 result.count("BINARYRAT_WORKSPACE_CALL_SITES_OK") != 1 or
                 result.count("BINARYRAT_WORKSPACE_STACK_STRINGS_OK") != 1 or
+                result.count("BINARYRAT_WORKSPACE_SUMMARY_LAYOUT_OK") != 1 or
                 'Exception in thread "AWT-EventQueue' in result):
             raise RuntimeError(f"Invalid bundled workspace evidence. See {output / 'desktop.log'}")
-    print(f"Bundled CodeBrowser, layout recovery, call sites, stack strings and analyst corrections passed. "
+    print(f"Bundled CodeBrowser, layout recovery, reviewed summary, call sites, stack strings and analyst corrections passed. "
           f"Evidence in {report}")
 
 
