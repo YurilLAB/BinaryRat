@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import monotonic
-from typing import Any, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from .call_sites import (
     MAX_CALLERS as _MAX_CALL_SITE_CALLERS,
@@ -25,6 +25,9 @@ from .models import Address
 from .stack_strings import MAX_FUNCTIONS as _MAX_STACK_STRING_FUNCTIONS
 from .stack_strings import StackStringsReport, decode_stack_strings_report
 from .summary_layout import SummaryLayoutReport, decode_summary_report
+
+if TYPE_CHECKING:
+    from .arithmetic import ArithmeticExpression
 
 _T = TypeVar("_T")
 _MAX_PAGE_SIZE = 1000
@@ -41,6 +44,11 @@ _MAX_SUMMARY_TIMEOUT_SECONDS = 600
 _MAX_STACK_STRINGS_TIMEOUT_SECONDS = 60
 _MAX_PCODE_OPERATIONS = 128
 _MAX_PCODE_INPUTS = 8
+_ARITHMETIC_REGISTERS = {
+    "x86:LE:64:default": {"RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RSP", "RBP",
+                          *(f"R{i}" for i in range(8, 16))},
+    "AARCH64:LE:64:v8A": {"SP", *(f"X{i}" for i in range(31))},
+}
 
 DecompilationBackend = Literal["auto", "scheduled", "stock"]
 
@@ -255,6 +263,25 @@ def _pcode_listing(operations: Any, limit: int, cancel: Event | None) -> PcodeLi
     return PcodeListing(tuple(rows), len(operations))
 
 
+def _lift_instruction(instruction: Any, revision: int, limit: int, cancel: Event | None) -> InstructionPcode:
+    from jpype import JBoolean
+
+    raw = _pcode_listing(instruction.getPcode(), limit, cancel)
+    # Select the boolean overload. getPcode(int) lifts an individual operand.
+    effective = _pcode_listing(instruction.getPcode(JBoolean(True)), limit, cancel)
+    return InstructionPcode(_address(instruction.getMinAddress()), int(instruction.getLength()),
+                            int(instruction.getParsedLength()), str(instruction.getMnemonicString()),
+                            revision, raw, effective)
+
+
+def _general_register(register: Any, base_names: set[str]) -> bool:
+    return (register is not None and register.getAddress().isRegisterAddress()
+            and register.getLeastSignificantBit() == 0
+            and register.getNumBytes() * 8 == register.getBitLength()
+            and not register.isZero()
+            and str(register.getBaseRegister().getName()).upper() in base_names)
+
+
 def _function(value: Any) -> ProgramFunction:
     return ProgramFunction(
         str(value.getName()),
@@ -440,6 +467,21 @@ class ProgramView:
             )
             return _function(function) if function is not None and not function.isExternal() else None
 
+    def register_name(self, storage: PcodeVarnode) -> str | None:
+        """Return Ghidra's register name for this exact byte range, if there is one."""
+        if (not isinstance(storage, PcodeVarnode) or type(storage.size) is not int
+                or not 1 <= storage.size < 1 << 31):
+            raise ValueError("expected a varnode with a positive register lookup width")
+        with self._read() as program:
+            address = self._native_address(program, storage.address)
+            if not address.isRegisterAddress():
+                return None
+            reg = program.getRegister(address, storage.size)
+            if (reg is None or reg.getAddress() != address or reg.getLeastSignificantBit() != 0
+                    or reg.getBitLength() != 8 * storage.size):
+                return None
+            return str(reg.getName())
+
     def instruction_pcode(
         self, address: Address, *, max_operations: int = _MAX_PCODE_OPERATIONS,
     ) -> InstructionPcode | None:
@@ -454,7 +496,7 @@ class ProgramView:
         if type(max_operations) is not int or not 1 <= max_operations <= _MAX_PCODE_OPERATIONS:
             raise ValueError(f"max_operations must be between 1 and {_MAX_PCODE_OPERATIONS}")
         with self._read() as program:
-            from jpype import JBoolean, JException
+            from jpype import JException
 
             location = self._native_address(program, address)
             if not location.isMemoryAddress():
@@ -463,23 +505,88 @@ class ProgramView:
                 raise LiveProgramError("Wait for the Program edit or analysis to finish")
             try:
                 instruction = program.getListing().getInstructionContaining(location)
-                result = None
-                if instruction is not None:
-                    raw = _pcode_listing(instruction.getPcode(), max_operations, self._cancel)
-                    # Select the boolean overload. getPcode(int) lifts an individual operand.
-                    effective = _pcode_listing(instruction.getPcode(JBoolean(True)), max_operations,
-                                               self._cancel)
-                    result = InstructionPcode(
-                        _address(instruction.getMinAddress()), int(instruction.getLength()),
-                        int(instruction.getParsedLength()), str(instruction.getMnemonicString()),
-                        self.info.revision, raw, effective,
-                    )
+                result = (None if instruction is None else
+                          _lift_instruction(instruction, self.info.revision, max_operations, self._cancel))
             except JException as cause:
                 self._check(program)
                 raise LiveProgramError(f"Could not read instruction p-code at {address}: {cause}") from cause
             if program.getCurrentTransactionInfo() is not None:
                 raise LiveProgramError("Wait for the Program edit or analysis to finish")
             return result
+
+    def explain_arithmetic(self, start: Address, end: Address, register: str) -> ArithmeticExpression:
+        """Explain a general register after executing the selected straight-line Listing instructions.
+
+        Both endpoints are inclusive instruction starts. The expression uses the effective
+        p-code at this Program revision and takes its register inputs at entry to the range.
+        """
+        from jpype import JException
+        from .arithmetic import MAX_INSTRUCTIONS, MAX_OPERATIONS, ArithmeticRefusal, build_expression
+
+        if not isinstance(register, str) or not 1 <= len(register) <= 100 or not register.isprintable():
+            raise ValueError("expected a register name of 1 to 100 printable characters")
+        base_names = _ARITHMETIC_REGISTERS.get(self.info.language_id)
+        if base_names is None:
+            raise ArithmeticRefusal(f"unsupported arithmetic language: {self.info.language_id}")
+        with self._read() as program:
+            first = self._native_address(program, start)
+            last = self._native_address(program, end)
+            if not first.isMemoryAddress() or start.space != end.space or start.offset > end.offset:
+                raise ValueError("expected an ordered pair of addresses in one memory space")
+            if first.getAddressSpace().getAddressableUnitSize() != 1:
+                raise ArithmeticRefusal("arithmetic ranges require byte-addressed memory")
+            if program.getCurrentTransactionInfo() is not None:
+                raise LiveProgramError("Wait for the Program edit or analysis to finish")
+            try:
+                selected = program.getRegister(register)
+                if selected is None:
+                    raise ValueError(f"unknown register: {register}")
+                if not _general_register(selected, base_names):
+                    raise ArithmeticRefusal("select a byte-aligned general-purpose register")
+                target = PcodeVarnode(_address(selected.getAddress()), int(selected.getNumBytes()))
+                listing = program.getListing()
+                if listing.getInstructionAt(last) is None:
+                    raise ValueError(f"end is not a defined instruction start: {end}")
+                cursor = first
+                captured = []
+                operations = 0
+                while True:
+                    self._check(program)
+                    if len(captured) == MAX_INSTRUCTIONS:
+                        raise ArithmeticRefusal(f"range exceeds {MAX_INSTRUCTIONS} instructions")
+                    ins = listing.getInstructionAt(cursor)
+                    if ins is None:
+                        raise ValueError(f"no defined instruction at {_address(cursor)}")
+                    if (not ins.getFlowType().isFallthrough() or ins.isFallThroughOverridden()
+                            or ins.getFlowOverride().name() != "NONE" or ins.isInDelaySlot()
+                            or ins.getDelaySlotDepth() or ins.getLength() != ins.getParsedLength()):
+                        raise ArithmeticRefusal(f"range requires ordinary straight-line flow at {_address(cursor)}")
+                    snapshot = _lift_instruction(ins, self.info.revision, _MAX_PCODE_OPERATIONS, self._cancel)
+                    operations += snapshot.effective.operation_count
+                    if operations > MAX_OPERATIONS:
+                        raise ArithmeticRefusal(f"range exceeds {MAX_OPERATIONS} p-code operations")
+                    captured.append(snapshot)
+                    if cursor == last:
+                        break
+                    cursor = ins.getMaxAddress().next()
+                    if cursor is None or cursor.compareTo(last) > 0 or cursor != ins.getFallThrough():
+                        raise ArithmeticRefusal("range does not have contiguous fallthrough")
+                expression = build_expression(captured, target, language_id=self.info.language_id)
+                for node in expression.nodes:
+                    if node.op == "INPUT":
+                        storage = node.register
+                        native = self._native_address(program, storage.address)
+                        reg = program.getRegister(native, storage.size)
+                        if not _general_register(reg, base_names) or reg.getNumBytes() != storage.size:
+                            raise ArithmeticRefusal(f"input at {storage.address} is outside the general registers")
+                return expression
+            except JException as cause:
+                raise LiveProgramError(f"Could not read arithmetic range {start} to {end}: {cause}") from cause
+            finally:
+                # Even a refusal can be caused by an edit partway through capture.
+                self._check(program)
+                if program.getCurrentTransactionInfo() is not None:
+                    raise LiveProgramError("Wait for the Program edit or analysis to finish")
 
     def functions_named(self, name: str, *, limit: int = 100) -> Page[ProgramFunction]:
         """Find local functions by simple name, or by qualified name such as ``ns::f``.

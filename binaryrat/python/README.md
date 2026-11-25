@@ -9,8 +9,8 @@ No runtime Python dependencies are required.
 
 ## Analyst tools
 
-Install the Python package to get two read-only commands. Both run on saved
-BinaryRat reports without starting a JVM or opening the Ghidra project.
+Use `binaryrat-diff` and `binaryrat-explain` to inspect saved exports and layout
+reports offline. The commands below read the reports directly.
 
 ```sh
 binaryrat-diff before.serial.jsonl after.serial.jsonl
@@ -52,6 +52,84 @@ operation, instruction address and p-code order. For example, an integer XOR
 and a floating-point comparison can use the same bytes. These are alternative
 interpretations of shared storage. A source-level union declaration requires
 additional evidence.
+
+### Share a layout review
+
+Package an interprocedural summary report from `solve_layout` or
+`BinaryRatSolveLayouts.java`. A colleague can read it offline, inspect one
+field, or rerun the same recovery against their own saved Program.
+
+```sh
+binaryrat-explain capture.json --make-review > handoff.json
+binaryrat-explain handoff.json --offset 0x10
+binaryrat-explain handoff.json --check-project workspace.gpr /program --install-dir /path/to/ghidra
+binaryrat-explain handoff.json --check-review another-capture.json
+```
+
+The reader accepts UTF-8 and BOM-marked UTF-16, including files saved by
+Windows PowerShell 5 redirection. Its input limit is 8 MiB on disk. To keep
+larger reviews compact in PowerShell 5, use
+`binaryrat-explain capture.json --make-review | Set-Content -Encoding ascii handoff.json`.
+The handoff embeds the capture and SHA-256 digests of its contents and layout.
+The project check compares the executable identity, language, compiler spec
+and selected function parameter, then reruns the recorded summary limit
+through the installed BinaryRat extension. It checks the proposal, recorded
+instruction witnesses and report context. An unchanged capture may match
+after reopening a Program with a different revision number. Missing witnesses
+or incomplete evidence return `unverifiable`.
+
+Both check modes print JSON. The status is `matched` (exit 0), or `changed`,
+`incompatible` or `unverifiable` (exit 1). Invalid input or an unavailable
+project backend exits 2. `--check-review` compares the two supplied files.
+Only `--check-project` opens a Program and regenerates the evidence.
+The checksums verify content integrity. The review is read-only.
+
+### Explain a register calculation
+
+Pass the first and last **instruction starts** in a contiguous Listing range,
+inclusive, and the register to inspect at its exit. For example, in a saved
+Program where `ram:0` adds five to RAX and `ram:4` subtracts two, the
+first command shows the expression and the p-code operation for each step.
+If `ram:9` adds three to RAX, the second command checks whether the ranges
+produce the same final RAX for every initial register value.
+
+```sh
+binaryrat-arithmetic Arithmetic.gpr /add ram:0 ram:4 RAX
+binaryrat-arithmetic Arithmetic.gpr /add ram:0 ram:4 RAX --compare ram:9 ram:9 RAX --json
+```
+
+Inspection uses PyGhidra. Install the optional `proof` extra to compare results
+with the pinned Z3 solver. For a source checkout use
+`python -m pip install "./binaryrat/python[proof]"` in the PyGhidra environment.
+For the packaged application, first install its wheel and bundled PyGhidra
+dependencies, then run `python -m pip install "binaryrat[proof]==0.1.0"`
+with access to PyPI. Pass `--install-dir` to select the Ghidra installation.
+
+The pilot supports general-purpose registers on the default little-endian
+x86-64 and AArch64 v8A languages. It reads effective p-code for up to 32
+instructions, 256 operations and 256 expression nodes. Inputs are register
+values on entry. Arithmetic wraps at its recorded width. Memory, control
+flow, ambiguous partial-register writes and unsupported producers cause an
+explicit refusal. A proof compares only the two selected outputs.
+
+The command exits 0 for an explanation or proof, 1 for a difference with a
+concretely replayed example, 2 for invalid input, 3 when it cannot explain
+or decide, and 130 on interruption. `--timeout-ms` sets the solver deadline
+for a comparison (default 1,000 ms, maximum 10,000 ms).
+
+In Python, keep the expressions after closing the Program. The same selections
+as the CLI example can be compared in a notebook:
+
+```python
+from binaryrat import Address, open_program, prove_equivalence
+
+with open_program("Arithmetic.gpr", "/add") as view:
+    left = view.explain_arithmetic(Address("ram", 0), Address("ram", 4), "RAX")
+    right = view.explain_arithmetic(Address("ram", 9), Address("ram", 9), "RAX")
+
+proof = prove_equivalence(left, right)
+print(proof.status, proof.reason)
+```
 
 ## Python API
 

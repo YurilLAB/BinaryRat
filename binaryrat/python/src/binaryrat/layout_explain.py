@@ -6,6 +6,8 @@ Apache-2.0; Copyright 2026 YurilLAB.
 from __future__ import annotations
 
 import argparse
+import codecs
+from concurrent.futures import CancelledError
 import json
 import re
 import sys
@@ -13,7 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from ._console import tolerant_output
+from .live import LiveProgramError
 from .summary_layout import ANALYSIS_MODE, explain_summary, parse_summary_report
+from .summary_review import check_project_review, check_review, make_review, open_review
 
 # Layout extraction bounds a report to 4,096 memory accesses. Also bound the
 # serialized input before decoding strings and building the evidence index.
@@ -256,31 +260,63 @@ def explain(report: dict, offset: int | None = None) -> list[str]:
     return lines
 
 
+def _read_document(path: Path) -> Any:
+    if not path.is_file():
+        raise ValueError("expected a regular layout report file")
+    with path.open("rb") as stream:
+        data = stream.read(_MAX_BYTES + 1)
+    if len(data) > _MAX_BYTES:
+        raise ValueError("layout report exceeds 8 MiB")
+    # Windows PowerShell file redirection can transcode JSON to BOM-marked UTF-16.
+    encoding = "utf-16" if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else "utf-8-sig"
+    return json.loads(data.decode(encoding), object_pairs_hook=_unique_object,
+                      parse_constant=_invalid_constant, parse_int=_parse_integer)
+
+
 def main(argv: list[str] | None = None) -> int:
     tolerant_output()
     parser = argparse.ArgumentParser(prog="binaryrat-explain",
                                      description="Inspect the recorded p-code behind a layout proposal.")
     parser.add_argument("report", type=Path,
-                        help="JSON report from BinaryRatRecoverLayouts.java or BinaryRatSolveLayouts.java")
-    parser.add_argument("--offset", type=lambda value: int(value, 0),
+                        help="BinaryRat layout report or portable summary review")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--offset", type=lambda value: int(value, 0),
                         help="show proposals and possible accesses starting at this byte offset (decimal or 0x hex)")
+    action.add_argument("--make-review", action="store_true",
+                        help="print a portable JSON review of this interprocedural summary report")
+    action.add_argument("--check-review", type=Path, metavar="FRESH_REPORT",
+                        help="compare this portable review with a supplied summary report offline")
+    action.add_argument("--check-project", nargs=2, metavar=("PROJECT.gpr", "/PROGRAM"),
+                        help="rerun summary recovery on the saved Program and compare with this review")
+    parser.add_argument("--install-dir", type=Path, help="Ghidra installation for --check-project")
     args = parser.parse_args(argv)
+    if args.install_dir is not None and args.check_project is None:
+        parser.error("--install-dir requires --check-project")
     try:
-        if not args.report.is_file():
-            raise ValueError("expected a regular layout report file")
-        with args.report.open("rb") as stream:
-            data = stream.read(_MAX_BYTES + 1)
-        if len(data) > _MAX_BYTES:
-            raise ValueError("layout report exceeds 8 MiB")
-        report = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object,
-                            parse_constant=_invalid_constant, parse_int=_parse_integer)
-        if isinstance(report, dict) and report.get("analysis_mode") == ANALYSIS_MODE:
+        report = _read_document(args.report)
+        if args.make_review:
+            print(make_review(parse_summary_report(report)))
+            return 0
+        if args.check_review is not None or args.check_project is not None:
+            captured = open_review(report)
+            if args.check_project is not None:
+                result = check_project_review(captured, *args.check_project, install_dir=args.install_dir)
+            else:
+                fresh = parse_summary_report(_read_document(args.check_review))
+                result = check_review(captured, fresh)
+            print(json.dumps(result))
+            return 0 if result["status"] == "matched" else 1
+        if isinstance(report, dict) and "review_format" in report:
+            lines = explain_summary(open_review(report), args.offset)
+        elif isinstance(report, dict) and report.get("analysis_mode") == ANALYSIS_MODE:
             lines = explain_summary(parse_summary_report(report), args.offset)
         else:
             lines = explain(report, args.offset)
         for line in lines:
             print(line)
-    except (ValueError, OSError, RecursionError) as error:
+    except (CancelledError, KeyboardInterrupt):
+        return 130
+    except (LiveProgramError, TypeError, ValueError, OSError, RecursionError) as error:
         print(f"binaryrat-explain: {error}", file=sys.stderr)
         return 2
     return 0

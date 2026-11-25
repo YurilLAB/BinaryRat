@@ -26,6 +26,8 @@ BinaryRat is an open-source reverse-engineering project for Linux and Windows, b
 - **Stack strings** recover text a function builds on its stack, with the instructions that wrote it.
 - **Call-site corrections** show an instruction's p-code with register names, before and after Listing overrides, and apply or replace a reviewed prototype at one call with native undo. Indirect calls start from the decompiler's view of their arguments.
 - **Desktop and scripting access** provides BinaryRat actions in CodeBrowser, headless exports, and a typed Python API that can inspect one instruction's p-code before and after Listing overrides.
+- **Register arithmetic** explains how a selected x86-64 or AArch64 instruction range computes a register. The optional Z3 check proves equal outputs or shows input values that reproduce a difference.
+- **Portable layout reviews** let a colleague inspect the evidence offline and rerun the same recovery against their own saved Program.
 - **BinaryRat analyst tools** compare two decompiler exports with `binaryrat-diff` (`--patch` shows the changed C) and show which instructions support a proposed field with `binaryrat-explain`. Both work offline on saved reports. `binaryrat-decompile` decompiles a function from a saved project, selected by name or by any address inside it.
 
 ## What CI verifies

@@ -79,5 +79,7 @@
 binaryrat-decompile project.gpr /example --list --match measurement --install-dir ghidra
 binaryrat-decompile project.gpr /example measurement_area --call-sites --install-dir ghidra</pre>
 <p>Select a function by name or by any address inside it, as shown in CodeBrowser. Add <code>--json</code> for the result with its backend and cache status.</p>
+<p>To trace a register value, copy the first and last instruction addresses from the Listing and pass them to <code>binaryrat-arithmetic project.gpr /example START END REGISTER --install-dir ghidra</code>. Each step cites its instruction. The selected range must use straight-line register arithmetic on x86-64 or AArch64.</p>
+<p>To share a layout recovered with <code>BinaryRatSolveLayouts.java</code>, run <code>binaryrat-explain capture.json --make-review</code> and save its JSON output as <code>handoff.json</code>. A colleague can read it offline with <code>binaryrat-explain handoff.json</code> or regenerate the evidence with <code>binaryrat-explain handoff.json --check-project project.gpr /example --install-dir ghidra</code>.</p>
 </body>
 </html>

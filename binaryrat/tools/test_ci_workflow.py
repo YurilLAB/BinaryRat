@@ -85,6 +85,14 @@ def discover_calls(text: str) -> list[tuple[list[str], str]]:
 
 
 class CoverageTests(unittest.TestCase):
+    def test_proof_backend_is_required_in_verify_jobs(self):
+        verify = load(MAIN)["jobs"]["verify"]["steps"]
+        for name in ("Python API and live native-client tests",
+                     "Exercise the live Python API and local JVM service"):
+            step, = [step for step in verify if step.get("name") == name]
+            with self.subTest(step=name):
+                self.assertEqual(step.get("env", {}).get("BINARYRAT_REQUIRE_Z3"), "1")
+
     def test_live_suites_run_in_stock_and_packaged_ghidra(self):
         suites = [p.name for p in tracked("binaryrat/python/tests/test_live*.py")]
         self.assertIn("test_live_instruction_pcode.py", suites)

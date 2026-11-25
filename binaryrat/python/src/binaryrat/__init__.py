@@ -35,6 +35,8 @@ from .live import (
     open_program,
 )
 from .models import Address, Decompilation, Function, TypeProposal
+from .arithmetic import ArithmeticExpression, ArithmeticRefusal, ExpressionNode
+from .arithmetic_proof import ArithmeticProof, prove_equivalence
 from .stack_strings import (
     StackString,
     StackStringsReport,
@@ -60,6 +62,7 @@ __all__ = [
     "EngineError", "ProtocolError", "ExportError", "load_export", "parse_export",
     "CrossReference", "DataTypeInfo", "DecompilationBackend", "LiveProgramError", "Page",
     "InstructionPcode", "PcodeListing", "PcodeOperation", "PcodeVarnode",
+    "ArithmeticExpression", "ArithmeticRefusal", "ExpressionNode", "ArithmeticProof", "prove_equivalence",
     "ProgramDecompilation", "ProgramDecompilationRun",
     "ProgramFunction", "ProgramInfo", "ProgramView", "StaleProgramError", "decompile_program", "open_program",
     "LayoutRecoveryError", "SummaryLayoutReport", "SummaryReportError", "decode_summary_report",

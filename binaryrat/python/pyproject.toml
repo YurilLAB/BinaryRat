@@ -12,6 +12,7 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "yurillab"}]
 
 [project.scripts]
+binaryrat-arithmetic = "binaryrat.arithmetic_cli:main"
 binaryrat-decompile = "binaryrat.decompile_cli:main"
 binaryrat-diff = "binaryrat.export_diff:main"
 binaryrat-explain = "binaryrat.layout_explain:main"
@@ -19,6 +20,7 @@ binaryrat-live = "binaryrat.live_service:main"
 
 [project.optional-dependencies]
 live = ["pyghidra==3.2.0"]
+proof = ["z3-solver==4.13.0.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

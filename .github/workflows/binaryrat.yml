@@ -94,8 +94,8 @@ jobs:
       - name: Build and install the offline analyst wheel and benchmark dependencies
         timeout-minutes: 10
         run: |
-          python -m pip wheel --no-deps --wheel-dir build/wheelhouse ./binaryrat/python
-          python -m pip install --no-index --find-links build/wheelhouse binaryrat
+          python -m pip wheel --only-binary=z3-solver --wheel-dir build/wheelhouse "./binaryrat/python[proof]"
+          python -m pip install --no-index --find-links build/wheelhouse "binaryrat[proof]"
           python -m pip install -r binaryrat/requirements-test.txt
       - if: runner.os == 'Linux'
         name: GCC, Clang and AArch64 corpus with separate debug oracles
@@ -137,6 +137,7 @@ jobs:
         name: Python API and live native-client tests
         timeout-minutes: 20
         env:
+          BINARYRAT_REQUIRE_Z3: '1'
           BINARYRAT_ENGINE: ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
         run: python -m unittest discover -s binaryrat/python/tests -p "test_*.py"
       - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
@@ -151,6 +152,7 @@ jobs:
         name: Exercise the live Python API and local JVM service
         timeout-minutes: 20
         env:
+          BINARYRAT_REQUIRE_Z3: '1'
           BINARYRAT_GHIDRA_INSTALL_DIR: ${{ github.workspace }}/build/ghidra/ghidra_12.2_PUBLIC
         shell: python
         run: |

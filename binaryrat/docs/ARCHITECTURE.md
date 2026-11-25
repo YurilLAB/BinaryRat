@@ -434,24 +434,30 @@ their representation and decompilation.
 | Order | BinaryRat feature | Delivery and acceptance |
 |---|---|---|
 | 1 | Inspect one instruction and review shared storage | The Python API returns detached raw and override-aware operations, qualified varnodes, widths, counts and truncation flags. In a summary report the desktop labels the loads supporting each union view. The CLI also shows the consuming operation when recorded. Check a real flow override, unchanged instructions, stale reads, multiple call paths and malformed citations. |
-| 2 | Explain a selected arithmetic result | Evaluate the optional upstream SymbolicSummaryZ3 extension on small straight-line register expressions. Return the fixed-width expression, input registers, contributing instructions, assumptions and completion status. Limit operations, expression nodes, solver time and memory. Treat unsupported operations, unknown inputs outside the model, cancellation and budget exhaustion explicitly. Replay the expression on concrete values and check the expected outputs with an independent reference. Measure time to first answer on the same small fixtures before exposing it in the GUI. [Upstream Z3 extension](../../Ghidra/Extensions/SymbolicSummaryZ3) |
-| 3 | Share an evidence review between analysts | Start with a portable, read-only review pinned to executable SHA-256, language and compiler spec, function entry, qualified instruction addresses, instruction bytes, analysis options and proposal digest. A reviewer can follow the citations locally. Before applying, re-derive evidence in the destination Program and check expected type and analysis state through the existing Java write service. A version change can preserve bytes while changing a call override. Test that case, conflicting reviews, duplicate delivery and reopening. |
+| 2 | Explain a selected arithmetic result | The saved-Program Python API and `binaryrat-arithmetic` lift an exact Listing selection and trace a general register to its inputs. The proof extra compares two such expressions with a bounded native Z3 process. A CodeBrowser selection action and measured interactive latency under background analysis remain open. |
+| 3 | Share an evidence review between analysts | A portable read-only layout review carries the captured report and proposal digest. `binaryrat-explain --check-project` opens a recipient's saved Program and regenerates the report using its BinaryRat extension. Validating approval at apply time, sharing decisions and synchronized review remain open. |
 
 For a future IL interchange format, version a projection of p-code. Include the
 representation (raw, override-aware or high), producer version, operand order,
 address space, bit width and exactly which parts were omitted. Keep temporary
-identifiers local to their capture. Round-trip fixed examples and reject unknown
-semantics before building transforms on the format. The current Python value
-objects are the first in-process consumer of the instruction view. Portable
-interchange, symbolic explanations and shared review threads are future work.
+identifiers local to their capture. The CLI already exports the selected arithmetic
+expression as bounded JSON. A general-purpose IL interchange format and shared
+review threads are future work.
 
-For the symbolic pilot, start with fixed-width add, subtract and bitwise
-operations. Exhaustively compare small-width fixtures, then exercise zero,
-all-ones, sign-bit and wraparound cases at 32 and 64 bits. Report an expression
-as proved equivalent only when the solver shows that the two expressions cannot
-differ under the stated assumptions. Concrete replay is a separate result.
-Memory reads, calls and control-flow joins require additional semantics and
-fixtures before entering that pilot.
+The arithmetic pilot follows effective p-code definitions backwards from the
+last exact write in the range. Unique temporaries are local to one instruction.
+Unwritten inputs must correspond to supported registers. The expression records
+ordinal references to earlier nodes, byte widths and qualified p-code locations.
+The Python adapter builds this small graph and releases the Program before the CLI
+starts a proof. The optional native Z3 executable comes from a pinned wheel and
+runs in a separate process with a solver memory limit and a wall deadline. This
+keeps the CLI's proof checks usable after the JVM closes. Ghidra's optional
+SymbolicSummaryZ3 extension remains a candidate for a future desktop integration.
+Only an unsatisfiable disequality earns a proof. A differing result includes a
+counterexample replayed in the concrete evaluator. Memory reads, calls and
+control-flow joins require additional semantics and fixtures.
+[Upstream symbolic emulator](../../Ghidra/Extensions/SymbolicSummaryZ3) ·
+[CLI and handoff usage](../python/README.md#explain-a-register-calculation)
 
 Shared Ghidra projects already provide checkout, version history and merge.
 For a later real-time feature, publish *review activity* such as a selected
