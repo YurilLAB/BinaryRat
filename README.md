@@ -19,13 +19,13 @@ BinaryRat is an open-source reverse-engineering project for Linux and Windows, b
 - **Parallel decompilation** schedules native decompiler processes within CPU and memory budgets and enforces per-function deadlines.
 - **Persistent caching** tracks program changes and validates recorded decompiler queries before reusing results across sessions.
 - **Stock-verified exports** check every JSONL record against serial Ghidra output and report where stock results were used.
-- **Layout recovery in CodeBrowser** examines a function parameter at the cursor and lets you jump from a proposed field to the load or store that supports it.
+- **Layout recovery in CodeBrowser** traces a proposed field across calls to the load or store that supports it. For shared storage, it shows which instructions used the same bytes as an integer and as a floating-point value.
 - **C++ recovery** reports Itanium and MSVC class relationships and vtables.
 - **Reviewed type creation** lets an analyst approve a new structure with provenance and native Ghidra undo.
 - **Call sites with arguments** list every call to a function with the values the decompiler proved constant and the strings or symbols they point to.
 - **Stack strings** recover text a function builds on its stack, with the instructions that wrote it.
 - **Call-site corrections** show an instruction's p-code with register names, before and after Listing overrides, and apply or replace a reviewed prototype at one call with native undo. Indirect calls start from the decompiler's view of their arguments.
-- **Desktop and scripting access** provides BinaryRat actions in CodeBrowser, headless exports, and typed Python access through PyGhidra.
+- **Desktop and scripting access** provides BinaryRat actions in CodeBrowser, headless exports, and a typed Python API that can inspect one instruction's p-code before and after Listing overrides.
 - **BinaryRat analyst tools** compare two decompiler exports with `binaryrat-diff` (`--patch` shows the changed C) and show which instructions support a proposed field with `binaryrat-explain`. Both work offline on saved reports. `binaryrat-decompile` decompiles a function from a saved project, selected by name or by any address inside it.
 
 ## What CI verifies

@@ -3,7 +3,7 @@
 Reports come from ``BinaryRatSolveLayouts.java``, ``ProgramView.solve_layout`` or the
 ``binaryrat-live`` service; all three use the Java ``binaryrat.SummaryLayouts`` service.
 Parsing is strict: every reached state must be a valid step of a call path, every
-derived access must match its summary, and every field must cite derived evidence.
+derived access must match its summary, and fields and union views must cite that evidence.
 Strengths are uncalibrated support counts, never probabilities.
 
 Apache-2.0; Copyright 2026 YurilLAB.
@@ -27,10 +27,26 @@ MAX_REPORT_BYTES = 8 * 1024 * 1024
 _INT64 = (-(1 << 63), (1 << 63) - 1)
 _HEX = re.compile(r"[0-9a-f]{1,16}")
 _VIEWS = ("integer", "floating_point")
+_VIEW_WIDTHS = {"integer": (1, 2, 4, 8), "floating_point": (4, 8)}
+# Mnemonics emitted by Ghidra for the opcodes recognized by UnionEvidence.java.
+_VIEW_OPERATIONS = {
+    "integer": {"INT_AND", "INT_OR", "INT_XOR", "INT_LEFT", "INT_RIGHT", "INT_SRIGHT",
+                "INT_MULT", "INT_DIV", "INT_SDIV", "INT_REM", "INT_SREM"},
+    "floating_point": {"FLOAT_EQUAL", "FLOAT_NOTEQUAL", "FLOAT_LESS", "FLOAT_LESSEQUAL",
+                       "FLOAT_NAN", "FLOAT_ADD", "FLOAT_DIV", "FLOAT_MULT", "FLOAT_SUB",
+                       "FLOAT_NEG", "FLOAT_ABS", "FLOAT_SQRT", "FLOAT2FLOAT", "TRUNC"},
+}
 
 
 class SummaryReportError(ValueError):
     """A summary layout report is malformed, inconsistent or unsupported."""
+
+
+@dataclass(frozen=True, slots=True)
+class TypedUse:
+    site: Address
+    pcode_order: int
+    operation: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +58,7 @@ class SummaryAccess:
     pcode_order: int
     operation: str
     storage_view: str | None
+    typed_use: TypedUse | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +255,61 @@ def _strength(obj: Any, where: str) -> float:
     return float(value)
 
 
+def _summary_access(row: Any, where: str) -> SummaryAccess:
+    operation = _text(row, "operation", where)
+    if operation not in ("LOAD", "STORE"):
+        _fail(f"{where}: expected a LOAD or STORE")
+    width = _int(row, "width", where, 1, 1 << 20)
+    view = _view(row, where)
+    if view is not None and (operation != "LOAD" or width not in _VIEW_WIDTHS[view]):
+        _fail(f"{where}: storage view requires a supported load width")
+    use = None
+    if "typed_use" in row:
+        witness = _get(row, "typed_use", dict, where)
+        mnemonic = _text(witness, "operation", where)
+        if view is None or mnemonic not in _VIEW_OPERATIONS[view]:
+            _fail(f"{where}: consuming p-code operation does not support the storage view")
+        use = TypedUse(_address(witness, "", where),
+                       _int(witness, "pcode_order", where, 0, (1 << 32) - 1), mnemonic)
+    return SummaryAccess(_int(row, "offset", where), width, _text(row, "evidence_id", where),
+                         _address(row, "", where), _int(row, "pcode_order", where, 0, (1 << 32) - 1),
+                         operation, view, use)
+
+
+def _evidence_ids(item: Any, where: str) -> tuple[str, ...]:
+    ids = _list(item, "evidence_ids", where, 4096)
+    if not ids or any(not isinstance(eid, str) for eid in ids) or len(set(ids)) != len(ids):
+        _fail(f"{where}: expected distinct, nonempty evidence citations")
+    return tuple(ids)
+
+
+def _union_candidates(layout: dict, typed_citations: set[tuple[int, int, str, str]]) -> list[UnionCandidate]:
+    candidates = []
+    offsets = set()
+    for index, item in enumerate(_list(layout, "union_candidates", "layout", 4096)):
+        place = f"union_candidates[{index}]"
+        offset = _int(item, "offset", place, 0)
+        if offset in offsets:
+            _fail(f"{place}: repeated union candidate offset")
+        offsets.add(offset)
+        views = []
+        groups = set()
+        for view in _list(item, "views", place, 6):
+            kind = _get(view, "kind", str, place)
+            width = _int(view, "width", place, 1, 8)
+            if kind not in _VIEW_WIDTHS or width not in _VIEW_WIDTHS[kind] or (kind, width) in groups:
+                _fail(f"{place}: unsupported or repeated view")
+            groups.add((kind, width))
+            ids = _evidence_ids(view, place)
+            if any((offset, width, kind, eid) not in typed_citations for eid in ids):
+                _fail(f"{place}: view needs matching typed load evidence cited by its field")
+            views.append(UnionView(kind, width, ids))
+        if {kind for kind, _ in groups} != set(_VIEWS):
+            _fail(f"{place}: shared storage needs both integer and floating-point loads")
+        candidates.append(UnionCandidate(offset, tuple(views), _strength(item, place)))
+    return candidates
+
+
 def parse_summary_report(document: Mapping[str, Any]) -> SummaryLayoutReport:
     """Validate a decoded report and return typed values. Raises SummaryReportError."""
     if not isinstance(document, dict):
@@ -261,7 +333,7 @@ def parse_summary_report(document: Mapping[str, Any]) -> SummaryLayoutReport:
 
     summaries: list[ParameterSummary] = []
     by_id: dict[str, ParameterSummary] = {}
-    evidence_owner: dict[str, str] = {}
+    access_ids: set[str] = set()
     for index, item in enumerate(_list(document, "summaries", where, 256)):
         place = f"summaries[{index}]"
         summary_id = _text(item, "id", place)
@@ -274,14 +346,12 @@ def parse_summary_report(document: Mapping[str, Any]) -> SummaryLayoutReport:
         accesses = []
         for number, row in enumerate(_list(item, "accesses", place, 4096)):
             spot = f"{place}.accesses[{number}]"
-            evidence = _text(row, "evidence_id", spot)
-            if not evidence.startswith(summary_id + "/") or evidence in evidence_owner:
-                _fail(f"{spot}: evidence_id is foreign or repeated")
-            evidence_owner[evidence] = summary_id
-            accesses.append(SummaryAccess(_int(row, "offset", spot), _int(row, "width", spot, 1, 1 << 20),
-                                          evidence, _address(row, "", spot),
-                                          _int(row, "pcode_order", spot, 0, (1 << 32) - 1),
-                                          _text(row, "operation", spot), _view(row, spot)))
+            access = _summary_access(row, spot)
+            expected_id = f"{summary_id}/{access.site.space}/{access.site.offset:x}/{access.pcode_order}"
+            if access.evidence_id != expected_id or access.evidence_id in access_ids:
+                _fail(f"{spot}: evidence_id is foreign or repeated or does not name the observed operation")
+            access_ids.add(access.evidence_id)
+            accesses.append(access)
         summary = ParameterSummary(summary_id, entry, _text(item, "function_name", place), index_value,
                                    _text(item, "parameter_storage", place, optional=True),
                                    _text(item, "call_refusal", place, optional=True), tuple(accesses))
@@ -322,7 +392,8 @@ def parse_summary_report(document: Mapping[str, Any]) -> SummaryLayoutReport:
     for index, item in enumerate(_list(document, "components", where, 256)):
         place = f"components[{index}]"
         members = tuple(_get(item, "summaries", list, place))
-        if not members or any(member not in by_id for member in members) or len(set(members)) != len(members):
+        if (not members or any(not isinstance(member, str) or member not in by_id for member in members)
+                or len(set(members)) != len(members)):
             _fail(f"{place}: summaries must be distinct known ids")
         withheld = tuple(_get(item, "withheld_edges", list, place))
         consistent = _get(item, "consistent", bool, place)
@@ -377,7 +448,7 @@ def parse_summary_report(document: Mapping[str, Any]) -> SummaryLayoutReport:
                 row.evidence_id != access.evidence_id or row.storage_view != access.storage_view):
             _fail(f"{place}: does not match its summary access")
         derived.append(row)
-    cited = {(row.evidence_id, row.offset, row.width) for row in derived}
+    cited = {(row.offset, row.width, row.evidence_id): row.storage_view for row in derived}
 
     withheld_components = tuple(_get(solution, "withheld_components", list, "solution"))
     if any(type(c) is not int or not 0 <= c < len(components) or components[c].consistent
@@ -395,28 +466,27 @@ def parse_summary_report(document: Mapping[str, Any]) -> SummaryLayoutReport:
     if layout is not None:
         if _get(layout, "object_id", str, "layout") != root_id:
             _fail("layout names another object")
+        typed_citations = set()
+        field_ranges = set()
         for index, item in enumerate(_list(layout, "fields", "layout", 4096)):
             place = f"fields[{index}]"
             offset, width = _int(item, "offset", place, 0), _int(item, "width", place, 1)
-            ids = tuple(_get(item, "evidence_ids", list, place))
-            if not ids or any((evidence, offset, width) not in cited for evidence in ids):
-                _fail(f"{place}: cites evidence no derived access supports")
+            if (offset, width) in field_ranges:
+                _fail(f"{place}: repeated field range")
+            field_ranges.add((offset, width))
+            ids = _evidence_ids(item, place)
+            for eid in ids:
+                key = (offset, width, eid)
+                if key not in cited:
+                    _fail(f"{place}: cites evidence no derived access supports")
+                if cited[key] is not None:
+                    typed_citations.add((offset, width, cited[key], eid))
             fields.append(SolvedField(offset, width, ids, _strength(item, place),
                                       _get(item, "overlaps_other_fields", bool, place)))
             minimum_extent = max(minimum_extent, offset + width)
         if _int(layout, "minimum_extent", "layout", 0) != minimum_extent:
             _fail("layout minimum_extent does not match its fields")
-        for index, item in enumerate(_list(layout, "union_candidates", "layout", 4096)):
-            place = f"union_candidates[{index}]"
-            offset = _int(item, "offset", place, 0)
-            views = []
-            for view in _get(item, "views", list, place):
-                kind = _get(view, "kind", str, place)
-                if kind not in _VIEWS:
-                    _fail(f"{place}: unsupported view kind")
-                views.append(UnionView(kind, _int(view, "width", place, 1, 8),
-                                       tuple(_get(view, "evidence_ids", list, place))))
-            candidates.append(UnionCandidate(offset, tuple(views), _strength(item, place)))
+        candidates = _union_candidates(layout, typed_citations)
 
     return SummaryLayoutReport(
         SCHEMA_VERSION, program_id, _int(document, "revision", where, 0),
@@ -474,7 +544,8 @@ def _clean(text: str) -> str:
 
 def explain_summary(report: SummaryLayoutReport, offset: int | None = None) -> list[str]:
     """Human-readable fields with the call path behind each piece of evidence."""
-    names = {summary.id: summary.function_name for summary in report.summaries}
+    summaries = {summary.id: summary for summary in report.summaries}
+    names = {key: _clean(summary.function_name) for key, summary in summaries.items()}
     lines = [f"Summary layout evidence for {_clean(report.function_name)} parameter "
              f"{report.parameter_index} ({report.program_id}, revision {report.revision})"]
     if report.complete:
@@ -483,23 +554,38 @@ def explain_summary(report: SummaryLayoutReport, offset: int | None = None) -> l
         lines.append(f"Solution: incomplete (withheld cycles {len(report.withheld_components)}, "
                      f"overflowed paths {report.overflowed})")
     for component in report.components:
-        members = ", ".join(_clean(names[member]) for member in component.summaries)
+        members = ", ".join(names[member] for member in component.summaries)
         lines.append(f"Call cycle ({'consistent' if component.consistent else 'withheld: offsets drift'}): "
                      f"{members}")
     lines.append(f"Reached {len(report.states)} function parameters through {len(report.edges)} calls; "
                  f"minimum extent {report.minimum_extent}")
     shown = [f for f in report.fields if offset is None or f.offset == offset]
+    derived = {(row.offset, row.width, row.evidence_id): row for row in report.derived}
+    union_citations = {(candidate.offset, view.width, eid)
+                      for candidate in report.union_candidates for view in candidate.views
+                      for eid in view.evidence_ids}
     for item in shown:
         lines.append(f"  +0x{item.offset:x} width {item.width}  evidence {len(item.evidence_ids)}  "
                      f"strength {item.evidence_strength:.3f} (uncalibrated)"
                      f"{'  overlaps another field' if item.overlaps_other_fields else ''}")
-        for row, path in report.evidence_for(item.offset, item.width):
-            summary = report.summary(report.states[row.state].summary)
+        for eid in item.evidence_ids:
+            key = (item.offset, item.width, eid)
+            row = derived[key]
+            path = report.call_path(row.state)
+            summary = summaries[report.states[row.state].summary]
             access = summary.accesses[row.access]
-            route = " -> ".join([_clean(names[path[0].caller]) if path else _clean(summary.function_name)] +
-                                [f"{_clean(names[step.callee])} ({step.site}, {step.offset:+d})" for step in path])
-            lines.append(f"      {access.operation} at {access.site} in {_clean(summary.function_name)}"
-                         f"{' as ' + access.storage_view if access.storage_view else ''}; path: {route}")
+            route = " -> ".join([names[path[0].caller] if path else names[summary.id]] +
+                                [f"{names[step.callee]} ({step.site}, {step.offset:+d})" for step in path])
+            evidence = (f"      {access.operation} at {access.site} (p-code {access.pcode_order})"
+                        f" in {names[summary.id]}")
+            if key in union_citations:
+                evidence += f", supports the {access.storage_view} view"
+            elif access.storage_view is not None:
+                evidence += f" as {access.storage_view}"
+            if access.typed_use is not None:
+                use = access.typed_use
+                evidence += f", consumed by {use.operation} at {use.site} (p-code {use.pcode_order})"
+            lines.append(f"{evidence}; path: {route}")
     for candidate in report.union_candidates:
         if offset is None or candidate.offset == offset:
             kinds = ", ".join(f"{view.kind} {view.width}" for view in candidate.views)

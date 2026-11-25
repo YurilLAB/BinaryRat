@@ -383,6 +383,79 @@ class LiveGhidraTests(unittest.TestCase):
             for path in directory.rglob("*") if path.is_file()
         }
 
+    def test_disassembly_against_known_encodings_and_seeded_operands(self):
+        import pyghidra
+        from ghidra.program.database import ProgramDB
+        from ghidra.program.flatapi import FlatProgramAPI
+        from ghidra.program.model.lang import LanguageID
+        from ghidra.program.util import DefaultLanguageService
+        from java.lang import Object
+
+        # Fixed little-endian examples assembled independently with LLVM MC 19.1.7
+        # (-triple=x86_64 or -triple=aarch64 -show-encoding). Operands are in Listing order.
+        x86 = [
+            (bytes.fromhex("b878563412"), "mov", ("eax", 0x12345678), "COPY"),
+            (bytes.fromhex("0591785634"), "add", ("eax", 0x34567891), "INT_ADD"),
+        ]
+        arm = [
+            (bytes.fromhex("67f02a11"), "add", ("w7", "w3", 0xABC), "INT_ADD"),
+            (bytes.fromhex("e18c0451"), "sub", ("w1", "w7", 0x123), "INT_SUB"),
+        ]
+        # Exercise imm32 accumulator ADD and the unshifted, 32-bit A64 ADD-immediate form.
+        # Register 31 has SP semantics in the A64 encoding and is outside this fixture.
+        rng = Random(0xB17DEC)
+        for immediate in [0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF] + [
+            rng.getrandbits(32) for _ in range(32)
+        ]:
+            x86.append((b"\x05" + immediate.to_bytes(4, "little"), "add", ("eax", immediate), "INT_ADD"))
+        for immediate in [0, 1, 0x7FF, 0x800, 0xFFF] + [rng.getrandbits(12) for _ in range(32)]:
+            dest, src = rng.randrange(31), rng.randrange(31)
+            word = 0x11000000 | (immediate << 10) | (src << 5) | dest
+            arm.append((word.to_bytes(4, "little"), "add", (f"w{dest}", f"w{src}", immediate), "INT_ADD"))
+        x86.append((bytes.fromhex("c3"), "ret", (), "RETURN"))
+        arm.append((bytes.fromhex("c0035fd6"), "ret", (), "RETURN"))
+
+        languages = DefaultLanguageService.getLanguageService()
+        for language_id, cases in (("x86:LE:64:default", x86), ("AARCH64:LE:64:v8A", arm)):
+            language = languages.getLanguage(LanguageID(language_id))
+            consumer = Object()
+            program = ProgramDB("decoder-oracle", language, language.getDefaultCompilerSpec(), consumer)
+            with ExitStack() as cleanup, self.subTest(language=language_id):
+                cleanup.callback(program.release, consumer)
+                flat = FlatProgramAPI(program)
+                base = program.getAddressFactory().getDefaultAddressSpace().getAddress(0x1000)
+                listing = program.getListing()
+                with pyghidra.transaction(program, "Disassemble known instruction bytes"):
+                    image = b"".join(case[0] for case in cases)
+                    flat.createMemoryBlock("code", base, image, False)
+                    self.assertTrue(flat.disassemble(base))
+                    # A successful command alone does not mean a complete instruction exists.
+                    # Place every proper, nonempty prefix in a separate block with an unmapped gap.
+                    encoding = cases[0][0]
+                    for size in range(1, len(encoding)):
+                        address = base.add(0x1000 * size)
+                        flat.createMemoryBlock(f"prefix{size}", address, encoding[:size], False)
+                        flat.disassemble(address)
+                        self.assertIsNone(listing.getInstructionAt(address), f"prefix of {size} bytes")
+                self.assertEqual(listing.getNumInstructions(), len(cases))
+                address = base
+                for encoding, mnemonic, operands, pcode_kind in cases:
+                    with self.subTest(address=str(address), encoding=encoding.hex()):
+                        ins = listing.getInstructionAt(address)
+                        self.assertIsNotNone(ins)
+                        self.assertEqual(ins.getLength(), len(encoding))
+                        self.assertEqual(str(ins.getMnemonicString()).lower(), mnemonic)
+                        self.assertEqual(ins.getNumOperands(), len(operands))
+                        for index, operand in enumerate(operands):
+                            if isinstance(operand, int):
+                                scalar = ins.getScalar(index)
+                                self.assertIsNotNone(scalar)
+                                self.assertEqual(scalar.getUnsignedValue(), operand)
+                            else:
+                                self.assertEqual(str(ins.getDefaultOperandRepresentation(index)).lower(), operand)
+                        self.assertIn(pcode_kind, [str(op.getMnemonic()) for op in ins.getPcode()])
+                    address = address.add(len(encoding))
+
     def test_real_functions_references_types_and_decompiler(self):
         before = self.snapshot()
         with open_program(self.marker, self.program_path, install_dir=self.install) as view:

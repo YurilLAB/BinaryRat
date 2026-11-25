@@ -18,6 +18,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 import binaryrat.SummaryLayouts;
+import binaryrat.UnionEvidence;
 import binaryrat.writeback.LayoutEvidenceBrowser.Review;
 import binaryrat.writeback.LayoutEvidenceBrowser.Row;
 import ghidra.program.model.address.Address;
@@ -34,9 +35,11 @@ public final class SummaryLayoutEvidenceBrowser {
 	private SummaryLayoutEvidenceBrowser() {
 	}
 
-	public record View(Review evidence, Map<Row, String> callPaths, String status) {
+	public record View(Review evidence, Map<Row, String> callPaths, Map<Row, UnionEvidence.Use> unionViews,
+			String status) {
 		public View {
 			callPaths = Map.copyOf(callPaths);
+			unionViews = Map.copyOf(unionViews);
 		}
 	}
 
@@ -50,6 +53,12 @@ public final class SummaryLayoutEvidenceBrowser {
 	}
 
 	private record Field(Set<String> evidence, boolean overlaps) {
+	}
+
+	private record TypedCitation(int offset, int width, String kind, String id) {
+	}
+
+	private record TypedLoad(Row row, UnionEvidence.Use use) {
 	}
 
 	/** Only used with the current result of the shared in-process recovery service. */
@@ -68,6 +77,7 @@ public final class SummaryLayoutEvidenceBrowser {
 		List<State> states = readStates(program, report, solution, target.objectId(), summaries, monitor);
 		Map<Range, Field> fields = readFields(solution, monitor);
 		Map<Row, String> paths = new HashMap<>();
+		Map<TypedCitation, TypedLoad> typedLoads = new HashMap<>();
 		var observed = bounded(solution.get("derived"), "derived accesses", MAXIMUM_ROWS);
 		for (JsonElement element : observed) {
 			monitor.checkCancelled();
@@ -107,7 +117,26 @@ public final class SummaryLayoutEvidenceBrowser {
 				function.getName(true), field.overlaps(), verifyInstructionBytes(access, instruction),
 				instruction.toString());
 			paths.putIfAbsent(item, state.path());
+			if (operation.equals("LOAD") && access.has("storage_view")) {
+				String kind = string(access.get("storage_view"), "access storage view");
+				if (!kind.equals(string(derived.get("storage_view"), "derived storage view"))) {
+					throw new IOException("Derived storage view disagrees with the observed load");
+				}
+				var use = object(access.get("typed_use"), "typed use");
+				Address consumer = address(program, use);
+				var consumerInstruction = program.getListing().getInstructionAt(consumer);
+				long order = number(use.get("pcode_order"), "consumer p-code order");
+				String mnemonic = string(use.get("operation"), "consumer operation");
+				if (consumerInstruction == null || !function.getBody().contains(consumer) ||
+						order < 0 || order > 0xffff_ffffL || !UnionEvidence.matches(kind, width, mnemonic)) {
+					throw new IOException("Recorded consumer does not support the field's storage view");
+				}
+				verifyInstructionBytes(use, consumerInstruction);
+				typedLoads.put(new TypedCitation(item.offset(), width, kind, id),
+					new TypedLoad(item, new UnionEvidence.Use(kind, consumer, order, mnemonic)));
+			}
 		}
+		var unionViews = readUnionViews(solution, typedLoads, monitor);
 		List<Row> rows = new ArrayList<>(paths.keySet());
 		rows.sort(Comparator.comparingInt(Row::offset).thenComparingInt(Row::width)
 			.thenComparing(Row::address).thenComparingLong(Row::pcodeOrder));
@@ -121,7 +150,63 @@ public final class SummaryLayoutEvidenceBrowser {
 		monitor.checkCancelled();
 		checkRevision(program, revision);
 		return new View(new Review(target.function().getName(true), target.parameter(), revision, rows),
-			paths, status);
+			paths, unionViews, status);
+	}
+
+	/** A typed load is evidence for a union view only when the solver cites it in that candidate. */
+	private static Map<Row, UnionEvidence.Use> readUnionViews(JsonObject solution,
+			Map<TypedCitation, TypedLoad> loads, TaskMonitor monitor) throws IOException, CancelledException {
+		Map<Row, UnionEvidence.Use> rows = new HashMap<>();
+		var layout = solution.get("layout");
+		if (layout == null || layout.isJsonNull()) {
+			return rows;
+		}
+		Set<Integer> offsets = new HashSet<>();
+		for (var element : bounded(object(layout, "summary layout").get("union_candidates"),
+				"union candidates", MAXIMUM_ROWS)) {
+			monitor.checkCancelled();
+			var candidate = object(element, "union candidate");
+			int offset = integer(candidate.get("offset"), 0, Integer.MAX_VALUE, "union offset");
+			if (!offsets.add(offset)) {
+				throw new IOException("Repeated union candidate at one offset");
+			}
+			Set<String> ids = new HashSet<>();
+			Map<String, Set<Integer>> widths = new HashMap<>();
+			// Four integer widths and two floating-point widths are supported by the solver.
+			for (var value : bounded(candidate.get("views"), "union views", 6)) {
+				var view = object(value, "union view");
+				String kind = string(view.get("kind"), "union view kind");
+				int width = integer(view.get("width"), 1, 8, "union view width");
+				boolean supported = switch (kind) {
+					case "integer" -> width == 1 || width == 2 || width == 4 || width == 8;
+					case "floating_point" -> width == 4 || width == 8;
+					default -> false;
+				};
+				if (!supported || !widths.computeIfAbsent(kind, k -> new HashSet<>()).add(width)) {
+					throw new IOException("Unsupported or repeated union view");
+				}
+				var citations = bounded(view.get("evidence_ids"), "union evidence ids", MAXIMUM_ROWS);
+				if (citations.isEmpty()) {
+					throw new IOException("Union view has no cited loads");
+				}
+				for (var citation : citations) {
+					monitor.checkCancelled();
+					String id = string(citation, "union evidence id");
+					var load = loads.get(new TypedCitation(offset, width, kind, id));
+					if (load == null || !ids.add(id)) {
+						throw new IOException("Union view needs distinct field loads of its kind and width");
+					}
+					var previous = rows.putIfAbsent(load.row(), load.use());
+					if (previous != null && !previous.equals(load.use())) {
+						throw new IOException("Conflicting union views at one load");
+					}
+				}
+			}
+			if (widths.size() != 2) {
+				throw new IOException("Union candidate needs both integer and floating-point views");
+			}
+		}
+		return rows;
 	}
 
 	private static Map<String, Summary> readSummaries(Program program, JsonObject report, TaskMonitor monitor)

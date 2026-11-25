@@ -417,6 +417,52 @@ on the held-out families.
 Each feature proposes facts with evidence and leaves stock output unchanged
 unless an analyst applies a change through review.
 
+#### Inspect the instruction behind a conclusion
+
+Binary Ninja exposes LLIL, MLIL and HLIL. Hex-Rays exposes microcode and
+ctree. BinaryRat's first priority is to let an analyst inspect why a particular
+type was proposed, from the interprocedural call path down to a load and its
+consumer. These questions span two different representations. A layout report
+cites decompiler high p-code. The instruction inspector shows the SLEIGH lift
+from the Listing, with and without overrides. One machine instruction can
+yield several operations, and high p-code can eliminate or combine them.
+The instruction address connects the views. Sequence numbers are local to
+their representation and decompilation.
+[Binary Ninja IL overview](https://docs.binary.ninja/dev/bnil-overview.html) ·
+[Hex-Rays decompiler API](https://python.docs.hex-rays.com/ida_hexrays/index.html)
+
+| Order | BinaryRat feature | Delivery and acceptance |
+|---|---|---|
+| 1 | Inspect one instruction and review shared storage | The Python API returns detached raw and override-aware operations, qualified varnodes, widths, counts and truncation flags. In a summary report the desktop labels the loads supporting each union view. The CLI also shows the consuming operation when recorded. Check a real flow override, unchanged instructions, stale reads, multiple call paths and malformed citations. |
+| 2 | Explain a selected arithmetic result | Evaluate the optional upstream SymbolicSummaryZ3 extension on small straight-line register expressions. Return the fixed-width expression, input registers, contributing instructions, assumptions and completion status. Limit operations, expression nodes, solver time and memory. Treat unsupported operations, unknown inputs outside the model, cancellation and budget exhaustion explicitly. Replay the expression on concrete values and check the expected outputs with an independent reference. Measure time to first answer on the same small fixtures before exposing it in the GUI. [Upstream Z3 extension](../../Ghidra/Extensions/SymbolicSummaryZ3) |
+| 3 | Share an evidence review between analysts | Start with a portable, read-only review pinned to executable SHA-256, language and compiler spec, function entry, qualified instruction addresses, instruction bytes, analysis options and proposal digest. A reviewer can follow the citations locally. Before applying, re-derive evidence in the destination Program and check expected type and analysis state through the existing Java write service. A version change can preserve bytes while changing a call override. Test that case, conflicting reviews, duplicate delivery and reopening. |
+
+For a future IL interchange format, version a projection of p-code. Include the
+representation (raw, override-aware or high), producer version, operand order,
+address space, bit width and exactly which parts were omitted. Keep temporary
+identifiers local to their capture. Round-trip fixed examples and reject unknown
+semantics before building transforms on the format. The current Python value
+objects are the first in-process consumer of the instruction view. Portable
+interchange, symbolic explanations and shared review threads are future work.
+
+For the symbolic pilot, start with fixed-width add, subtract and bitwise
+operations. Exhaustively compare small-width fixtures, then exercise zero,
+all-ones, sign-bit and wraparound cases at 32 and 64 bits. Report an expression
+as proved equivalent only when the solver shows that the two expressions cannot
+differ under the stated assumptions. Concrete replay is a separate result.
+Memory reads, calls and control-flow joins require additional semantics and
+fixtures before entering that pilot.
+
+Shared Ghidra projects already provide checkout, version history and merge.
+For a later real-time feature, publish *review activity* such as a selected
+instruction or a new proposal comment. Use a monotonic review sequence,
+deduplication on reconnect, project access control and explicit conflicts.
+An analyst who follows a remote cursor still decompiles their local Program.
+Only an accepted, freshly validated edit enters its native transaction and undo
+history. Prove this with two clients that disconnect, edit and reconnect before
+adding synchronized review to CodeBrowser.
+[Ghidra repository workflow](../../Ghidra/Features/Base/src/main/help/help/topics/VersionControl/project_repository.htm)
+
 - Version comparison starts with read-only function matches. Show each binary
   hash and function address, the correlator, its score and competing matches
   alongside the stock-verified decompilation diff. Keep scores comparable within

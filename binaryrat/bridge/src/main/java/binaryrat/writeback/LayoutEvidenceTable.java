@@ -40,9 +40,11 @@ public final class LayoutEvidenceTable {
 	public static final String REVIEW_ACTION = "Review and Apply Parameter Type";
 	/** Preference key for the folder of the latest report, shared by the recover and browse actions. */
 	public static final String DIRECTORY_PREFERENCE = "BinaryRat.LayoutReportDirectory";
-	private static final Map<String, Integer> COLUMN_WIDTHS = Map.of("Location", 130, "Offset", 64,
-		"Width", 52, "Access", 64, "Instruction", 320, "Function", 170, "P-code order", 90,
-		"Overlaps", 70, "Instruction bytes", 110, "Call path", 240);
+	private static final Map<String, Integer> COLUMN_WIDTHS = Map.ofEntries(
+		Map.entry("Location", 130), Map.entry("Offset", 64), Map.entry("Width", 52), Map.entry("Access", 64),
+		Map.entry("Instruction", 320), Map.entry("Function", 170), Map.entry("P-code order", 90),
+		Map.entry("Overlaps", 70), Map.entry("Instruction bytes", 110), Map.entry("Call path", 240),
+		Map.entry("Union candidate view", 140), Map.entry("Supporting p-code", 260));
 
 	private LayoutEvidenceTable() {
 	}
@@ -147,6 +149,17 @@ public final class LayoutEvidenceTable {
 					row -> row.instructionBytesVerified() ? "Verified" : "Unrecorded");
 				if (summary != null) {
 					addColumn(dialog, "Call path", String.class, row -> summary.callPaths().get(row));
+					if (!summary.unionViews().isEmpty()) {
+						addColumn(dialog, "Union candidate view", String.class, row -> {
+							var use = summary.unionViews().get(row);
+							return use == null ? "" : use.kind().replace('_', ' ');
+						});
+						addColumn(dialog, "Supporting p-code", String.class, row -> {
+							var use = summary.unionViews().get(row);
+							return use == null ? "" : use.operation() + " at " +
+								use.address().toString(true) + " (p-code " + use.pcodeOrder() + ")";
+						});
+					}
 				}
 				if (reviewAction != null) {
 					var action = new DockingAction(REVIEW_ACTION, "BinaryRat") {

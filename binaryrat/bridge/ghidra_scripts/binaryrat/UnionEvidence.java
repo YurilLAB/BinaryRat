@@ -9,6 +9,7 @@ import java.util.IdentityHashMap;
 import java.util.Set;
 
 import ghidra.program.model.address.Address;
+import ghidra.program.model.lang.UnknownInstructionException;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.pcode.Varnode;
@@ -84,6 +85,16 @@ public final class UnionEvidence {
 
 	private static boolean supportedIntegerWidth(int width) {
 		return width == 1 || width == 2 || width == 4 || width == 8;
+	}
+
+	/** Check a recorded consumer against the same high-p-code operations used during capture. */
+	public static boolean matches(String kind, int width, String mnemonic) {
+		try {
+			return supportedIntegerWidth(width) && kind.equals(operationKind(PcodeOp.getOpcode(mnemonic), width));
+		}
+		catch (UnknownInstructionException unsupported) {
+			return false;
+		}
 	}
 
 	private static String operationKind(int opcode, int width) {

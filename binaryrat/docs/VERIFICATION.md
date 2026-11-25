@@ -3,6 +3,50 @@
 BinaryRat counts a feature as done only when an automated check or recorded
 evidence backs it. This page lists those checks and links to the raw evidence.
 
+## Disassembly and analysis validation
+
+Stock parity catches a fork regression. An independent expected value can
+also catch an error shared by the fork and upstream. Keep both gates.
+
+| Layer | Current gate | Next coverage |
+|---|---|---|
+| SLEIGH decoding | Live stock and packaged Ghidra decode 40 x86-64 and 40 AArch64 little-endian test instructions. The test checks boundaries, mnemonic, operands and representative p-code operations. Seven isolated prefixes must leave the Listing undefined. LLVM MC 19.1.7 independently decoded the 80 vectors during development. | Add held-out instruction families, PC-relative targets at two load addresses, and supported context modes. Compare canonical operands, width, target and length so spelling aliases cannot create a false failure. |
+| Instruction evidence | Exercise the public Python API through an actual saved Program. Check a CALL changed to BRANCH by a Listing flow override, empty semantics, invalid addresses, unsigned operands, missing output, caps and cancellation. Inject an edit between raw and effective reads and require a stale-read error. | Execute ordinary arithmetic fixtures on the p-code emulator and compare registers and defined flags with independent ISA expectations. Mask architecturally unspecified flags explicitly. |
+| Inferred types | Compare separate DWARF and PDB ground truth on stripped binaries. Property tests generate call graphs with reused loads at different offsets, then change one citation, view or path. Verify the actual load, consumer and call site shown to the analyst and reject inconsistent reports. | Measure per-kind precision, recall and abstentions on held-out families. For symbolic explanations, compare fixed-width results against independently computed values and reject unsupported semantics. |
+| State and resources | The reviewed write service has live rollback, undo/redo, stale-review and reopen checks. Native scheduling and caches have model tests and seeded fuzzers. | For shared reviews, test duplicate, missing and reordered updates, simultaneous incompatible edits and revocation. Record peak RSS, selected-function latency and cancellation latency separately from whole-program time. |
+
+For a coverage-guided decoder harness, isolate one language and mode in a
+worker with fixed time and memory budgets. Start with the checked-in ordinary
+instruction encodings. Vary operands, instruction lengths, truncation points
+and bytes near a mapping boundary. Accept a defined decode or a documented
+refusal. Assert progress, containment of decoded spans, deterministic results
+for the same context, and explicit termination. Compare supported instructions
+against a separately versioned decoder. For analysis reports, use the native
+solver as a producer and independently check the returned relationships before
+mutating them. Keep the seed, bytes, language, revision and options for each
+failure, minimize it, then replay it in every-commit CI. Coverage-guided campaigns
+and their long-running workers are planned.
+
+Every commit runs the decoder, live API and report tests on Linux and Windows.
+Both the stock installation and the application bundle run the live Python tests.
+The upstream decompiler unit and data suites run in the Linux source job. Longer fuzz
+campaigns should publish their seeds, coverage, timeouts and sanitizer logs.
+Keep correctness gates separate from timing trends on shared hosts. Release
+publication requires the successful CI run for the exact packaged commit.
+[CI workflow](../../.github/workflows/binaryrat.yml) ·
+[Release gate](../../.github/workflows/binaryrat-release.yml)
+
+On the Linux development host the packaged application took a median 0.61 ms
+and p95 3.60 ms to read the five-byte overridden call in the live instruction
+fixture. This is 500 reads of the same instruction in an open Program after 50
+warmups, with JVM startup and project opening excluded. The summary-report
+fixture took a median 0.93 ms to decode, validate and explain one selected
+offset across 24 generated graphs (8.7–17.7 kB of JSON), versus 0.83 ms before
+checking union provenance and displaying its consumers. These are fixture
+measurements on a shared host. Full-program throughput is tracked separately.
+[Instruction fixture](../python/tests/test_live_instruction_pcode.py) ·
+[Summary report generator](../python/tests/test_summary_provenance_fuzz.py)
+
 ## Ghidra integration checks
 
 Use an official Ghidra 12.2 installation and JDK 25. Ghidra compiles the

@@ -39,6 +39,8 @@ _SCHEDULED_TIMEOUT_SECONDS = 86_400
 _MAX_SUMMARIES = 256
 _MAX_SUMMARY_TIMEOUT_SECONDS = 600
 _MAX_STACK_STRINGS_TIMEOUT_SECONDS = 60
+_MAX_PCODE_OPERATIONS = 128
+_MAX_PCODE_INPUTS = 8
 
 DecompilationBackend = Literal["auto", "scheduled", "stock"]
 
@@ -91,6 +93,52 @@ class CrossReference:
     type_name: str
     operand_index: int
     primary: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PcodeVarnode:
+    """Storage or a literal in Ghidra's address space, with its size in bytes."""
+
+    address: Address
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
+class PcodeOperation:
+    """One operation. The site and sequence identify its original SLEIGH instruction step."""
+
+    mnemonic: str
+    site: Address
+    sequence: int
+    output: PcodeVarnode | None
+    inputs: tuple[PcodeVarnode | None, ...]
+    input_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PcodeListing:
+    """Ordered operations. Counts include any operands or operations beyond the limits."""
+
+    operations: tuple[PcodeOperation, ...]
+    operation_count: int
+
+    @property
+    def truncated(self) -> bool:
+        return (len(self.operations) < self.operation_count or
+                any(len(op.inputs) < op.input_count for op in self.operations))
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionPcode:
+    """Listing instruction boundaries and raw and override-aware SLEIGH p-code."""
+
+    address: Address
+    length: int
+    parsed_length: int
+    mnemonic: str
+    revision: int
+    raw: PcodeListing
+    effective: PcodeListing
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +235,24 @@ def _iter_java(values: Any) -> Iterator[Any]:
 
 def _address(value: Any) -> Address:
     return Address(str(value.getAddressSpace().getName()), int(value.getOffset()) & _OFFSET_MASK)
+
+
+def _varnode(node: Any) -> PcodeVarnode | None:
+    return None if node is None else PcodeVarnode(_address(node.getAddress()), int(node.getSize()))
+
+
+def _pcode_listing(operations: Any, limit: int, cancel: Event | None) -> PcodeListing:
+    rows = []
+    for index in range(min(len(operations), limit)):
+        _check_cancel(cancel)
+        op = operations[index]
+        seq = op.getSeqnum()
+        count = int(op.getNumInputs())
+        inputs = tuple(_varnode(op.getInput(i)) for i in range(min(count, _MAX_PCODE_INPUTS)))
+        rows.append(PcodeOperation(str(op.getMnemonic()), _address(seq.getTarget()),
+                                   int(seq.getTime()) & 0xffffffff, _varnode(op.getOutput()),
+                                   inputs, count))
+    return PcodeListing(tuple(rows), len(operations))
 
 
 def _function(value: Any) -> ProgramFunction:
@@ -373,6 +439,47 @@ class ProgramView:
                 self._native_address(program, address)
             )
             return _function(function) if function is not None and not function.isExternal() else None
+
+    def instruction_pcode(
+        self, address: Address, *, max_operations: int = _MAX_PCODE_OPERATIONS,
+    ) -> InstructionPcode | None:
+        """Inspect an existing Listing instruction at any byte within it, or return None.
+
+        The address must be in a memory space. Each listing preserves Ghidra's order and
+        copies up to max_operations (1–128), with up to eight inputs per operation.
+        Check raw.truncated and effective.truncated before interpreting a complete sequence.
+        A defined instruction with no operations has an empty listing. Ghidra lifts the
+        whole instruction even when a smaller display limit is requested.
+        """
+        if type(max_operations) is not int or not 1 <= max_operations <= _MAX_PCODE_OPERATIONS:
+            raise ValueError(f"max_operations must be between 1 and {_MAX_PCODE_OPERATIONS}")
+        with self._read() as program:
+            from jpype import JBoolean, JException
+
+            location = self._native_address(program, address)
+            if not location.isMemoryAddress():
+                raise ValueError("instruction p-code requires a memory address")
+            if program.getCurrentTransactionInfo() is not None:
+                raise LiveProgramError("Wait for the Program edit or analysis to finish")
+            try:
+                instruction = program.getListing().getInstructionContaining(location)
+                result = None
+                if instruction is not None:
+                    raw = _pcode_listing(instruction.getPcode(), max_operations, self._cancel)
+                    # Select the boolean overload. getPcode(int) lifts an individual operand.
+                    effective = _pcode_listing(instruction.getPcode(JBoolean(True)), max_operations,
+                                               self._cancel)
+                    result = InstructionPcode(
+                        _address(instruction.getMinAddress()), int(instruction.getLength()),
+                        int(instruction.getParsedLength()), str(instruction.getMnemonicString()),
+                        self.info.revision, raw, effective,
+                    )
+            except JException as cause:
+                self._check(program)
+                raise LiveProgramError(f"Could not read instruction p-code at {address}: {cause}") from cause
+            if program.getCurrentTransactionInfo() is not None:
+                raise LiveProgramError("Wait for the Program edit or analysis to finish")
+            return result
 
     def functions_named(self, name: str, *, limit: int = 100) -> Page[ProgramFunction]:
         """Find local functions by simple name, or by qualified name such as ``ns::f``.

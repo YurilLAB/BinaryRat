@@ -85,6 +85,21 @@ def discover_calls(text: str) -> list[tuple[list[str], str]]:
 
 
 class CoverageTests(unittest.TestCase):
+    def test_live_suites_run_in_stock_and_packaged_ghidra(self):
+        suites = [p.name for p in tracked("binaryrat/python/tests/test_live*.py")]
+        self.assertIn("test_live_instruction_pcode.py", suites)
+        for job, step_name in (
+            ("verify", "Exercise the live Python API and local JVM service"),
+            ("build-ghidra-source", "Run bundle tooling and required shared Python service tests"),
+        ):
+            step, = [s for job_name, _, s in steps(load(MAIN))
+                     if job_name == job and s.get("name") == step_name]
+            patterns = [pattern for folders, pattern in discover_calls(step["run"])
+                        if "binaryrat/python/tests" in folders]
+            with self.subTest(job=job):
+                self.assertEqual([suite for suite in suites
+                                  if not any(fnmatch(suite, pattern) for pattern in patterns)], [])
+
     def test_every_entry_point_runs_in_ci(self):
         """Reached means named in a workflow command, or in a script CI already runs."""
         scripts = entry_points()

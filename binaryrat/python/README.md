@@ -46,8 +46,35 @@ It also reads summary reports from `BinaryRatSolveLayouts.java` or
 `solve_layout` (below) and prints the call path behind each field, for example
 `layout_shift -> layout_shift_middle (ram:10113d, +0) -> layout_leaf (ram:10111c, +24)`,
 with recursive call cycles and refused calls.
+For a union candidate, each cited load is labeled with its storage view.
+When the report records what consumed the load, the same line gives the p-code
+operation, instruction address and p-code order. For example, an integer XOR
+and a floating-point comparison can use the same bytes. These are alternative
+interpretations of shared storage. A source-level union declaration requires
+additional evidence.
 
 ## Python API
+
+Inspect the instruction containing an address in a saved Program:
+
+```python
+from binaryrat import Address, open_program
+
+with open_program("workspace.gpr", "/program") as view:
+    ins = view.instruction_pcode(Address("ram", 0x401000))
+    if ins is not None:
+        for op in ins.effective.operations:
+            print(op.site, op.sequence, op.mnemonic, op.output, op.inputs)
+        print("Raw operations:", ins.raw.operation_count)
+        print("Effective listing truncated:", ins.effective.truncated)
+```
+
+`raw` is the instruction's SLEIGH p-code. `effective` includes Listing
+overrides. Both preserve operand order, byte widths and address spaces. For a
+defined instruction with empty semantics, the result has zero operations.
+Undefined bytes return `None`. Each listing returns up to 128 operations and
+eight inputs per operation with original counts. Check both truncation flags
+when comparing the two listings.
 
 ```python
 from binaryrat import EngineClient, load_export

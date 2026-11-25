@@ -122,6 +122,18 @@ class SummaryReportTests(unittest.TestCase):
         self.assertFalse(parsed.complete)
         self.assertIn("incomplete (withheld cycles 1", explain_summary(parsed)[1])
 
+    def test_consumer_mnemonics_use_ghidra_spelling_and_legacy_citations_still_work(self):
+        for mnemonic in ("TRUNC", "FLOAT2FLOAT", "FLOAT_LESSEQUAL"):
+            document = report()
+            access = document["summaries"][2]["accesses"][0]
+            access["typed_use"] = dict(address_space="overlay", address="3030", pcode_order=17,
+                                       operation=mnemonic)
+            with self.subTest(mnemonic=mnemonic):
+                parsed = parse_summary_report(document)
+                self.assertIn(f"consumed by {mnemonic} at overlay:3030 (p-code 17)",
+                              "\n".join(explain_summary(parsed)))
+                self.assertIsNone(parsed.summaries[1].accesses[0].typed_use)
+
     def test_corrupted_reports_are_refused(self):
         root, leaf = summary_id(0x1000), summary_id(0x2000)
 
@@ -142,6 +154,9 @@ class SummaryReportTests(unittest.TestCase):
             "duplicate summary": lambda d: d["summaries"].append(copy.deepcopy(d["summaries"][1])),
             "summary id names another parameter": set_path(["summaries", 1, "parameter_index"], 1),
             "foreign evidence": set_path(["summaries", 1, "accesses", 0, "evidence_id"], f"{root}/ram/2004/0"),
+            "moved source": set_path(["summaries", 1, "accesses", 0, "address"], "2008"),
+            "reordered source": set_path(["summaries", 1, "accesses", 0, "pcode_order"], 9),
+            "non-string field citation": set_path(["solution", "layout", "fields", 1, "evidence_ids"], [{}]),
             "boolean offset": set_path(["summaries", 0, "accesses", 0, "offset"], False),
             "zero width": set_path(["summaries", 0, "accesses", 0, "width"], 0),
             "offset beyond int64": set_path(["summaries", 0, "accesses", 0, "offset"], 1 << 63),

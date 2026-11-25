@@ -161,7 +161,7 @@ jobs:
           subprocess.run([sys.executable, "-m", "pip", "install", "--no-index",
                           "--find-links", str(wheels), "pyghidra==3.2.0"], check=True)
           subprocess.run([sys.executable, "-m", "unittest", "discover",
-                          "-s", "binaryrat/python/tests", "-p", "test_live_ghidra.py"], check=True)
+                          "-s", "binaryrat/python/tests", "-p", "test_live*.py"], check=True)
       - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
         id: accuracy
         name: Verify p-code layouts against separate DWARF and PDB oracles
@@ -591,7 +591,7 @@ jobs:
                               "BINARYRAT_GHIDRA_INSTALL_DIR": str(ghidra),
                               "BINARYRAT_REQUIRE_SHARED_SERVICE": "1"}
           subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "binaryrat/python/tests",
-                          "-p", "test_live_ghidra.py", "-v"], env=env, check=True)
+                          "-p", "test_live*.py", "-v"], env=env, check=True)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: binaryrat-complete-${{ matrix.os }}-${{ matrix.revision }}

@@ -74,6 +74,13 @@ CI opens the installed extension in CodeBrowser, runs both actions on the packed
 
 In the BinaryRat workspace, place the cursor inside a function and choose **Tools → BinaryRat → Recover Summary Layout at Cursor**. Select the zero-based parameter to inspect. The evidence table shows accesses from the selected function and supported direct callees. Its **Call path** column shows the address and byte shift of each recorded call. Double-click an access to open its instruction in the Listing.
 
+When independent loads support different interpretations of the same bytes,
+**Union candidate view** labels each cited load and **Supporting p-code** shows
+the operation that consumed its value. For example, `read_overlay_number`
+in the test corpus uses the same offset as a four-byte integer and an
+eight-byte floating-point value. Double-clicking either row navigates to the
+load. Shared-storage candidates are review-only.
+
 When the selected parameter has an eligible generic pointer and the evidence supports a fixed layout, choose **Review and Apply Parameter Type**. Review the current type, destination, field widths, and minimum observed extent, then choose **Apply**. Applying creates a new structure, retypes the selected parameter, and records evidence references in a single native Ghidra undo step. The function signature becomes user-defined. Protected signatures, incomplete evidence, and stale previews are refused.
 
 ## Run headless

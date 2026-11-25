@@ -4,8 +4,12 @@
 import java.io.IOException;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Set;
+
+import com.google.gson.JsonObject;
 
 import binaryrat.SummaryLayouts;
+import binaryrat.writeback.SummaryLayoutEvidenceBrowser;
 import binaryrat.writeback.SummaryLayoutWriteBack;
 import binaryrat.writeback.SummaryLayoutWriteBack.Recovery;
 import ghidra.app.script.GhidraScript;
@@ -55,6 +59,7 @@ public class BinaryRatSummaryWriteBackProof extends GhidraScript {
 			language.getCompilerSpecByID(new CompilerSpecID("gcc")), this);
 		try {
 			setup();
+			checkUnionEvidence();
 			protectExistingMetadata();
 			refuseStaleAndBusyReview();
 			rollBackInsertion();
@@ -93,12 +98,18 @@ public class BinaryRatSummaryWriteBackProof extends GhidraScript {
 			memory.setBytes(root, HexFormat.of().parseHex("488d7f08e83700000001f0c3"));
 			// mov eax, [rdi+4]; ret.
 			memory.setBytes(leaf, HexFormat.of().parseHex("8b4704c3"));
+			// Use the same storage as a double (addsd) or as a 32-bit integer (xor).
+			Address overlay = root.add(0x60);
+			memory.setBytes(overlay, HexFormat.of().parseHex(
+				"85f6740df20f1007f20f58c0f20f2cc0c38b073542db9765c3"));
 			require(flat.disassemble(leaf), "could not disassemble leaf");
 			require(flat.disassemble(root), "could not disassemble caller");
+			require(flat.disassemble(overlay), "could not disassemble shared-storage fixture");
 			Function source = flat.createFunction(root, "root");
 			Function target = flat.createFunction(leaf, "leaf");
-			require(source != null && target != null, "could not define fixture functions");
-			for (Function function : List.of(source, target)) {
+			Function shared = flat.createFunction(overlay, "shared_storage");
+			require(source != null && target != null && shared != null, "could not define fixture functions");
+			for (Function function : List.of(source, target, shared)) {
 				function.setCallingConvention(program.getCompilerSpec().getDefaultCallingConvention().getName());
 				function.setReturnType(IntegerDataType.dataType, SourceType.ANALYSIS);
 				function.addParameter(new ParameterImpl("object",
@@ -107,6 +118,8 @@ public class BinaryRatSummaryWriteBackProof extends GhidraScript {
 			}
 			source.addParameter(new ParameterImpl("neighbor", IntegerDataType.dataType, program),
 				SourceType.ANALYSIS).setComment("preserve neighbor");
+			shared.addParameter(new ParameterImpl("floating_view", IntegerDataType.dataType, program),
+				SourceType.ANALYSIS);
 			commit = true;
 		}
 		finally {
@@ -118,6 +131,80 @@ public class BinaryRatSummaryWriteBackProof extends GhidraScript {
 
 	private Function function() {
 		return program.getFunctionManager().getFunctionAt(root);
+	}
+
+	private void checkUnionEvidence() throws Exception {
+		long revision = program.getModificationNumber();
+		var function = program.getFunctionManager().getFunctionAt(root.add(0x60));
+		var recovered = SummaryLayoutWriteBack.recover(program, function, 0, 30,
+			SummaryLayouts.DEFAULT_SUMMARIES, monitor);
+		require(recovered.proposal() == null, "Union recovery must be read-only");
+		var report = recovered.report();
+		var view = SummaryLayoutEvidenceBrowser.read(program, report, monitor);
+		require(view.unionViews().size() == 2 && view.unionViews().entrySet().stream().allMatch(entry -> {
+			var row = entry.getKey();
+			var use = entry.getValue();
+			return row.operation().equals("LOAD") && row.offset() == 0 && row.instructionBytesVerified() &&
+				(use.kind().equals("integer") && row.width() == 4 && row.address().equals(root.add(0x71)) &&
+					use.operation().equals("INT_XOR") && use.address().equals(root.add(0x73)) ||
+				 use.kind().equals("floating_point") && row.width() == 8 && row.address().equals(root.add(0x64)) &&
+					use.operation().equals("FLOAT_ADD") && use.address().equals(root.add(0x68)));
+		}) && view.unionViews().values().stream().map(use -> use.kind()).collect(
+			java.util.stream.Collectors.toSet()).equals(Set.of("integer", "floating_point")),
+			"View does not identify the two source loads: " + view + " report: " + report);
+
+		var uncertified = report.deepCopy();
+		var candidates = uncertified.getAsJsonObject("solution").getAsJsonObject("layout")
+			.getAsJsonArray("union_candidates");
+		candidates.remove(0);
+		require(SummaryLayoutEvidenceBrowser.read(program, uncertified, monitor).unionViews().isEmpty(),
+			"Displayed uncited typed loads as union evidence");
+		for (String corruption : List.of("offset", "wrong id", "empty ids", "swapped views", "missing view")) {
+			var damaged = report.deepCopy();
+			var candidate = damaged.getAsJsonObject("solution").getAsJsonObject("layout")
+				.getAsJsonArray("union_candidates").get(0).getAsJsonObject();
+			var views = candidate.getAsJsonArray("views");
+			JsonObject first = views.get(0).getAsJsonObject();
+			switch (corruption) {
+				case "offset" -> candidate.addProperty("offset", 1);
+				case "wrong id" -> first.getAsJsonArray("evidence_ids").add("missing");
+				case "empty ids" -> first.getAsJsonArray("evidence_ids").remove(0);
+				case "swapped views" -> first.add("kind", views.get(1).getAsJsonObject().get("kind"));
+				case "missing view" -> views.remove(1);
+			}
+			try {
+				SummaryLayoutEvidenceBrowser.read(program, damaged, monitor);
+				throw new AssertionError("Displayed damaged union evidence: " + corruption);
+			}
+			catch (IOException refused) {
+				require(refused.getMessage().toLowerCase(java.util.Locale.ROOT).contains("union"),
+					"Unexpected refusal for " + corruption + ": " + refused);
+			}
+		}
+		for (String corruption : List.of("operation", "address", "interior", "instruction_sha256", "pcode_order")) {
+			var damaged = report.deepCopy();
+			var accesses = damaged.getAsJsonArray("summaries").get(0).getAsJsonObject().getAsJsonArray("accesses");
+			var consumer = accesses.get(0).getAsJsonObject().getAsJsonObject("typed_use");
+			switch (corruption) {
+				case "operation" -> consumer.addProperty("operation", "COPY");
+				case "address" -> consumer.addProperty("address", "1000"); // in another function
+				case "interior" -> {
+					consumer.addProperty("address", "1065"); // inside a load, with no byte witness
+					consumer.remove("instruction_sha256");
+				}
+				case "instruction_sha256" -> consumer.addProperty("instruction_sha256", "f".repeat(64));
+				case "pcode_order" -> consumer.addProperty("pcode_order", -1);
+			}
+			try {
+				SummaryLayoutEvidenceBrowser.read(program, damaged, monitor);
+				throw new AssertionError("Displayed damaged typed consumer: " + corruption);
+			}
+			catch (IOException refused) {
+				require(refused.getMessage().contains("consumer") || refused.getMessage().contains("bytes"),
+					"Unexpected typed consumer refusal for " + corruption + ": " + refused);
+			}
+		}
+		require(program.getModificationNumber() == revision, "Browsing union evidence modified the Program");
 	}
 
 	private Recovery recover() throws Exception {

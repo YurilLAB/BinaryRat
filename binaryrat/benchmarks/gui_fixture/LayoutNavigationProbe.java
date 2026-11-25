@@ -25,6 +25,7 @@ import javax.swing.*;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import docking.ComponentProvider;
+import docking.DefaultActionContext;
 import ghidra.GhidraApplicationLayout;
 import ghidra.GhidraLaunchable;
 import ghidra.app.services.CodeViewerService;
@@ -258,6 +259,7 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         if (program.isChanged()) {
             throw new AssertionError("Recovering or browsing evidence dirtied the opened Program");
         }
+        inspectUnionViews(tool, program, listing);
         inspectForeground(tool, program, listing, entry, interior);
         if (!swing(evidenceTable::isShowing)) {
             throw new AssertionError("Evidence table closed before the fixture edit");
@@ -277,6 +279,58 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         }
         System.out.printf(Locale.ROOT, "BINARYRAT_GUI_NAVIGATION_OK %s %s %s %.3f %.3f%n",
             entry, interior, evidence, recoverSeconds, browseSeconds);
+    }
+
+    private static void inspectUnionViews(PluginTool tool, Program program, CodeViewerService listing)
+            throws Exception {
+        String owner = "BinaryRatWorkspacePlugin";
+        String menu = "Recover Summary Layout at Cursor";
+        Address entry = program.getSymbolTable().getGlobalSymbols("read_overlay_number").getFirst().getAddress();
+        long revision = program.getModificationNumber();
+        swing(() -> {
+            if (tool.getDockingActionsByOwnerName(owner).isEmpty()) {
+                tool.addPlugin("binaryrat.desktop.BinaryRatWorkspacePlugin");
+            }
+            return listing.goTo(new ProgramLocation(program, entry), true);
+        });
+        var action = await("summary recovery at shared storage", () ->
+            listing.getCurrentLocation().getAddress().equals(entry) ?
+                tool.getDockingActionsByOwnerName(owner).stream()
+                    .filter(item -> item.getName().equals(menu) && item.isEnabled()).findFirst().orElse(null) : null);
+        SwingUtilities.invokeLater(() -> action.actionPerformed(new DefaultActionContext()));
+        var options = await("union summary selection", () -> dialog(menu));
+        swing(() -> { widget(options, JButton.class, b -> b.getText().equals("Recover")).doClick(); return null; });
+        var evidence = await("union summary evidence", () -> dialog("BinaryRat Summary Layout Evidence"));
+        await("integer and floating-point field loads in the table", () -> {
+            JTable table = widget(evidence, JTable.class, t -> true);
+            var columns = table.getColumnModel();
+            int kind = columns.getColumnIndex("Union candidate view");
+            boolean integer = false;
+            boolean floating = false;
+            for (int i = 0; i < table.getRowCount(); i++) {
+                String label = (String) table.getValueAt(i, kind);
+                if (label.isEmpty()) {
+                    continue;
+                }
+                if (!"LOAD".equals(table.getValueAt(i, columns.getColumnIndex("Access"))) ||
+                        !"+0x0".equals(String.valueOf(table.getValueAt(i, columns.getColumnIndex("Offset")))) ||
+                        !"Verified".equals(table.getValueAt(i, columns.getColumnIndex("Instruction bytes")))) {
+                    throw new AssertionError("Union row must cite a verified load at the shared offset");
+                }
+                int width = (Integer) table.getValueAt(i, columns.getColumnIndex("Width"));
+                String consumer = (String) table.getValueAt(i, columns.getColumnIndex("Supporting p-code"));
+                if (!consumer.contains(" at ram:") || !consumer.contains(" (p-code ")) {
+                    throw new AssertionError("Missing qualified consumer location and p-code order: " + consumer);
+                }
+                integer |= label.equals("integer") && width == 4 && consumer.startsWith("INT_XOR ");
+                floating |= label.equals("floating point") && width == 8 && consumer.startsWith("FLOAT_");
+            }
+            return integer && floating ? Boolean.TRUE : null;
+        });
+        swing(() -> { widget(evidence, JButton.class, b -> b.getText().equals("Dismiss")).doClick(); return null; });
+        if (program.getModificationNumber() != revision || program.isChanged()) {
+            throw new AssertionError("Reviewing union candidates changed the Program");
+        }
     }
 
     /** Label HTML from HTMLUtilities.toLiteralHTML as plain text. */
