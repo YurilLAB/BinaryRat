@@ -156,12 +156,12 @@ repetitions measure this decompilation sample. Whole-program analysis and
 throughput on other binaries require separate measurements.
 
 After the shared-session fallback and native startup cleanup were integrated,
-two more pairs used the same saved Program and deadline. Both final verified
+two more pairs used the same saved Program and deadline. Both verified
 exports again matched all 384 stock records. Each reported 384 candidate
 leases, 384 watched reference leases, four peak concurrent leases and one
 stock fallback.
 
-| Final implementation | Wall seconds, runs 1 / 2 | Median seconds | Peak process-tree RSS, GiB, runs 1 / 2 |
+| With shared-session fallback | Wall seconds, runs 1 / 2 | Median seconds | Peak process-tree RSS, GiB, runs 1 / 2 |
 | --- | ---: | ---: | ---: |
 | Stock serial | 76.99 / 78.34 | 77.67 | 1.30 / 1.31 |
 | Stock-verified | 79.88 / 87.98 | 83.93 | 2.01 / 1.98 |
@@ -174,6 +174,18 @@ The final measured `BinaryRatExport.java` SHA-256 was
 `af840257f350741be95081316c4147e78f9ce2de337c90cda3600811c857179d`.
 A subsequent diagnostic wording change affects retired decompiler pools.
 All four runs used healthy pools.
+
+After fixing concurrent first reads of calling conventions and data settings,
+two more pairs on the same saved Program produced the same 384 records and
+the same SHA-256. Each verified export ran 384 uncached candidate leases and
+384 watched stock-reference leases, reached four concurrent leases and used
+one stock fallback. The binary, engine and deadline were unchanged. The
+following measurements cover initialization of the metadata indexes.
+
+| With the metadata fixes | Wall seconds, runs 1 / 2 | Median seconds | Peak process-tree RSS, GiB, runs 1 / 2 |
+| --- | ---: | ---: | ---: |
+| Stock serial | 74.43 / 73.43 | 73.93 | 1.29 / 1.26 |
+| Stock-verified | 83.12 / 85.08 | 84.10 | 1.92 / 2.25 |
 
 To compare an earlier exporter, extract its `binaryrat/bridge/ghidra_scripts`
 directory from Git and pass it as `--candidate-scripts` to the command above.

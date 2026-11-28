@@ -243,6 +243,68 @@ class KnownStockFailureTests(unittest.TestCase):
 
 
 class ScheduledEvidenceTests(unittest.TestCase):
+    def test_uncached_verification_computes_and_checks_every_function(self):
+        cache = {"enabled": False, "hits": 0, "replayed": 0, "misses": 0, "stored": 0, "store_rejected": 0}
+        proof = {"candidate_cache": cache, "candidate_compute_leases": 4, "reference_watched_leases": 4}
+        verify_ghidra.validate_verified_cache(proof, 4, "disabled")
+        for damaged in (proof | {"candidate_cache": cache | {"enabled": True}},
+                        proof | {"candidate_compute_leases": 3}, proof | {"reference_watched_leases": 3},
+                        proof | {"candidate_cache": cache | {"replayed": 1}}):
+            with self.subTest(damaged=damaged), self.assertRaises(ValueError):
+                verify_ghidra.validate_verified_cache(damaged, 4, "disabled")
+
+    def test_mismatching_verified_exports_keep_both_originals_and_report_the_first_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate, stock, log = (root / name for name in ("candidate", "stock", "stage.log"))
+            first, second = rows()
+            def encode(row):
+                return (json.dumps(row) + "\n").encode()
+
+            original = encode(first) + encode(second)
+            stock.write_bytes(original)
+            candidate.write_bytes(original)
+            verify_ghidra.require_same_verified_export(candidate, stock, log)
+            self.assertFalse(list(root.glob("*.jsonl")))
+            cases = ((encode(first) + encode(second | {"prototype": "void other()"}), r"ram:1010 fields prototype"),
+                     (encode(first), r"candidate missing row"),
+                     (encode(first) + encode(second).replace(b"\n", b"\r\n"), r"line ending"),
+                     (encode(first) + b"!\n", r"invalid JSON row"))
+            for damaged, detail in cases:
+                with self.subTest(detail=detail):
+                    candidate.write_bytes(damaged)
+                    offset = verify_ghidra.first_differing_byte(candidate, stock)
+                    with self.assertRaisesRegex(RuntimeError, f"byte {offset}, row 2 .*{detail}"):
+                        verify_ghidra.require_same_verified_export(candidate, stock, log)
+                    self.assertEqual(log.with_suffix(".candidate.jsonl").read_bytes(), damaged)
+                    self.assertEqual(log.with_suffix(".stock.jsonl").read_bytes(), original)
+            candidate.write_bytes(original)
+            verify_ghidra.require_same_verified_export(candidate, stock, log)
+            self.assertFalse(list(root.glob("*.jsonl")))
+
+    def test_exact_output_does_not_hide_a_native_callback_exception(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate, stock, log = (root / name for name in ("candidate", "stock", "stage.log"))
+            stock.write_bytes(b"{}\n")
+            candidate.write_bytes(stock.read_bytes())
+            success = "INFO  BinaryRat stock verification passed: {}\n"
+            log.write_text(success, encoding="utf-8")
+            self.assertEqual(verify_ghidra.check_verified_run({"returncode": 0}, log, stock, candidate), success)
+            log.write_text("ERROR Unexpected Exception: null settings (DecompileProcess)\n" + success, encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "decompiler callback failed.*null settings"):
+                verify_ghidra.check_verified_run({"returncode": 0}, log, stock, candidate)
+
+    def test_missing_verified_export_reports_the_name_and_retains_the_available_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate, stock, log = (root / name for name in ("candidate", "stock", "stage.log"))
+            stock.write_bytes(b"{}\n")
+            with self.assertRaisesRegex(RuntimeError, "missing export candidate"):
+                verify_ghidra.require_same_verified_export(candidate, stock, log)
+            self.assertEqual(log.with_suffix(".stock.jsonl").read_bytes(), stock.read_bytes())
+            self.assertFalse(log.with_suffix(".candidate.jsonl").exists())
+
     def test_verified_cache_requires_complete_candidate_and_reference_evidence(self):
         for state, replays, misses in (("cold", 0, 4), ("warm", 4, 0), ("edited", 3, 1)):
             proof = {"candidate_cache": {"enabled": True, "hits": 0, "replayed": replays,

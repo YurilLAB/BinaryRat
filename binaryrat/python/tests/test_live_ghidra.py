@@ -204,7 +204,14 @@ class LiveProgramInputTests(unittest.TestCase):
             return None
 
         view.data_type.side_effect = read_type
-        with _Service(view, token) as service:
+        # A monotonic clock may report the same tick at startup and authentication.
+        # Let real time advance as soon as the first authorized operation begins.
+        initial_tick = monotonic()
+
+        def clock():
+            return monotonic() if started.is_set() else initial_tick
+
+        with patch("binaryrat.live_service.monotonic", new=clock), _Service(view, token) as service:
             worker = Thread(target=service.serve_until_idle, args=(1,), daemon=True)
             worker.start()
             try:

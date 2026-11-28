@@ -4,6 +4,8 @@
 
 - [No-return analyzer candidate checks](no-return-candidate-checks.md)
 - [Decompiler join records at cache flush](decompiler-join-flush.md)
+- [Calling conventions during concurrent reads](calling-convention-cache.md)
+- [Decompiler reads of data settings](settings-name-cache.md)
 
 ## Branding
 

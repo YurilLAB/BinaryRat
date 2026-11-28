@@ -192,9 +192,14 @@ public final class DecompilationSession implements AutoCloseable {
 		Path cache = configured == null || configured.isBlank() ? null :
 			Path.of(configured).toAbsolutePath().normalize();
 		var options = new Options(workers, timeoutSeconds, syntaxTree, cache);
+		// Acquire/release the ProgramDB lock before the session registry monitor.
+		var prepared = ScheduledDecompiler.PreparedProgram.open(program);
 		synchronized (OPEN) {
 			var existing = OPEN.get(program);
-			long revision = program.getModificationNumber();
+			long revision = prepared.revision();
+			if (program.getModificationNumber() != revision) {
+				throw new IOException("Program changed while opening the decompilation session");
+			}
 			if (existing != null) {
 				for (Backend backend : existing) {
 					if (backend.revision == revision && backend.options.equals(options)) {
@@ -212,7 +217,7 @@ public final class DecompilationSession implements AutoCloseable {
 				throw new IOException("BINARYRAT_CACHE_DIR already serves another Program, revision, or " +
 					"decompilation configuration. Close that session before opening another");
 			}
-			Backend backend = create(program, revision, options);
+			Backend backend = create(prepared, options);
 			OPEN.computeIfAbsent(program, ignored -> new ArrayList<>()).add(backend);
 			return new DecompilationSession(backend);
 		}
@@ -323,7 +328,9 @@ public final class DecompilationSession implements AutoCloseable {
 		decompiler.toggleSyntaxTree(syntaxTree);
 	}
 
-	private static Backend create(Program program, long revision, Options options) throws IOException {
+	private static Backend create(ScheduledDecompiler.PreparedProgram prepared, Options options) throws IOException {
+		Program program = prepared.program();
+		long revision = prepared.revision();
 		Object consumer = new Object();
 		if (!program.addConsumer(consumer)) {
 			throw new IOException("Program closed before the decompilation session started");
@@ -352,7 +359,7 @@ public final class DecompilationSession implements AutoCloseable {
 				environment("BINARYRAT_OTHER_RESERVE_BYTES", 512L << 20), timeout,
 				environment("BINARYRAT_KILL_GRACE_MS", 5000),
 				environment("BINARYRAT_LEASE_TIMEOUT_MS", timeout * 1_000L));
-			scheduler = new ScheduledDecompiler(engine, program,
+			scheduler = new ScheduledDecompiler(engine, prepared,
 				d -> configureDecompiler(d, program, options.syntaxTree()), limits);
 			if (scheduler.workers() < 1) {
 				throw new IOException("The memory budget admits no native decompiler workers. " +

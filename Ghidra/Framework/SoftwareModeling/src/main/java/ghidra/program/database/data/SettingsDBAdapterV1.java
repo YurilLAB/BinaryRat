@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// Modified by YurilLAB for BinaryRat: publish both settings-name maps after a complete read.
 package ghidra.program.database.data;
 
 import java.io.IOException;
@@ -168,20 +169,22 @@ class SettingsDBAdapterV1 extends SettingsDBAdapter {
 		}
 	}
 
-	private void initNameMaps() throws IOException {
+	private synchronized void initNameMaps() throws IOException {
 		if (nameIndexMap != null) {
 			return;
 		}
-		nameIndexMap = new HashMap<>();
-		nameStringMap = new HashMap<>();
+		HashMap<Short, String> byIndex = new HashMap<>();
+		HashMap<String, Short> byName = new HashMap<>();
 		RecordIterator it = settingsNameTable.iterator();
 		while (it.hasNext()) {
 			DBRecord nameRec = it.next();
 			short nameIndex = (short) nameRec.getKey();
 			String name = nameRec.getString(V1_NAME_COL);
-			nameIndexMap.put(nameIndex, name);
-			nameStringMap.put(name, nameIndex);
+			byIndex.put(nameIndex, name);
+			byName.put(name, nameIndex);
 		}
+		nameIndexMap = byIndex;
+		nameStringMap = byName;
 	}
 
 	private short assignNameIndexValue(String name) throws IOException {

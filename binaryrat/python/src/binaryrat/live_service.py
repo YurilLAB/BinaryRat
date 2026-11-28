@@ -311,6 +311,7 @@ class _Service(TCPServer):
         self._view = view
         self._token = token
         self.last_authorized = monotonic()
+        self._request_authorized = False
         self.idle_deadline = float("inf")
         self._operations = {
             "functions": (view.functions, None),
@@ -354,7 +355,7 @@ class _Service(TCPServer):
             raise LiveRequestError("unauthorized")
         if not secrets.compare_digest(token, self._token):
             raise LiveRequestError("unauthorized")
-        self.last_authorized = monotonic()
+        self._request_authorized = True
         if (set(request) != {"version", "token", "method", "args"}
                 or type(version) is not int or version != LIVE_PROTOCOL_VERSION):
             raise LiveRequestError("bad_request")
@@ -398,13 +399,13 @@ class _Service(TCPServer):
     def serve_until_idle(self, idle_timeout: int) -> None:
         while (remaining := self.last_authorized + idle_timeout - monotonic()) > 0:
             self.timeout = remaining
-            previous = self.last_authorized
-            self.idle_deadline = previous + idle_timeout
+            self._request_authorized = False
+            self.idle_deadline = self.last_authorized + idle_timeout
             try:
                 self.handle_request()
             finally:
                 self.idle_deadline = float("inf")
-            if self.last_authorized != previous:
+            if self._request_authorized:
                 self.last_authorized = monotonic()
 
 

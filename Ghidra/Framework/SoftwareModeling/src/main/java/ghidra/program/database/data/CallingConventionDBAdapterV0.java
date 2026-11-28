@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// Modified by YurilLAB for BinaryRat: publish the calling convention cache after a complete read.
 package ghidra.program.database.data;
 
 import java.io.IOException;
@@ -108,14 +109,15 @@ class CallingConventionDBAdapterV0 extends CallingConventionDBAdapter {
 		freeKeySet = null;
 	}
 
-	private void populateCache() throws IOException {
+	private synchronized void populateCache() throws IOException {
 		if (callingConventionNameToIDMap != null) {
 			return;
 		}
-		callingConventionNameToIDMap = new HashMap<>();
-		callingConventionIDToNameMap = new HashMap<>();
-
-		freeKeySet = TreeRangeSet.create();
+		// Multiple callbacks can hold the data type manager's read lock. A failed table
+		// read must also leave the adapter uninitialized so the next lookup can retry.
+		Map<String, Byte> nameToId = new HashMap<>();
+		Map<Byte, String> idToName = new HashMap<>();
+		TreeRangeSet<Byte> freeKeys = TreeRangeSet.create();
 		int nextKey = FIRST_CALLING_CONVENTION_ID;
 		RecordIterator iterator = callingConventionTable.iterator();
 		while (iterator.hasNext()) {
@@ -123,17 +125,20 @@ class CallingConventionDBAdapterV0 extends CallingConventionDBAdapter {
 
 			byte id = (byte) rec.getKey();
 			String name = rec.getString(V0_CALLING_CONVENTION_NAME_COL);
-			callingConventionIDToNameMap.put(id, name);
-			callingConventionNameToIDMap.put(name, id);
+			idToName.put(id, name);
+			nameToId.put(name, id);
 
 			if (nextKey != id) {
-				freeKeySet.add(Range.closed((byte) nextKey, (byte) (id - 1)));
+				freeKeys.add(Range.closed((byte) nextKey, (byte) (id - 1)));
 			}
 			nextKey = id + 1;
 		}
 		if (nextKey <= Byte.MAX_VALUE) {
-			freeKeySet.add(Range.closed((byte) nextKey, Byte.MAX_VALUE));
+			freeKeys.add(Range.closed((byte) nextKey, Byte.MAX_VALUE));
 		}
+		callingConventionIDToNameMap = idToName;
+		callingConventionNameToIDMap = nameToId;
+		freeKeySet = freeKeys;
 	}
 
 	@Override

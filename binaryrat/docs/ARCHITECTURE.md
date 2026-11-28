@@ -286,6 +286,14 @@ The source-built fork drops those join records at each native flush, so it
 prints every function as a new official decompiler process does, in any order.
 [Core patch](core-patches/decompiler-join-flush.md)
 
+Before decompiler workers start on a Program database, the extension loads
+its calling-convention and settings-name indexes under a short exclusive
+database lock. A reader on official 12.2 can otherwise see an incomplete
+index even when the Program revision stays constant. The standalone fork
+also protects direct readers after Ghidra invalidates either index.
+[Calling conventions](core-patches/calling-convention-cache.md) ·
+[Data settings](core-patches/settings-name-cache.md)
+
 Use identical binaries, CPU/RAM budgets, JVM heap, options and timeouts for
 paired repeated trials. Measure cold and warm caches separately. Separate import,
 auto-analysis, decompilation, inference and write-back/follow-on analysis: faster

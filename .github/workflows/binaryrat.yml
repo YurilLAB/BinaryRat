@@ -461,6 +461,40 @@ jobs:
         timeout-minutes: 1
         run: echo "Each check below runs unless setup or a check whose output it reads failed."
       - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
+        name: Test simultaneous cold reads of calling conventions and settings
+        timeout-minutes: 15
+        shell: python
+        run: |
+          import os, shutil, subprocess
+          from pathlib import Path
+          from xml.etree import ElementTree
+          wrapper = Path("gradlew.bat" if os.name == "nt" else "gradlew").resolve()
+          reports = Path("Ghidra/Framework/SoftwareModeling/build/test-results/test")
+          suites = {
+              "ghidra.program.database.data.CallingConventionDBAdapterV0Test":
+                  "testColdReadersSeeStoredNameBeforeAndAfterInvalidation",
+              "ghidra.program.database.data.SettingsDBAdapterV1Test":
+                  "testConcurrentNameLookupOnColdAndReloadedIndex",
+          }
+          # The preceding source build compiled every processor. These DB tests use an in-memory table.
+          command = [str(wrapper), ":SoftwareModeling:test", "-x", ":allSleighCompile",
+                     "--max-workers=2", "--no-daemon"]
+          for suite in suites:
+              (reports / f"TEST-{suite}.xml").unlink(missing_ok=True)
+              command.extend(["--tests", suite])
+          subprocess.run(command, check=True)
+          evidence = Path("build/reports/database-concurrency")
+          evidence.mkdir(parents=True, exist_ok=True)
+          for suite in suites:
+              shutil.copy2(reports / f"TEST-{suite}.xml", evidence)
+          # Ghidra configures Gradle to ignore test failures and undiscovered tests.
+          for suite, method in suites.items():
+              result = ElementTree.parse(reports / f"TEST-{suite}.xml").getroot()
+              cases = [(case.get("classname"), case.get("name")) for case in result.findall("testcase")]
+              if cases != [(suite, method)] or any(result.find(f".//{tag}") is not None
+                                                    for tag in ("failure", "error", "skipped")):
+                  raise SystemExit(f"Cold database lookup regression failed: {suite}.{method}")
+      - if: ${{ !cancelled() && steps.ready.outcome == 'success' }}
         name: Open a saved Ghidra investigation in the source-built fork
         timeout-minutes: 20
         shell: python

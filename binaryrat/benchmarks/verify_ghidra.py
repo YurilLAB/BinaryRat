@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -592,23 +593,80 @@ def validate_stock_audit(proof: dict, output: Path, count: int, requested: int, 
 def validate_verified_cache(proof: dict, count: int, state: str) -> None:
     """Every reused candidate must still receive a fresh ordered stock reference."""
     cache = proof.get("candidate_cache")
-    if not isinstance(cache, dict) or cache.get("enabled") is not True:
-        raise ValueError("expected an enabled verified-export cache")
+    cache_enabled = state != "disabled"
+    if not isinstance(cache, dict) or cache.get("enabled") is not cache_enabled:
+        raise ValueError(f"unexpected cache configuration for {state} verified export")
     keys = ("hits", "replayed", "misses", "stored", "store_rejected")
     if any(type(cache.get(key)) is not int or cache[key] < 0 for key in keys):
         raise ValueError("invalid verified-export cache counters")
     leases = proof.get("candidate_compute_leases")
+    if type(leases) is not int or proof.get("reference_watched_leases") != count:
+        raise ValueError("missing candidate lease count or watched stock reference")
+    if state == "disabled":
+        if leases != count or any(cache[key] for key in keys):
+            raise ValueError("uncached verified export must compute every candidate")
+        return
     reused = cache["hits"] + cache["replayed"]
-    if (type(leases) is not int or leases != cache["misses"] or leases + reused != count or
+    if (leases != cache["misses"] or leases + reused != count or
             cache["stored"] != leases or cache["store_rejected"] != 0):
         raise ValueError("verified-export cache outcomes do not account for all candidates")
-    if proof.get("reference_watched_leases") != count:
-        raise ValueError("a cached candidate bypassed its ordered stock reference")
     if (state == "cold" and reused == 0) or (state == "warm" and cache["replayed"] == count):
         return
     if state == "edited" and leases > 0 and cache["replayed"] > 0:
         return
     raise ValueError(f"unexpected {state} verified-export cache evidence")
+
+
+def require_same_verified_export(candidate: Path, stock: Path, log: Path) -> None:
+    """Keep both small fixture exports as CI evidence only when their bytes differ."""
+    paths = (("candidate", candidate), ("stock", stock))
+    for tag, _ in paths:
+        log.with_suffix(f".{tag}.jsonl").unlink(missing_ok=True)
+    missing = [path.name for _, path in paths if not path.is_file()]
+    if missing:
+        for tag, path in paths:
+            if path.is_file():
+                shutil.copyfile(path, log.with_suffix(f".{tag}.jsonl"))
+        raise RuntimeError(f"missing export {', '.join(missing)}; see {log}")
+    offset = first_differing_byte(candidate, stock)
+    if offset is None:
+        return
+    for tag, path in paths:
+        shutil.copyfile(path, log.with_suffix(f".{tag}.jsonl"))
+    with candidate.open("rb") as left, stock.open("rb") as right:
+        for number, (candidate_line, stock_line) in enumerate(zip_longest(left, right), 1):
+            if candidate_line == stock_line:
+                continue
+            if candidate_line is None or stock_line is None:
+                detail = "candidate missing row" if candidate_line is None else "stock missing row"
+            else:
+                detail = "row encoding or line ending"
+                try:
+                    actual, expected = json.loads(candidate_line), json.loads(stock_line)
+                    if isinstance(actual, dict) and isinstance(expected, dict):
+                        keys = sorted(k for k in actual.keys() | expected.keys()
+                                      if k not in actual or k not in expected or actual[k] != expected[k])
+                        if keys:
+                            address = f"{expected.get('address_space')}:{expected.get('address')}"
+                            detail = f"{address} fields {', '.join(keys)}"
+                except ValueError:
+                    detail = "invalid JSON row"
+            raise RuntimeError(f"verified export differs from stock at byte {offset}, row {number} "
+                               f"({detail}); see {log} and its adjacent JSONL files")
+
+
+def check_verified_run(result: dict, log: Path, stock: Path, *candidates: Path) -> str:
+    contents = log.read_text(encoding="utf-8", errors="replace")
+    for candidate in candidates:
+        require_same_verified_export(candidate, stock, log)
+    if result["returncode"]:
+        raise RuntimeError(f"headless verifier exited {result['returncode']}; see {log}")
+    for line in contents.splitlines():
+        if "Unexpected Exception:" in line and "(DecompileProcess)" in line:
+            raise RuntimeError(f"decompiler callback failed: {line}; see {log}")
+    if "BinaryRat stock verification passed:" not in contents:
+        raise RuntimeError(f"stock audit did not complete; see {log}")
+    return contents
 
 
 def check_stock_verified(headless: Path, binary: Path, scripts: Path, destination: Path,
@@ -625,50 +683,58 @@ def check_stock_verified(headless: Path, binary: Path, scripts: Path, destinatio
         single = workspace / "single-worker.jsonl"
         log = destination / "stock-verified.log"
         cache_env = environment | {"BINARYRAT_CACHE_DIR": str(workspace / "verified cache")}
-        measured = measured_run(project + ["-import", str(binary)] +
-                                script(verified, "stock-verified") +
+        import_log = destination / "stock-verified-import.log"
+        uncached_env = {key: value for key, value in environment.items() if key != "BINARYRAT_CACHE_DIR"}
+        uncached, import_stock = workspace / "uncached.jsonl", workspace / "import.stock.jsonl"
+        digest = sha256(binary)
+        prepare_probe = ["-postScript", "BinaryRatCallingConventionProbe.java", "prepare", digest]
+        imported = measured_run(project + ["-import", str(binary)] + script(uncached, "stock-verified") +
+                                script(import_stock, "serial") + prepare_probe, import_log, timeout, uncached_env)
+        import_text = check_verified_run(imported, import_log, import_stock, uncached)
+        if "REPORT: Import succeeded" not in import_text or "BINARYRAT_CONVENTIONS_PREPARED" not in import_text:
+            raise RuntimeError(f"fixture import or calling convention preparation did not complete; see {import_log}")
+        uncached_count = sum(1 for _ in load_export(uncached))
+        uncached_proof = json.loads(Path(str(uncached) + ".parity.json").read_text(encoding="utf-8"))
+        validate_stock_audit(uncached_proof, uncached, uncached_count, 2)
+        validate_verified_cache(uncached_proof, uncached_count, "disabled")
+        require_overlap = environment.get("BINARYRAT_REQUIRE_VERIFIED_OVERLAP") == "1"
+        if require_overlap and uncached_proof["execution"] != "overlapped":
+            raise RuntimeError(f"the uncached multi-worker verified export did not overlap; see {import_log}")
+        process = project + ["-process", binary.name, "-noanalysis"]
+        read_only = process + ["-readOnly"]
+        measured = measured_run(read_only + script(verified, "stock-verified") +
                                 script(single, "stock-verified", 1) + script(reference, "serial"),
                                 log, timeout, cache_env)
-        if (measured["returncode"] or "BinaryRat stock verification passed:" not in
-                log.read_text(encoding="utf-8", errors="replace") or
-                first_differing_byte(verified, reference) is not None or
-                first_differing_byte(single, reference) is not None):
-            raise RuntimeError(f"stock-verified export did not match the independent stock pass; see {log}")
+        check_verified_run(measured, log, reference, verified, single)
         rows = list(load_export(verified))
         proof = json.loads(Path(str(verified) + ".parity.json").read_text(encoding="utf-8"))
         single_proof = json.loads(Path(str(single) + ".parity.json").read_text(encoding="utf-8"))
         validate_stock_audit(proof, verified, len(rows), 2)
         validate_stock_audit(single_proof, single, len(rows), 1)
-        if not rows or not all(row.successful for row in rows):
+        if not rows or len(rows) != uncached_count or not all(row.successful for row in rows):
             raise RuntimeError(f"verified fixture missing decompilation results; see {log}")
         validate_verified_cache(proof, len(rows), "cold")
         validate_verified_cache(single_proof, len(rows), "warm")
-        if environment.get("BINARYRAT_REQUIRE_VERIFIED_OVERLAP") == "1" and proof["execution"] != "overlapped":
+        if require_overlap and proof["execution"] != "overlapped":
             raise RuntimeError(f"the required multi-worker verified export did not overlap; see {log}")
 
-        original = next((row for row in rows if row.function.name.startswith("FUN_") and
-                         re.search(r"\b" + re.escape(row.function.name) + r"\s*\(", row.c)), None)
+        # Most stripped fixtures contain default function names. Fully named PE builds
+        # also occur. Prefer a substantial named body in that case; the editing script
+        # independently rejects external functions and thunks before the only mutation.
+        named = [row for row in rows if re.search(r"\b" + re.escape(row.function.name) + r"\s*\(", row.c)]
+        original = next((row for row in named if row.function.name.startswith("FUN_")), None)
+        if original is None:
+            original = max(named, key=lambda row: len(row.c), default=None)
         if original is None:
             raise RuntimeError(f"expected a local function visibly named in its own C output; see {log}")
-        digest = sha256(binary)
         renamed = "binaryrat_reopened_" + digest[:16]
-        process = project + ["-process", binary.name, "-noanalysis"]
 
-        def reopened(state: str, *, edit_after: bool = False) -> tuple[dict, Path]:
+        def reopened(state: str) -> tuple[dict, Path]:
             output, stock = workspace / f"{state}.jsonl", workspace / f"{state}.stock.jsonl"
-            args = list(process) if edit_after else process + ["-readOnly"]
-            args += script(output, "stock-verified") + script(stock, "serial")
-            if edit_after:
-                entry = original.function.entry
-                args += ["-postScript", "BinaryRatCacheFixtureEdit.java", digest,
-                         entry.space, f"{entry.offset:x}", renamed]
+            args = read_only + script(output, "stock-verified") + script(stock, "serial")
             run_log = destination / f"stock-verified-{state}.log"
             result = measured_run(args, run_log, timeout, cache_env)
-            contents = run_log.read_text(encoding="utf-8", errors="replace")
-            if (result["returncode"] or "BinaryRat stock verification passed:" not in contents or
-                    first_differing_byte(output, stock) is not None or
-                    (edit_after and f"BinaryRat fixture function renamed: {renamed}" not in contents)):
-                raise RuntimeError(f"{state} cache did not preserve fresh stock bytes; see {run_log}")
+            check_verified_run(result, run_log, stock, output)
             audit = json.loads(Path(str(output) + ".parity.json").read_text(encoding="utf-8"))
             validate_stock_audit(audit, output, len(rows), 2)
             validate_verified_cache(audit, len(rows), state)
@@ -676,7 +742,14 @@ def check_stock_verified(headless: Path, binary: Path, scripts: Path, destinatio
                 raise RuntimeError(f"verified execution mode changed across cache checks; see {run_log}")
             return audit, output
 
-        warm, published = reopened("warm", edit_after=True)
+        warm, published = reopened("warm")
+        entry = original.function.entry
+        edit_log = destination / "stock-verified-edit.log"
+        edit = ["-postScript", "BinaryRatCacheFixtureEdit.java", digest, entry.space, f"{entry.offset:x}", renamed]
+        changed_project = measured_run(process + edit, edit_log, timeout, environment)
+        edit_text = edit_log.read_text(encoding="utf-8", errors="replace")
+        if changed_project["returncode"] or f"BinaryRat fixture function renamed: {renamed}" not in edit_text:
+            raise RuntimeError(f"fixture rename did not complete; see {edit_log}")
         edited, changed = reopened("edited")
         fresh = next((row for row in load_export(changed) if row.function.entry == original.function.entry), None)
         if (fresh is None or fresh.function.body_sha256 != original.function.body_sha256 or
@@ -686,12 +759,11 @@ def check_stock_verified(headless: Path, binary: Path, scripts: Path, destinatio
 
         sidecar = Path(str(published) + ".parity.json")
         previous = (sha256(published), sha256(sidecar))
-        process += ["-readOnly"]
         # All candidates can now replay. The fresh stock reference must still run under
         # its deadline, both when it shares the work interval and when it borrows one slot.
         for workers in (1, 2):
             stop_log = destination / f"stock-verified-stopped-{workers}.log"
-            measured_run(process + script(published, "stock-verified", workers), stop_log, timeout,
+            measured_run(read_only + script(published, "stock-verified", workers), stop_log, timeout,
                          cache_env | {"BINARYRAT_LEASE_TIMEOUT_MS": "1"})
             stop_text = stop_log.read_text(encoding="utf-8", errors="replace")
             if ("Cannot verify interrupted leases: stock at" not in stop_text or
@@ -704,13 +776,16 @@ def check_stock_verified(headless: Path, binary: Path, scripts: Path, destinatio
         blocked.write_bytes(b"existing export\n")
         Path(str(blocked) + ".parity.json").mkdir()
         blocked_log = destination / "stock-verified-report-collision.log"
-        measured_run(process + script(blocked, "stock-verified"), blocked_log, timeout, environment)
+        verify_probe = ["-postScript", "BinaryRatCallingConventionProbe.java"]
+        measured_run(read_only + verify_probe + script(blocked, "stock-verified"), blocked_log, timeout, uncached_env)
         content = blocked_log.read_text(encoding="utf-8", errors="replace")
+        if "BINARYRAT_CONCURRENT_CONVENTIONS_PASS" not in content:
+            raise RuntimeError(f"concurrent first reads of persisted calling conventions failed; see {blocked_log}")
         if ("Choose a regular output file:" not in content or "BinaryRat export starting" in content or
                 blocked.read_bytes() != b"existing export\n"):
             raise RuntimeError(f"invalid parity report destination was not rejected; see {blocked_log}")
-    return {**proof, "single_worker": single_proof, "reopened": warm, "after_edit": edited,
-            "exact_independent_stock_bytes": True,
+    return {**proof, "uncached": uncached_proof, "single_worker": single_proof, "reopened": warm, "after_edit": edited,
+            "exact_independent_stock_bytes": True, "concurrent_convention_reads": True,
             "interrupted_export_preserved": True, "report_collision_rejected": True}
 
 

@@ -3,6 +3,7 @@
 package binaryrat;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
@@ -14,6 +15,9 @@ import java.util.function.Consumer;
 import com.google.gson.JsonObject;
 
 import ghidra.app.decompiler.DecompInterface;
+import ghidra.program.database.ProgramDB;
+import ghidra.program.database.data.DataTypeManagerDB;
+import ghidra.program.database.data.ProgramBasedDataTypeManagerDB;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.util.task.CancelledListener;
@@ -58,8 +62,95 @@ public final class ScheduledDecompiler implements AutoCloseable {
 	private final AtomicLong leases = new AtomicLong();
 	private volatile IOException releaseFailure;
 
+	/** Prepare stock 12.2's lazy name tables before any callback or cache replay.
+	 * In ProgramDB this is the data type manager's own lock. Exclude other readers
+	 * only while loading the name indexes; no Program change or transaction. */
+	record PreparedProgram(Program program, long revision) {
+		static PreparedProgram open(Program program) throws IOException {
+			if (program instanceof ProgramDB db) {
+				var lock = db.getLock();
+				if (lock.getReadHoldCount() != 0 && !lock.isWriteLockedByCurrentThread()) {
+					throw new IOException("Open a decompiler session outside the ProgramDB read lock");
+				}
+				try {
+					lock.writeLock().lockInterruptibly();
+				}
+				catch (InterruptedException interrupted) {
+					Thread.currentThread().interrupt();
+					throw new IOException("Interrupted while preparing calling conventions", interrupted);
+				}
+				try {
+					prepareSettings(db, DataTypeManagerDB.class, "settingsAdapter");
+					prepareSettings(db, ProgramBasedDataTypeManagerDB.class, "instanceSettingsAdapter");
+					return readConventions(program);
+				}
+				finally {
+					lock.writeLock().unlock();
+				}
+			}
+			return readConventions(program);
+		}
+
+		// 12.2 exposes no Program API for initializing both settings-name indexes.
+		// Warm the same adapters used by DataDB.getLong() when reading mutability;
+		// choosing a sample Data would miss types or addresses with no stored setting.
+		private static void prepareSettings(ProgramDB program, Class<?> owner, String fieldName) throws IOException {
+			try {
+				var field = owner.getDeclaredField(fieldName);
+				if (!field.trySetAccessible()) {
+					throw new IOException("Cannot access Ghidra's " + fieldName);
+				}
+				Object adapter = field.get(program.getDataTypeManager());
+				if (adapter == null || adapter.getClass().getSimpleName().equals("SettingsDBAdapterV0")) {
+					return; // No instance table, or the older format with inline names.
+				}
+				if (!adapter.getClass().getSimpleName().equals("SettingsDBAdapterV1")) {
+					throw new IOException("Unsupported Ghidra settings adapter: " + adapter.getClass().getName());
+				}
+				var load = adapter.getClass().getDeclaredMethod("initNameMaps");
+				if (!load.trySetAccessible()) {
+					throw new IOException("Cannot access Ghidra's settings-name initializer");
+				}
+				try {
+					load.invoke(adapter);
+				}
+				catch (InvocationTargetException failure) {
+					var error = new IOException("Could not initialize Ghidra settings names", failure.getCause());
+					// Unpatched V1 can leave partially filled indexes when the table read
+					// fails. Reset only those indexes before another session can retry.
+					try {
+						var clear = adapter.getClass().getDeclaredMethod("invalidateNameCache");
+						clear.setAccessible(true);
+						clear.invoke(adapter);
+					}
+					catch (ReflectiveOperationException | RuntimeException cleanupFailure) {
+						error.addSuppressed(cleanupFailure);
+					}
+					throw error;
+				}
+			}
+			catch (ReflectiveOperationException failure) {
+				throw new IOException("Cannot locate Ghidra's settings-name index " + fieldName, failure);
+			}
+		}
+
+		private static PreparedProgram readConventions(Program program) {
+			program.getDataTypeManager().getKnownCallingConventionNames();
+			return new PreparedProgram(program, program.getModificationNumber());
+		}
+	}
+
 	public ScheduledDecompiler(EngineClient engine, Program program,
 			Consumer<DecompInterface> configure, Limits limits) throws IOException {
+		this(engine, PreparedProgram.open(program), configure, limits);
+	}
+
+	ScheduledDecompiler(EngineClient engine, PreparedProgram prepared,
+			Consumer<DecompInterface> configure, Limits limits) throws IOException {
+		Program program = prepared.program();
+		if (program.getModificationNumber() != prepared.revision()) {
+			throw new IOException("Program changed while preparing the decompiler pool");
+		}
 		this.engine = engine;
 		this.limits = limits;
 		JsonObject request = new JsonObject();

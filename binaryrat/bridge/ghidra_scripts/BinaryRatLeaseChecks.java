@@ -14,6 +14,8 @@ import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -39,6 +41,9 @@ import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.decompiler.DecompiledFunction;
 import ghidra.app.script.GhidraScript;
+import ghidra.program.database.ProgramDB;
+import ghidra.program.database.data.DataTypeManagerDB;
+import ghidra.program.database.data.ProgramBasedDataTypeManagerDB;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.util.exception.CancelledException;
@@ -65,6 +70,7 @@ public class BinaryRatLeaseChecks extends GhidraScript {
         require(fixture != null, "fixture must contain an initialized function");
         checkSampleReader();
         checkExportPolicy(fixture.getEntryPoint());
+        checkLookupTables();
         checkVerificationOwnership(fixture);
         checkUnconfirmedReferenceExit(fixture);
         Path directory = Files.createTempDirectory("binaryrat-lease-check-");
@@ -175,6 +181,105 @@ public class BinaryRatLeaseChecks extends GhidraScript {
             }
         }
         println("BinaryRat lease lifecycle checks passed");
+    }
+
+    private void checkLookupTables() throws Exception {
+        var program = (ProgramDB) currentProgram;
+        var lock = program.getLock();
+        long revision = program.getModificationNumber();
+        var upgrade = new FutureTask<>(() -> {
+            try (var read = lock.read(); var session = DecompilationSession.open(program, 1, 60)) {
+                throw new AssertionError("attempted to upgrade an existing read lock");
+            }
+            catch (IOException refusal) {
+                return refusal.getMessage().contains("outside the ProgramDB read lock");
+            }
+        });
+        Thread.ofPlatform().name("binaryrat-read-lock-upgrade").daemon().start(upgrade);
+        try {
+            require(upgrade.get(10, TimeUnit.SECONDS), "refuse read-to-write upgrade without deadlock");
+        }
+        finally {
+            upgrade.cancel(true);
+        }
+
+        var waiting = new FutureTask<>(() -> {
+            try (var session = DecompilationSession.open(program, 1, 60)) {
+                throw new AssertionError("opened while another reader held the convention table");
+            }
+            catch (IOException stopped) {
+                return stopped.getCause() instanceof InterruptedException && Thread.currentThread().isInterrupted();
+            }
+        });
+        try (var read = lock.read()) {
+            Thread thread = Thread.ofPlatform().name("binaryrat-queued-convention-reader").daemon().start(waiting);
+            try {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                while (!lock.hasQueuedThread(thread) && !waiting.isDone() && System.nanoTime() < deadline) {
+                    Thread.sleep(5);
+                }
+                require(lock.hasQueuedThread(thread), "other Program readers exclude convention initialization");
+                thread.interrupt();
+                require(waiting.get(10, TimeUnit.SECONDS), "interrupted open retains its cause and thread status");
+            }
+            finally {
+                waiting.cancel(true);
+            }
+        }
+        // Both the default datatype and per-address settings adapters are V1 in the
+        // disposable 12.2 fixture. Exercise a truly cold cache even after auto-analysis.
+        var manager = program.getDataTypeManager();
+        var adapters = List.of(readField(manager, DataTypeManagerDB.class, "settingsAdapter"),
+            readField(manager, ProgramBasedDataTypeManagerDB.class, "instanceSettingsAdapter"));
+        try (var exclusive = lock.write()) {
+            for (Object adapter : adapters) {
+                var type = adapter.getClass();
+                var clear = type.getDeclaredMethod("invalidateNameCache");
+                clear.setAccessible(true);
+                clear.invoke(adapter);
+                require(readField(adapter, type, "nameIndexMap") == null &&
+                    readField(adapter, type, "nameStringMap") == null, "start with cold settings names");
+            }
+            // Make the first table unavailable after the stock adapter allocates its
+            // two maps. No database record is changed, and other readers are excluded.
+            Object defaults = adapters.getFirst();
+            var type = defaults.getClass();
+            var tableField = type.getDeclaredField("settingsNameTable");
+            tableField.setAccessible(true);
+            Object table = tableField.get(defaults);
+            tableField.set(defaults, null);
+            try (var session = DecompilationSession.open(program, 1, 60)) {
+                throw new AssertionError("started with a failed settings-name lookup");
+            }
+            catch (IOException failure) {
+                require(failure.getCause() instanceof NullPointerException &&
+                    readField(defaults, type, "nameIndexMap") == null &&
+                    readField(defaults, type, "nameStringMap") == null,
+                    "failed settings load retains the cause and leaves both indexes retryable");
+            }
+            finally {
+                tableField.set(defaults, table);
+            }
+        }
+        try (var session = DecompilationSession.open(program, 1, 60); var read = lock.read()) {
+            for (Object adapter : adapters) {
+                var type = adapter.getClass();
+                var byIndex = (Map<?, ?>) readField(adapter, type, "nameIndexMap");
+                var byName = (Map<?, ?>) readField(adapter, type, "nameStringMap");
+                var table = (db.Table) readField(adapter, type, "settingsNameTable");
+                require(byIndex != null && byName != null && byIndex.size() == table.getRecordCount() &&
+                    byName.size() == byIndex.size(), "both settings name indexes populated before callbacks");
+                var records = table.iterator();
+                while (records.hasNext()) {
+                    var record = records.next();
+                    short key = (short) record.getKey();
+                    String name = record.getString(0);
+                    require(name.equals(byIndex.get(key)) && Short.valueOf(key).equals(byName.get(name)),
+                        "setting name resolves in both directions");
+                }
+            }
+            require(program.getModificationNumber() == revision, "preparing decompiler lookups preserves the Program");
+        }
     }
 
     private void checkVerificationOwnership(Function fixture) throws Exception {
