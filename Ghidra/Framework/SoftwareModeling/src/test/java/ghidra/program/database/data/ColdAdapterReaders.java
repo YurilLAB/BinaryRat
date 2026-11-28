@@ -1,4 +1,5 @@
 /* Copyright 2026 YurilLAB
+ * IP: Apache License 2.0
  * SPDX-License-Identifier: Apache-2.0
  */
 package ghidra.program.database.data;
