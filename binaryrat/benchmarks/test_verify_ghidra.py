@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import verify_ghidra
 
@@ -76,6 +76,33 @@ class SavedProjectTests(unittest.TestCase):
 
 
 class ProcessMeasurementTests(unittest.TestCase):
+    def test_concurrent_exports_report_shared_process_tree_rss_until_each_finishes(self):
+        lines = iter((
+            "BinaryRat export starting mode=scheduled",
+            "BinaryRat export starting mode=serial",
+            "BinaryRat exported functions=2 mode=scheduled workers=1 excluded_external=0 elapsed_seconds=1",
+            "BinaryRat exported functions=2 mode=serial workers=1 excluded_external=0 elapsed_seconds=1",
+        ))
+        def spawn(args, *, stdout, **kwargs):
+            def poll():
+                line = next(lines, None)
+                if line is None:
+                    return 0
+                stdout.write((line + "\n").encode())
+                stdout.flush()
+                return None
+            return Mock(pid=1, poll=poll, returncode=0)
+
+        root = Mock()
+        root.children.return_value = []
+        root.memory_info.side_effect = [Mock(rss=rss) for rss in (100, 300, 200, 400)]
+        with tempfile.TemporaryDirectory() as directory, patch.object(subprocess, "Popen", side_effect=spawn), \
+             patch.object(verify_ghidra.psutil, "Process", return_value=root), patch("time.sleep"):
+            report = verify_ghidra.measured_run([], Path(directory) / "overlap.log", 10)
+        self.assertEqual(report["phase_sampled_process_tree_peak_rss_bytes"],
+                         {"scheduled": 100, "scheduled+serial": 300, "serial": 200})
+        self.assertEqual(report["sampled_process_tree_peak_rss_bytes"], 400)
+
     def test_denied_process_list_still_times_out_and_reaps_root(self):
         children = []
         spawn = subprocess.Popen
@@ -216,6 +243,27 @@ class KnownStockFailureTests(unittest.TestCase):
 
 
 class ScheduledEvidenceTests(unittest.TestCase):
+    def test_verified_cache_requires_complete_candidate_and_reference_evidence(self):
+        for state, replays, misses in (("cold", 0, 4), ("warm", 4, 0), ("edited", 3, 1)):
+            proof = {"candidate_cache": {"enabled": True, "hits": 0, "replayed": replays,
+                                         "misses": misses, "stored": misses, "store_rejected": 0},
+                     "candidate_compute_leases": misses, "execution": "overlapped",
+                     "reference_watched_leases": 4}
+            with self.subTest(state=state):
+                verify_ghidra.validate_verified_cache(proof, 4, state)
+            for key, value in (("reference_watched_leases", 3), ("candidate_compute_leases", True),
+                               ("candidate_compute_leases", misses + 1)):
+                with self.subTest(state=state, key=key, value=value), self.assertRaises(ValueError):
+                    verify_ghidra.validate_verified_cache(proof | {key: value}, 4, state)
+        for state, observed in (("warm", (0, 4)), ("edited", (4, 0)), ("cold", (1, 3))):
+            replays, misses = observed
+            proof = {"candidate_cache": {"enabled": True, "hits": 0, "replayed": replays,
+                                         "misses": misses, "stored": misses, "store_rejected": 0},
+                     "candidate_compute_leases": misses, "execution": "overlapped",
+                     "reference_watched_leases": 4}
+            with self.subTest(state=state, observed=observed), self.assertRaises(ValueError):
+                verify_ghidra.validate_verified_cache(proof, 4, state)
+
     def test_disabled_cold_warm_and_refused_account_for_every_function(self):
         with tempfile.TemporaryDirectory() as directory:
             for state, leases in (("disabled", 2), ("cold", 2), ("warm", 0), ("refused", 2)):

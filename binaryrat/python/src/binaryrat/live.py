@@ -282,6 +282,55 @@ def _general_register(register: Any, base_names: set[str]) -> bool:
             and str(register.getBaseRegister().getName()).upper() in base_names)
 
 
+def _arithmetic_service() -> Any:
+    from ghidra.framework import Application
+    from jpype import JClass
+
+    if Application.getModuleRootDir("BinaryRat") is None:
+        return None
+    try:
+        return JClass("binaryrat.ArithmeticExplanation")
+    except TypeError:
+        # Earlier BinaryRat extension releases predate this service.
+        return None
+
+
+def _shared_arithmetic(service: Any, program: Any, first: Any, last: Any, register: Any,
+                       target: PcodeVarnode, info: ProgramInfo, cancel: Event | None) -> ArithmeticExpression:
+    from ghidra.util.exception import CancelledException
+    from java.lang import IllegalArgumentException
+    from .arithmetic import MAX_NODES, ArithmeticExpression, ArithmeticRefusal, ExpressionNode
+
+    name = str(register.getName())
+    with _monitor(cancel) as monitor:
+        try:
+            result = service.explain(program, first, last, name, info.revision, monitor)
+        except CancelledException as cause:
+            raise CancelledError("BinaryRat arithmetic explanation cancelled") from cause
+        except service.Unsupported as cause:
+            raise ArithmeticRefusal(str(cause.getMessage())) from cause
+        except IllegalArgumentException as cause:
+            raise ValueError(str(cause.getMessage())) from cause
+    if int(result.revision()) != info.revision:
+        raise StaleProgramError("Arithmetic explanation belongs to a different Program revision")
+    rows = result.nodes()
+    if str(result.targetRegister()) != name or not 1 <= rows.size() <= MAX_NODES:
+        raise LiveProgramError("Invalid target or node count from the arithmetic service")
+    nodes = []
+    for row in rows:
+        _check_cancel(cancel)
+        op, size = str(row.operation()), int(row.size())
+        if op == "INPUT":
+            node = ExpressionNode(op, size, register=PcodeVarnode(_address(row.storage()), size))
+        elif op == "CONSTANT":
+            node = ExpressionNode(op, size, value=int(str(row.value()), 16))
+        else:
+            node = ExpressionNode(op, size, tuple(map(int, row.arguments())), site=_address(row.site()),
+                                  sequence=int(row.sequence()) & 0xffffffff)
+        nodes.append(node)
+    return ArithmeticExpression(tuple(nodes), int(result.root()), target, info.language_id)
+
+
 def _function(value: Any) -> ProgramFunction:
     return ProgramFunction(
         str(value.getName()),
@@ -519,6 +568,7 @@ class ProgramView:
 
         Both endpoints are inclusive instruction starts. The expression uses the effective
         p-code at this Program revision and takes its register inputs at entry to the range.
+        A current BinaryRat installation uses the same service as the CodeBrowser action.
         """
         from jpype import JException
         from .arithmetic import MAX_INSTRUCTIONS, MAX_OPERATIONS, ArithmeticRefusal, build_expression
@@ -544,6 +594,10 @@ class ProgramView:
                 if not _general_register(selected, base_names):
                     raise ArithmeticRefusal("select a byte-aligned general-purpose register")
                 target = PcodeVarnode(_address(selected.getAddress()), int(selected.getNumBytes()))
+                service = _arithmetic_service()
+                if service is not None:
+                    return _shared_arithmetic(service, program, first, last, selected, target,
+                                              self.info, self._cancel)
                 listing = program.getListing()
                 if listing.getInstructionAt(last) is None:
                     raise ValueError(f"end is not a defined instruction start: {end}")

@@ -60,6 +60,12 @@
   <li>Choose <b>Override Call Prototype</b> again to see the override and replace it. For an indirect call, the first suggestion comes from the decompiler’s view of the call’s arguments.</li>
   <li>Use <b>Open Interactive Decompiler</b> to open the selected function and address for token-level actions such as renaming, retyping, or splitting a variable.</li>
 </ol>
+<h2>Trace a register calculation</h2>
+<ol>
+  <li>In the Listing, select a contiguous range of complete x86-64 or AArch64 instructions that computes a register value. Choose <b>Tools → BinaryRat → Explain Selected Register Arithmetic</b>.</li>
+  <li>Choose the register whose final value you want to trace and click <b>Explain</b>. Read the highlighted result and follow its input value numbers up the table.</li>
+  <li>Double-click an operation or select it and press Enter. The Listing opens its instruction. The p-code order identifies the operation within that instruction. If you edit the Program, run the explanation again to refresh the evidence.</li>
+</ol>
 <h2>Choose analysis depth</h2>
 <ul>
   <li><b>Quick triage</b> defers debug information import, Function ID, signature inference, and PE RTTI where present.</li>
@@ -70,6 +76,7 @@
 <h2>Headless and version information</h2>
 <p>Use <code>binaryrat-headless</code> on Linux or <code>binaryrat-headless.bat</code> on Windows. Pass a project directory that already exists. The headless launcher runs the same extension without desktop configuration:</p>
 <pre>./binaryrat-headless /path/to/projects walkthrough -import help/examples/example -preScript BinaryRatProfile.java quick</pre>
+<p>A headless job started from the desktop inherits that BinaryRat profile's settings and cache directories. A script can select a different root for either directory with <code>XDG_CONFIG_HOME</code> or <code>XDG_CACHE_HOME</code>.</p>
 <p>Run <code>binaryrat --version</code> (or <code>binaryrat.bat --version</code>) for the packaged versions. <code>VERSION.txt</code> provides the same information. The archive includes a compatible JDK.</p>
 <h2>Optional Python tools</h2>
 <p>With Python 3.10 or later, install the BinaryRat wheel and the bundled PyGhidra dependencies into a virtual environment from the application directory:</p>

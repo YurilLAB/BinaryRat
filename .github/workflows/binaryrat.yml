@@ -255,6 +255,8 @@ jobs:
       - if: ${{ runner.os == 'Linux' && !cancelled() && steps.ready.outcome == 'success' }}
         name: Verify exact stock output on the pinned LLVM 19 large-binary sample
         timeout-minutes: 20
+        env:
+          BINARYRAT_REQUIRE_VERIFIED_OVERLAP: '1'
         shell: bash
         run: |
           archive=build/llvm19-fixture/libllvm19.deb
@@ -270,6 +272,8 @@ jobs:
         id: parity
         name: Stock versus BinaryRat Ghidra integration and benchmark evidence
         timeout-minutes: 110
+        env:
+          BINARYRAT_REQUIRE_VERIFIED_OVERLAP: '1'
         run: python binaryrat/benchmarks/verify_ghidra.py --ghidra build/ghidra/ghidra_12.2_PUBLIC --corpus build/corpus/manifest.json --output build/ghidra-report --workers 1 2 4 --repetitions 1 --engine ${{ github.workspace }}/build/binaryrat/${{ runner.os == 'Windows' && 'Release/binaryrat-engine.exe' || 'binaryrat-engine' }}
       - if: ${{ !cancelled() && steps.parity.outcome == 'success' && steps.extension.outcome == 'success' }}
         name: Verify BinaryRat analyst commands against real exports and layout evidence

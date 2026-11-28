@@ -19,12 +19,14 @@ import ghidra.program.flatapi.FlatProgramAPI;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.ArrayDataType;
 import ghidra.program.model.data.CategoryPath;
+import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.DataTypePath;
 import ghidra.program.model.data.IntegerDataType;
 import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.PointerDataType;
 import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.StructureDataType;
+import ghidra.program.model.data.TypedefDataType;
 import ghidra.program.model.data.Undefined;
 import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.lang.CompilerSpecID;
@@ -242,6 +244,15 @@ public class BinaryRatSummaryWriteBackProof extends GhidraScript {
 				SourceType.ANALYSIS);
 		});
 		requireRefused(recover(), "already has a specific pointer type");
+		DataType handle = protectNamedPointee("DeviceHandle", VoidDataType.dataType);
+		protectNamedPointee("InputHandle", handle);
+		protectNamedPointee("RawCell", Undefined.getUndefinedDataType(1));
+		program.withTransaction("Restore an untyped pointer", () -> {
+			var types = program.getDataTypeManager();
+			function().getParameter(0).setDataType(PointerDataType.getPointer(null, types),
+				SourceType.ANALYSIS);
+		});
+		review();
 		program.withTransaction("Install a sized opaque pointer", () -> {
 			var array = new ArrayDataType(Undefined.getUndefinedDataType(1), 32, 1);
 			function().getParameter(0).setDataType(
@@ -263,6 +274,24 @@ public class BinaryRatSummaryWriteBackProof extends GhidraScript {
 		program.withTransaction("Remove disposable collision", () ->
 			program.getDataTypeManager().remove(List.of(program.getDataTypeManager().getDataType(PATH)), monitor));
 		checkUnapplied(program);
+	}
+
+	private DataType protectNamedPointee(String name, DataType base) throws Exception {
+		var named = new DataTypePath(new CategoryPath("/Analyst"), name);
+		var types = program.getDataTypeManager();
+		program.withTransaction("Install a named opaque handle", () -> {
+			var alias = types.addDataType(new TypedefDataType(named.getCategoryPath(), name, base), null);
+			function().getParameter(0).setDataType(PointerDataType.getPointer(alias, types),
+				SourceType.ANALYSIS);
+		});
+		long revision = program.getModificationNumber();
+		requireRefused(recover(), "already has a specific pointer type");
+		var current = (Pointer) function().getParameter(0).getFormalDataType();
+		require(program.getModificationNumber() == revision &&
+			current.getDataType().getDataTypePath().equals(named) && types.getDataType(PATH) == null &&
+			program.getOptions(JOURNAL).getString(TYPE_NAME, null) == null,
+			"review changed the named pointer, destination, or provenance");
+		return types.getDataType(named);
 	}
 
 	private void refuseStaleAndBusyReview() throws Exception {

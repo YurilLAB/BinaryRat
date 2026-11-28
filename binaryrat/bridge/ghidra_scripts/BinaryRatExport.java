@@ -22,6 +22,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.DigestOutputStream;
 import java.security.MessageDigest;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -50,7 +51,6 @@ import binaryrat.EngineClient;
 import binaryrat.LiveDecompileCache;
 import binaryrat.ScheduledDecompiler;
 import ghidra.app.decompiler.DecompInterface;
-import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.decompiler.parallel.DecompilerCallback;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
@@ -310,12 +310,7 @@ public class BinaryRatExport extends GhidraScript {
     }
 
     private void configure(DecompInterface decompiler, Mode mode) {
-        DecompileOptions options = new DecompileOptions();
-        options.grabFromProgram(currentProgram);
-        decompiler.setOptions(options);
-        decompiler.setSimplificationStyle("decompile");
-        decompiler.toggleCCode(true);
-        decompiler.toggleSyntaxTree(mode.syntaxTree());
+        DecompilationSession.configureDecompiler(decompiler, currentProgram, mode.syntaxTree());
     }
 
     private boolean exported(Function function) {
@@ -443,6 +438,9 @@ public class BinaryRatExport extends GhidraScript {
     static final class StockParityAudit {
         private final BufferedReader candidate;
         private final JsonArray fallbackSample = new JsonArray();
+        private JsonObject schedule;
+        private long watchedReferences;
+        private String fallbackReason;
         private long matches;
         private long fallbacks;
 
@@ -469,15 +467,33 @@ public class BinaryRatExport extends GhidraScript {
                     actual.get("failed_to_start").getAsBoolean()) {
                 throw new IOException("Scheduled decompiler was interrupted at " + entry);
             }
+            fallback(entry);
+            return stock;
+        }
+
+        DecompOutput select(Address entry, DecompOutput stock, DecompOutput scheduled) throws IOException {
+            if (scheduled.timedOut() || scheduled.cancelled() || scheduled.failedToStart()) {
+                throw new IOException("Cannot verify interrupted leases: scheduled decompiler at " + entry);
+            }
+            // All seven decompiler fields participate in record equality. Both sides use the
+            // same Function and checked Program revision for the remaining JSONL inventory.
+            if (scheduled.equals(stock)) {
+                matches++;
+                return scheduled;
+            }
+            fallback(entry);
+            return stock;
+        }
+
+        private void fallback(Address entry) {
             fallbacks++;
             if (fallbackSample.size() < 32) {
                 fallbackSample.add(entry.toString(true));
             }
-            return stock;
         }
 
         JsonObject finish(byte[] digest) throws IOException {
-            if (candidate.readLine() != null) {
+            if (candidate != null && candidate.readLine() != null) {
                 throw new IOException("Scheduled export contains extra functions");
             }
             JsonObject result = new JsonObject();
@@ -487,6 +503,20 @@ public class BinaryRatExport extends GhidraScript {
             result.addProperty("stock_fallbacks", fallbacks);
             result.add("fallback_sample", fallbackSample);
             result.addProperty("output_sha256", HexFormat.of().formatHex(digest));
+            if (schedule != null) {
+                int admitted = schedule.getAsJsonObject("engine_configuration").get("workers").getAsInt();
+                boolean overlap = candidate == null;
+                result.addProperty("execution", overlap ? "overlapped" : "sequential");
+                if (!overlap) {
+                    result.addProperty("fallback_reason", fallbackReason);
+                }
+                result.addProperty("admitted_workers", admitted);
+                result.addProperty("candidate_workers", overlap ? admitted - 1 : admitted);
+                result.addProperty("peak_running", schedule.getAsJsonObject("engine_stats").get("peak_running").getAsLong());
+                result.addProperty("reference_watched_leases", watchedReferences);
+                result.add("candidate_compute_leases", schedule.get("leases"));
+                result.add("candidate_cache", schedule.getAsJsonObject("cache"));
+            }
             return result;
         }
     }
@@ -495,16 +525,28 @@ public class BinaryRatExport extends GhidraScript {
             throws Exception {
         existingOutputs(output, ".parity.json");
         Path workspace = Files.createTempDirectory(output.getParent(), ".binaryrat-parity-");
-        try {
+        try (var verification = DecompilationSession.reserveStockVerification(currentProgram)) {
             Path candidate = workspace.resolve("scheduled.jsonl");
-            export(candidate, Mode.VERIFIED_CANDIDATE, workers, timeout, chunkSize);
-            if (summary.leases.keySet().stream().anyMatch(status -> !status.equals("completed"))) {
-                throw new IOException("Cannot verify interrupted leases: " + summary.leases);
+            JsonObject schedule;
+            try (var session = verification.openCandidates(workers, timeout)) {
+                if (verification.canOverlap()) {
+                    verification.openReference(monitor);
+                    export(output, Mode.VERIFIED_CANDIDATE, workers, timeout, chunkSize,
+                        new StockParityAudit(null), session, verification);
+                    return;
+                }
+                schedule = export(candidate, Mode.VERIFIED_CANDIDATE, workers, timeout, chunkSize,
+                    null, session, null);
             }
-            // Close the pool before starting the stock process. It must see all
-            // functions in the original order, even when a scheduled row is cached.
+            checkCandidateLeases();
+            // Reuse one admitted slot for the entire ordered pass. Existing ordinary handles
+            // can continue using any other slots and keep their own cache configuration.
+            verification.openReference(monitor);
             try (BufferedReader reader = Files.newBufferedReader(candidate, StandardCharsets.UTF_8)) {
-                export(output, Mode.SERIAL, workers, timeout, chunkSize, new StockParityAudit(reader));
+                var audit = new StockParityAudit(reader);
+                audit.schedule = schedule;
+                audit.fallbackReason = verification.fallbackReason();
+                export(output, Mode.SERIAL, workers, timeout, chunkSize, audit, null, verification);
             }
         }
         finally {
@@ -514,11 +556,11 @@ public class BinaryRatExport extends GhidraScript {
 
     private void export(Path output, Mode mode, int workers, int timeout, int chunkSize)
             throws Exception {
-        export(output, mode, workers, timeout, chunkSize, null);
+        export(output, mode, workers, timeout, chunkSize, null, null, null);
     }
 
-    private void export(Path output, Mode mode, int workers, int timeout, int chunkSize,
-            StockParityAudit audit)
+    private JsonObject export(Path output, Mode mode, int workers, int timeout, int chunkSize,
+            StockParityAudit audit, DecompilationSession verifiedSession, DecompilationSession.StockVerification verification)
             throws Exception {
         long exportStarted = System.nanoTime();
         checkEpoch();
@@ -529,7 +571,8 @@ public class BinaryRatExport extends GhidraScript {
         DecompInterface serialDecompiler = null;
         DecompilerCallback<String> callback = null;
         ExecutorService executor = null;
-        DecompilationSession session = null;
+        DecompilationSession session = verifiedSession;
+        boolean overlap = verifiedSession != null && verification != null;
         Path temporarySummary = null;
         JsonObject scheduleReport = null;
         boolean published = false;
@@ -554,14 +597,20 @@ public class BinaryRatExport extends GhidraScript {
                 activeWorkers = workers;
             }
             else if (mode == Mode.SCHEDULED || mode == Mode.VERIFIED_CANDIDATE) {
-                session = DecompilationSession.open(currentProgram, workers, timeout, mode.syntaxTree());
+                if (session == null) {
+                    session = DecompilationSession.open(currentProgram, workers, timeout, mode.syntaxTree());
+                }
                 summary = new ScheduleSummary(session.cacheEnabled());
-                activeWorkers = session.workers();
-                println("BinaryRat engine admitted workers=" + activeWorkers + " requested=" +
+                activeWorkers = session.workers() - (overlap ? 1 : 0);
+                println("BinaryRat engine admitted workers=" + session.workers() + " candidate_workers=" +
+                    activeWorkers + " requested=" +
                     workers + " configuration=" + session.configuration());
-                executor = Executors.newFixedThreadPool(workers);
+                executor = Executors.newFixedThreadPool(overlap ? activeWorkers : workers);
+                if (overlap) {
+                    println("BinaryRat export starting mode=serial");
+                }
             }
-            else {
+            else if (verification == null) {
                 serialDecompiler = new DecompInterface();
                 // Keep the serial reference on stock output settings, including its payload limit.
                 configure(serialDecompiler, mode);
@@ -598,14 +647,18 @@ public class BinaryRatExport extends GhidraScript {
                     }
                     // FunctionIterator is forward ordered; consume futures in that same
                     // order, independent of the order in which workers finish.
-                    if (executor != null) {
+                    if (overlap) {
+                        writeVerifiedChunk(functions, session, verification, executor, audit, writer);
+                        count += functions.size();
+                    }
+                    else if (executor != null) {
                         DecompilerCallback<String> activeCallback = callback;
                         DecompilationSession activeSession = session;
                         List<Future<String>> futures = new ArrayList<>(functions.size());
                         for (Function function : functions) {
                             futures.add(executor.submit(() -> activeSession == null ?
                                 activeCallback.process(function, monitor) :
-                                scheduledRecord(activeSession, function)));
+                                record(function, scheduledOutput(activeSession, function))));
                         }
                         for (Future<String> future : futures) {
                             String result = await(future);
@@ -620,14 +673,9 @@ public class BinaryRatExport extends GhidraScript {
                     else {
                         for (Function function : functions) {
                             checkEpoch();
-                            DecompileResults result =
-                                serialDecompiler.decompileFunction(function, timeout, monitor);
-                            if (audit != null && (result == null || result.isTimedOut() ||
-                                    result.isCancelled() || result.failedToStart())) {
-                                throw new IOException("Stock decompiler was interrupted at " +
-                                    function.getEntryPoint());
-                            }
-                            String row = record(function, result);
+                            String row = verification == null ?
+                                record(function, serialDecompiler.decompileFunction(function, timeout, monitor)) :
+                                record(function, referenceOutput(function, verification, audit));
                             writer.write(audit == null ? row : audit.select(function.getEntryPoint(), row));
                             writer.write('\n');
                             count++;
@@ -641,10 +689,18 @@ public class BinaryRatExport extends GhidraScript {
             if (sample != null && count != sample.size()) {
                 throw new IOException("Export did not cover every sampled function");
             }
-            JsonObject parityReport = audit == null ? null : audit.finish(digest.digest());
             if (session != null) {
                 scheduleReport = makeSummary(session, workers);
             }
+            if (overlap) {
+                checkCandidateLeases();
+                audit.schedule = scheduleReport;
+            }
+            if (verification != null) {
+                verification.releaseReference();
+                audit.schedule.add("engine_stats", verification.stats());
+            }
+            JsonObject parityReport = audit == null ? null : audit.finish(digest.digest());
             JsonObject outputReport = audit == null ? scheduleReport : parityReport;
             if (outputReport != null) {
                 temporarySummary = Files.createTempFile(output.getParent(), ".binaryrat-schedule-", ".json.tmp");
@@ -673,10 +729,17 @@ public class BinaryRatExport extends GhidraScript {
             if (parityReport != null) {
                 println("BinaryRat stock verification passed: " + parityReport);
             }
+            double elapsed = (System.nanoTime() - exportStarted) / 1_000_000_000.0;
             println("BinaryRat exported functions=" + count + " mode=" + name +
                 " workers=" + activeWorkers + " excluded_external=" + excludedExternal +
-                " elapsed_seconds=" + ((System.nanoTime() - exportStarted) / 1_000_000_000.0) +
+                " elapsed_seconds=" + elapsed +
                 " output=" + output);
+            if (overlap) {
+                println("BinaryRat overlapped export: scheduled and serial cover the same wall-time interval");
+                println("BinaryRat exported functions=" + count + " mode=serial workers=1 excluded_external=" +
+                    excludedExternal + " elapsed_seconds=" + elapsed + " output=" + output);
+            }
+            return scheduleReport;
         }
         finally {
             if (executor != null) {
@@ -727,7 +790,50 @@ public class BinaryRatExport extends GhidraScript {
         }
     }
 
-    private String scheduledRecord(DecompilationSession session, Function function)
+    private void checkCandidateLeases() throws IOException {
+        if (summary.leases.keySet().stream().anyMatch(status -> !status.equals("completed"))) {
+            throw new IOException("Cannot verify interrupted leases: " + summary.leases);
+        }
+    }
+
+    private DecompOutput checkedStockOutput(Function function, DecompileResults result) throws IOException {
+        if (result == null || result.isTimedOut() || result.isCancelled() || result.failedToStart()) {
+            throw new IOException("Stock decompiler was interrupted at " + function.getEntryPoint());
+        }
+        return DecompOutput.of(result);
+    }
+
+    private DecompOutput referenceOutput(Function function, DecompilationSession.StockVerification verification,
+            StockParityAudit audit) throws Exception {
+        var run = verification.read(function, monitor);
+        DecompOutput output = checkedStockOutput(function, run.traced().results());
+        audit.watchedReferences++;
+        return output;
+    }
+
+    private void writeVerifiedChunk(List<Function> functions, DecompilationSession session,
+            DecompilationSession.StockVerification verification, ExecutorService executor,
+            StockParityAudit audit, BufferedWriter writer) throws Exception {
+        // A warm cache can outrun the ordered reference. Retain at most one result per
+        // candidate worker plus a single lookahead, independent of the requested chunk size.
+        var scheduled = new ArrayDeque<Future<DecompOutput>>();
+        var remaining = functions.iterator();
+        int window = session.workers(); // total slots = candidate slots + one lookahead
+        for (Function function : functions) {
+            while (scheduled.size() < window && remaining.hasNext()) {
+                Function next = remaining.next();
+                scheduled.addLast(executor.submit(() -> scheduledOutput(session, next)));
+            }
+            // Only this thread calls the ordered stock process, including on cache hits.
+            DecompOutput stock = referenceOutput(function, verification, audit);
+            DecompOutput selected = audit.select(function.getEntryPoint(), stock, await(scheduled.removeFirst()));
+            checkEpoch();
+            writer.write(record(function, selected));
+            writer.write('\n');
+        }
+    }
+
+    private DecompOutput scheduledOutput(DecompilationSession session, Function function)
             throws Exception {
         checkEpoch();
         var result = session.decompileWithMetrics(function, monitor);
@@ -740,9 +846,8 @@ public class BinaryRatExport extends GhidraScript {
                 summary.cache.store(result.stored(), result.storeRejection());
             }
         }
-        String row = record(function, result.output());
         checkEpoch();
-        return row;
+        return result.output();
     }
 
     private static void publish(Path temporary, Path output) throws IOException {
@@ -804,7 +909,7 @@ public class BinaryRatExport extends GhidraScript {
         }
     }
 
-    private String await(Future<String> future) throws Exception {
+    private <T> T await(Future<T> future) throws Exception {
         while (true) {
             checkEpoch();
             try {

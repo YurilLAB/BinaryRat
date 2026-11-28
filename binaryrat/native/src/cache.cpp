@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -49,12 +50,38 @@ std::string canonical_json(const nlohmann::json& value) {
     return value.dump();
 }
 
-bool artifact_filename(const std::filesystem::path& path) {
-    const auto name = path.filename().string();
-    return name.size() == 69 && name.substr(64) == ".json" &&
-           std::all_of(name.begin(), name.begin() + 64, [](char ch) {
+bool digest_stem(const std::filesystem::path& path) {
+    const auto stem = path.stem().native();
+    return stem.size() == 64 &&
+           std::all_of(stem.begin(), stem.end(), [](auto ch) {
                return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
            });
+}
+
+bool artifact_filename(const std::filesystem::path& path) {
+    return path.extension() == ".json" && digest_stem(path);
+}
+
+// Only temporary_path's canonical <digest>.tmp-<clock>-<sequence> names belong
+// to this cache. Do not claim unrelated files when cleaning up after a crash.
+bool staged_record_filename(const std::filesystem::path& path) {
+    static const auto prefix = std::filesystem::path(".tmp-").native();
+    const auto extension = path.extension().native();
+    if (!extension.starts_with(prefix) || !digest_stem(path)) return false;
+    std::string suffix;
+    for (auto i = prefix.size(); i < extension.size(); ++i) {
+        const auto ch = extension[i];
+        if ((ch < '0' || ch > '9') && ch != '-') return false;
+        suffix.push_back(static_cast<char>(ch));
+    }
+    const auto end = suffix.data() + suffix.size();
+    std::chrono::steady_clock::rep ticks{};
+    std::uint64_t serial{};
+    const auto [dash, tick_error] = std::from_chars(suffix.data(), end, ticks);
+    if (tick_error != std::errc{} || dash == end || *dash != '-') return false;
+    const auto [stop, serial_error] = std::from_chars(dash + 1, end, serial);
+    return serial_error == std::errc{} && stop == end &&
+           suffix == std::to_string(ticks) + "-" + std::to_string(serial);
 }
 
 // POSIX rename and Windows MoveFileEx replace the name atomically on the same
@@ -209,16 +236,14 @@ std::vector<ArtifactCache::Stored> ArtifactCache::scan() {
     std::lock_guard lock(mutex_);
     std::vector<Stored> result;
     for (const auto& entry : std::filesystem::directory_iterator(root_)) {
-        if (!artifact_filename(entry.path())) {
-            continue;
-        }
-        const auto record = read_record(entry.path());
+        const bool committed = artifact_filename(entry.path());
+        if (!committed && !staged_record_filename(entry.path())) continue;
+        const auto record = committed ? read_record(entry.path()) : std::nullopt;
         if (!record) {
-            // One that cannot be removed (a scanner holds it) stays unindexed: a read of
-            // its key misses and a write replaces it, so it is never served. It must not
-            // keep the engine from starting.
-            if (!entry.is_symlink() && entry.is_regular_file()) {
-                std::error_code ignored;
+            // The engine owns the directory before scanning. A staged file cannot
+            // belong to a live writer. A pinned file stays unindexed for a later scan.
+            std::error_code ignored;
+            if (std::filesystem::is_regular_file(entry.symlink_status(ignored))) {
                 std::filesystem::remove(entry.path(), ignored);
             }
             continue;

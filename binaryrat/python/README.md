@@ -63,7 +63,7 @@ field, or rerun the same recovery against their own saved Program.
 binaryrat-explain capture.json --make-review > handoff.json
 binaryrat-explain handoff.json --offset 0x10
 binaryrat-explain handoff.json --check-project workspace.gpr /program --install-dir /path/to/ghidra
-binaryrat-explain handoff.json --check-review another-capture.json
+binaryrat-explain handoff.json --check-review colleague-handoff.json
 ```
 
 The reader accepts UTF-8 and BOM-marked UTF-16, including files saved by
@@ -80,11 +80,19 @@ or incomplete evidence return `unverifiable`.
 
 Both check modes print JSON. The status is `matched` (exit 0), or `changed`,
 `incompatible` or `unverifiable` (exit 1). Invalid input or an unavailable
-project backend exits 2. `--check-review` compares the two supplied files.
+project backend exits 2. `--check-review` accepts a second portable handoff
+or a raw summary report. It validates each handoff's embedded checksums and
+labels the offline comparison `supplied_report`.
 Only `--check-project` opens a Program and regenerates the evidence.
 The checksums verify content integrity. The review is read-only.
 
 ### Explain a register calculation
+
+For an open CodeBrowser Program, select complete instructions in the Listing,
+then use **Tools → BinaryRat → Explain Selected Register Arithmetic**.
+Double-click a contributing operation to open its instruction. The bundled
+Python API uses the same service on a saved Program. Stock Ghidra 12.2 and
+older BinaryRat extensions use the Python implementation of the same model.
 
 Pass the first and last **instruction starts** in a contiguous Listing range,
 inclusive, and the register to inspect at its exit. For example, in a saved
@@ -373,6 +381,8 @@ bounded request and shutdown waits.
 The daemon starts with a 1,024 MiB JVM heap ceiling. Use `--max-heap-mb`
 to configure it.
 It closes its Program and listener after the idle interval or on Ctrl+C.
+The idle deadline still applies while the daemon reads a partial request.
+After authorized work finishes, the next idle interval begins.
 
 Run tests from the repository root:
 

@@ -23,6 +23,18 @@ from build_bundle import (
 from verify_bundle import extract, verify
 
 
+def stage_launchers(root: Path) -> None:
+    (root / "launchers").mkdir(parents=True)
+    (root / "jdk/bin").mkdir(parents=True)
+    windows = os.name == "nt"
+    (root / "jdk/bin" / ("java.exe" if windows else "java")).touch(mode=0o755)
+    for stem in ("binaryrat", "binaryrat-headless", "launch"):
+        name = stem + (".bat" if windows else "")
+        target = root / "launchers" / name if stem == "launch" else root / name
+        shutil.copyfile(HERE / "launchers" / name, target)
+        target.chmod(0o755)
+
+
 class ArchiveTests(unittest.TestCase):
     def test_rejects_unsafe_and_aliased_names(self):
         for name in ("", "/absolute", "../outside", "ok/../outside", "ok/./alias", "ok//alias",
@@ -123,16 +135,8 @@ class ArchiveTests(unittest.TestCase):
     def test_launchers_forward_arguments_and_select_pinned_install(self):
         with tempfile.TemporaryDirectory(prefix="binaryrat launch ") as scratch:
             root = Path(scratch) / "bundle with spaces"
-            launches = root / "launchers"
-            launches.mkdir(parents=True)
-            jdk = root / "jdk/bin"
-            jdk.mkdir(parents=True)
-            (jdk / "java").touch(mode=0o755)
+            stage_launchers(root)
             (root / "VERSION.txt").write_text("exact revision\n", encoding="utf-8")
-            for name in ("binaryrat", "binaryrat-headless", "launch"):
-                dest = launches / name if name == "launch" else root / name
-                shutil.copyfile(HERE / "launchers" / name, dest)
-                dest.chmod(0o755)
             probe = """#!/bin/sh
 printf '%s\\n' "$JAVA_HOME" "$BINARYRAT_BUNDLE_DIR" "${BINARYRAT_ENGINE:-bundled}" "$XDG_CONFIG_HOME" "$@"
 """
@@ -163,15 +167,7 @@ printf '%s\\n' "$JAVA_HOME" "$BINARYRAT_BUNDLE_DIR" "${BINARYRAT_ENGINE:-bundled
     def test_batch_launchers_keep_local_settings_and_return_exit_status(self):
         with tempfile.TemporaryDirectory(prefix="binaryrat launch ") as scratch:
             root = Path(scratch) / "bundle with spaces"
-            launches = root / "launchers"
-            launches.mkdir(parents=True)
-            jdk = root / "jdk/bin"
-            jdk.mkdir(parents=True)
-            (jdk / "java.exe").touch()
-            for name in ("binaryrat.bat", "binaryrat-headless.bat", "launch.bat"):
-                source = HERE / "launchers" / name
-                dest = launches / name if name == "launch.bat" else root / name
-                dest.write_bytes(source.read_text(encoding="utf-8").replace("\n", "\r\n").encode())
+            stage_launchers(root)
             for name, label in (("ghidraRun.bat", "desktop"), ("support/analyzeHeadless.bat", "headless")):
                 target = root / "ghidra" / name
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -191,6 +187,46 @@ printf '%s\\n' "$JAVA_HOME" "$BINARYRAT_BUNDLE_DIR" "${BINARYRAT_ENGINE:-bundled
                     self.assertEqual(run.returncode, 3, run.stderr)
                     self.assertEqual(run.stdout.splitlines(),
                                      [label, f'"{root / "jdk"}"', '"an argument with spaces"', '"last"'])
+
+    def test_nested_headless_launch_keeps_desktop_profile_and_respects_new_xdg_roots(self):
+        windows = os.name == "nt"
+        with tempfile.TemporaryDirectory(prefix="BinaryRat nested launch ") as scratch:
+            work = Path(scratch)
+            root = work / "relocated bundle"
+            stage_launchers(root)
+            (root / "ghidra/support").mkdir(parents=True)
+            suffix = ".bat" if windows else ""
+            desktop = root / "ghidra" / ("ghidraRun" + suffix)
+            headless = root / "ghidra/support" / ("analyzeHeadless" + suffix)
+            if windows:
+                show = '@echo off\necho "%XDG_CONFIG_HOME%"\necho "%XDG_CACHE_HOME%"\n'
+                nested = ('if "%~1"=="config" set "XDG_CONFIG_HOME=%~2"\n'
+                          'if "%~1"=="cache" set "XDG_CACHE_HOME=%~2"\n'
+                          '"%BINARYRAT_BUNDLE_DIR%\\binaryrat-headless.bat"\n')
+            else:
+                show = '#!/bin/sh\nprintf \'"%s"\\n\' "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"\n'
+                nested = ('if [ "$1" = config ]; then export XDG_CONFIG_HOME="$2"; fi\n'
+                          'if [ "$1" = cache ]; then export XDG_CACHE_HOME="$2"; fi\n'
+                          'exec "$BINARYRAT_BUNDLE_DIR/binaryrat-headless"\n')
+            desktop.write_text(show + nested, encoding="utf-8")
+            headless.write_text(show, encoding="utf-8")
+            desktop.chmod(0o755)
+            headless.chmod(0o755)
+            env = os.environ.copy()
+            for key in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "BINARYRAT_LAUNCH_CONFIG_HOME",
+                        "BINARYRAT_LAUNCH_CACHE_HOME"):
+                env.pop(key, None)
+            env.update(HOME=scratch, LOCALAPPDATA=scratch)
+            config = work / ("BinaryRat/config" if windows else ".config/BinaryRat")
+            cache = work / ("BinaryRat/cache" if windows else ".cache/BinaryRat")
+            override = work / "other root" / "BinaryRat"
+            for option in ("inherit", "config", "cache"):
+                with self.subTest(option=option):
+                    run = subprocess.run([str(root / ("binaryrat" + suffix)), option, str(override)],
+                                         env=env, capture_output=True, text=True, timeout=10, check=True)
+                    expected = [config, cache, override / "BinaryRat" if option == "config" else config,
+                                override / "BinaryRat" if option == "cache" else cache]
+                    self.assertEqual(run.stdout.splitlines(), [f'"{path}"' for path in expected])
 
 
 if __name__ == "__main__":

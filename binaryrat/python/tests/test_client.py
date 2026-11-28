@@ -3,6 +3,7 @@
 Apache-2.0; Copyright 2026 YurilLAB.
 """
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -108,6 +109,27 @@ class ClientTests(unittest.TestCase):
         with EngineClient(timeout=0.1) as client:
             with self.assertRaisesRegex(ProtocolError, "timed out"):
                 client.request("stall")
+            self.assertIsNotNone(client._process.poll())
+
+    def test_response_byte_limit_includes_utf8_and_line_ending(self):
+        symbol = "\N{GREEK SMALL LETTER LAMDA}\N{PUSHPIN}" * 64
+        row = {"id": "1", "protocol_version": 1, "ok": True, "result": symbol}
+        wire = json.dumps(row, ensure_ascii=False).encode("utf-8") + b"\r\n"
+        self.peer.write_text(f"import sys\nsys.stdin.buffer.readline()\n"
+                             f"sys.stdout.buffer.write({wire!r}); sys.stdout.buffer.flush()\n")
+        with EngineClient(max_response_bytes=len(wire)) as client:
+            self.assertEqual(client.request("read"), symbol)
+        with EngineClient(max_response_bytes=len(wire) - 1) as client:
+            with self.assertRaisesRegex(ProtocolError, "exceeds maximum size"):
+                client.request("read")
+
+    def test_response_byte_limit_is_enforced_before_the_line_is_complete(self):
+        self.peer.write_text("import sys\nsys.stdin.buffer.readline()\n"
+                             "sys.stdout.buffer.write(bytes.fromhex('f09f938c') * 512)\n"
+                             "sys.stdout.buffer.flush()\nsys.stdin.buffer.read()\n")
+        with EngineClient(timeout=3, max_response_bytes=1024) as client:
+            with self.assertRaisesRegex(ProtocolError, "exceeds maximum size"):
+                client.request("read")
             self.assertIsNotNone(client._process.poll())
 
     def test_nonfinite_input_is_rejected_before_transmission(self):

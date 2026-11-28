@@ -129,6 +129,8 @@ def main() -> None:
                     "binaryrat/writeback/LayoutEvidenceTable.class",
                     "binaryrat/writeback/CallPrototypeOverride.class",
                     "binaryrat/analysis/AnalysisProfiles.class",
+                    "binaryrat/ArithmeticExplanation.class",
+                    "binaryrat/desktop/ArithmeticEvidenceProvider.class",
                     "binaryrat/DecompilationSession.class",
                     "binaryrat/RttiEvidence.class",
                     "binaryrat/SummaryLayouts.class",

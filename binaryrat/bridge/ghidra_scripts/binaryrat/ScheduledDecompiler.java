@@ -17,6 +17,7 @@ import ghidra.app.decompiler.DecompInterface;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.util.task.CancelledListener;
+import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
 import ghidra.util.task.TaskMonitorAdapter;
 
@@ -80,7 +81,7 @@ public final class ScheduledDecompiler implements AutoCloseable {
 				idle.add(decompiler);
 			}
 		}
-		catch (IOException | RuntimeException exception) {
+		catch (IOException | RuntimeException | Error exception) {
 			close();
 			throw exception;
 		}
@@ -88,6 +89,83 @@ public final class ScheduledDecompiler implements AutoCloseable {
 
 	public int workers() {
 		return workers;
+	}
+
+	/** One idle candidate yields its physical slot; its next ordinary lease restarts it with
+	 * its original registration and recording callback. The stock interface is private to the loan. */
+	final class StockLane implements AutoCloseable {
+		final TracingDecompiler borrowed;
+		final TracingDecompiler stock = new TracingDecompiler(false);
+		long expectedPid;
+
+		StockLane(TracingDecompiler borrowed) {
+			this.borrowed = borrowed;
+		}
+
+		Run decompile(Function function, TaskMonitor monitor) throws IOException {
+			return ScheduledDecompiler.this.decompile(function, monitor, false, this);
+		}
+
+		@Override
+		public void close() throws IOException {
+			try {
+				stock.suspendNativeProcess();
+			}
+			catch (IOException failure) {
+				// Without proof of exit another native process must not use this budget.
+				releaseFailure = failure;
+				throw failure;
+			}
+			finally {
+				try {
+					stock.dispose();
+				}
+				finally {
+					idle.add(borrowed);
+				}
+			}
+		}
+	}
+
+	StockLane borrowStockReference(Program program, TaskMonitor monitor) throws IOException, CancelledException {
+		checkPool();
+		TracingDecompiler borrowed;
+		try {
+			do {
+				monitor.checkCancelled();
+				borrowed = idle.poll(50, TimeUnit.MILLISECONDS);
+			} while (borrowed == null);
+		}
+		catch (InterruptedException interrupted) {
+			Thread.currentThread().interrupt();
+			throw new CancelledException();
+		}
+		var lane = new StockLane(borrowed);
+		try {
+			try {
+				borrowed.suspendNativeProcess();
+			}
+			catch (IOException failure) {
+				releaseFailure = failure;
+				throw failure;
+			}
+			monitor.checkCancelled();
+			DecompilationSession.configureDecompiler(lane.stock, program, true);
+			if (!lane.stock.openProgram(program) || (lane.expectedPid = lane.stock.readyProcessId()) <= 0) {
+				throw new IOException("cannot start ordered stock reference: " + lane.stock.getLastMessage());
+			}
+			monitor.checkCancelled();
+			return lane;
+		}
+		catch (IOException | CancelledException | RuntimeException | Error failure) {
+			try {
+				lane.close();
+			}
+			catch (IOException cleanup) {
+				failure.addSuppressed(cleanup);
+			}
+			throw failure;
+		}
 	}
 
 	/** What the engine decided: worker count, measured CPUs and memory, pool size. */
@@ -110,15 +188,15 @@ public final class ScheduledDecompiler implements AutoCloseable {
 	 * the engine.
 	 */
 	public Run decompile(Function function, TaskMonitor outer) throws IOException {
-		return decompile(function, outer, true);
+		return decompile(function, outer, true, null);
 	}
 
 	/** Runs without collecting query traces. Requires the engine to watch process memory. */
 	public Run decompileUntraced(Function function, TaskMonitor outer) throws IOException {
-		return decompile(function, outer, false);
+		return decompile(function, outer, false, null);
 	}
 
-	private Run decompile(Function function, TaskMonitor outer, boolean recordQueries)
+	private Run decompile(Function function, TaskMonitor outer, boolean recordQueries, StockLane lane)
 			throws IOException {
 		checkPool();
 		// TaskMonitorAdapter does not notify a listener added after cancellation.
@@ -162,7 +240,7 @@ public final class ScheduledDecompiler implements AutoCloseable {
 			try {
 				// A preceding holder releases its lease before returning its process;
 				// a newly admitted holder may have to wait for that handoff.
-				decompiler = idle.take();
+				decompiler = lane == null ? idle.take() : lane.stock;
 			}
 			catch (InterruptedException exception) {
 				cancel.run();
@@ -175,18 +253,27 @@ public final class ScheduledDecompiler implements AutoCloseable {
 			JsonObject ended;
 			try {
 				checkPool();
-				long pid = decompiler.processId();
+				long pid = lane != null && lane.expectedPid > 0 ?
+					decompiler.readyProcessId() : decompiler.processId();
+				if (lane != null && lane.expectedPid > 0 && pid != lane.expectedPid) {
+					throw new IOException("Ordered stock decompiler lost its process history between requests");
+				}
 				if (pid > 0) {
 					JsonObject attach = new JsonObject();
 					attach.addProperty("lease", lease);
 					attach.addProperty("pid", pid);
 					watched = engine.call("sched.attach", attach).get("attached").getAsBoolean();
 				}
-				int timeout = limits.timeoutSeconds() + BACKSTOP_SECONDS;
+				int timeout = limits.timeoutSeconds() + (lane == null ? BACKSTOP_SECONDS : 0);
 				if (!watched) {
 					throw new IOException("cannot watch decompiler process memory");
 				}
 				traced = decompiler.decompileAttached(function, timeout, monitor, pid, recordQueries);
+				if (lane != null) {
+					// A completed stock request may dispose its own process, e.g. after an I/O
+					// failure. Only in that case may the next call perform Ghidra's normal restart.
+					lane.expectedPid = decompiler.readyProcessId();
+				}
 			}
 			finally {
 				// Once a process is reused, its old lease must no longer watch or kill
@@ -201,7 +288,9 @@ public final class ScheduledDecompiler implements AutoCloseable {
 				finally {
 					// Wake any borrower waiting for the handoff, even after a failed
 					// release. checkPool() prevents it from touching that process.
-					idle.add(decompiler);
+					if (lane == null) {
+						idle.add(decompiler);
+					}
 				}
 			}
 			return new Run(traced, ended.get("status").getAsString(), stopReason.get(),
@@ -217,7 +306,7 @@ public final class ScheduledDecompiler implements AutoCloseable {
 
 	private void checkPool() throws IOException {
 		if (releaseFailure != null) {
-			throw new IOException("decompiler pool retired after an unacknowledged lease release",
+			throw new IOException("decompiler pool retired because native process ownership could not be confirmed",
 				releaseFailure);
 		}
 	}

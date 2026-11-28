@@ -6,26 +6,35 @@ import java.awt.Component;
 import java.awt.Container;
 import java.awt.Rectangle;
 import java.awt.Window;
+import java.awt.event.KeyEvent;
 import java.awt.event.MouseEvent;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 import javax.swing.*;
+import javax.swing.event.TableModelListener;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import docking.ComponentProvider;
 import docking.DefaultActionContext;
+import docking.DockingDialog;
+import docking.action.DockingActionIf;
+import docking.widgets.EventTrigger;
 import ghidra.GhidraApplicationLayout;
 import ghidra.GhidraLaunchable;
 import ghidra.app.services.CodeViewerService;
@@ -36,11 +45,15 @@ import ghidra.base.project.GhidraProject;
 import ghidra.framework.Application;
 import ghidra.framework.GhidraApplicationConfiguration;
 import ghidra.framework.main.FrontEndTool;
+import ghidra.framework.model.DomainFile;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.preferences.Preferences;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressSet;
+import ghidra.program.flatapi.FlatProgramAPI;
 import ghidra.program.model.listing.*;
 import ghidra.program.util.ProgramLocation;
+import ghidra.program.util.ProgramSelection;
 import ghidra.util.table.field.AddressBasedLocation;
 import ghidra.util.task.Task;
 import ghidra.util.task.TaskListener;
@@ -235,14 +248,7 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
                 if (evidence.equals(listing.getCurrentLocation().getAddress())) {
                     throw new AssertionError("Listing already at evidence before row activation");
                 }
-                Rectangle cell = table.getCellRect(row, column, true);
-                for (int clicks = 1; clicks <= 2; clicks++) {
-                    for (int event : new int[] { MouseEvent.MOUSE_PRESSED, MouseEvent.MOUSE_RELEASED,
-                            MouseEvent.MOUSE_CLICKED }) {
-                        table.dispatchEvent(new MouseEvent(table, event, System.currentTimeMillis(), 0,
-                            cell.x + cell.width / 2, cell.y + cell.height / 2, clicks, false, MouseEvent.BUTTON1));
-                    }
-                }
+                doubleClick(table, row, column);
                 return Boolean.TRUE;
             }
             return null;
@@ -260,7 +266,7 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
             throw new AssertionError("Recovering or browsing evidence dirtied the opened Program");
         }
         inspectUnionViews(tool, program, listing);
-        inspectForeground(tool, program, listing, entry, interior);
+        var otherFile = inspectForeground(tool, program, listing, entry, interior);
         if (!swing(evidenceTable::isShowing)) {
             throw new AssertionError("Evidence table closed before the fixture edit");
         }
@@ -277,8 +283,263 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         if (!cancelled.await(10, TimeUnit.SECONDS) || swing(() -> dialog("Save BinaryRat Layout Report")) != null) {
             throw new AssertionError("Cancelled recovery still active or displayed the destination picker");
         }
+        inspectArithmetic(tool, program, listing, otherFile);
+        closeFixtureTab(tool.getService(ProgramManager.class), listing, program, null);
         System.out.printf(Locale.ROOT, "BINARYRAT_GUI_NAVIGATION_OK %s %s %s %.3f %.3f%n",
             entry, interior, evidence, recoverSeconds, browseSeconds);
+    }
+
+    private static void doubleClick(JTable table, int row, int column) {
+        Rectangle cell = table.getCellRect(row, column, true);
+        table.scrollRectToVisible(cell);
+        for (int clicks = 1; clicks <= 2; clicks++) {
+            for (int event : new int[] {
+                    MouseEvent.MOUSE_PRESSED, MouseEvent.MOUSE_RELEASED, MouseEvent.MOUSE_CLICKED }) {
+                table.dispatchEvent(new MouseEvent(table, event, System.currentTimeMillis(), 0,
+                    cell.x + cell.width / 2, cell.y + cell.height / 2, clicks, false, MouseEvent.BUTTON1));
+            }
+        }
+    }
+
+    private static JDialog arithmeticChooser(DockingActionIf action, ComponentProvider browser) throws Exception {
+        SwingUtilities.invokeLater(() -> action.actionPerformed(browser.getActionContext(null)));
+        return await("arithmetic register chooser", () -> dialog("Select Output Register"));
+    }
+
+    private static void inspectArithmetic(PluginTool tool, Program program, CodeViewerService listing,
+            DomainFile otherFile) throws Exception {
+        // This code exists only in the active, unsaved x86-64 Program, on both CI platforms.
+        Address first = program.getAddressFactory().getDefaultAddressSpace().getAddress(0x60000);
+        byte[] bytes = HexFormat.of().parseHex("4889c84883c0054883e802c3"); // RAX = (RCX + 5) - 2; RET
+        var flat = new FlatProgramAPI(program);
+        try (var tx = program.openTransaction("Add arithmetic GUI fixture")) {
+            flat.createMemoryBlock("arithmetic_gui", first, bytes, false).setExecute(true);
+            if (!flat.disassemble(first)) {
+                throw new AssertionError("Could not disassemble the arithmetic fixture");
+            }
+        }
+        // Defining the new instructions schedules reference analysis in CodeBrowser.
+        program.flushEvents();
+        flat.analyzeChanges(program);
+        program.flushEvents();
+        Address add = first.add(3);
+        Address subtract = first.add(7);
+        Address end = first.add(10);
+        var action = swing(() -> tool.getDockingActionsByOwnerName("BinaryRatWorkspacePlugin").stream()
+            .filter(a -> "Explain Selected Register Arithmetic".equals(a.getName())).findFirst().orElseThrow());
+        var selected = new ProgramSelection(first, end);
+        var browser = (ComponentProvider) listing.getNavigatable();
+        swing(() -> {
+            listing.goTo(new ProgramLocation(program, first), true);
+            listing.getListingPanel().setSelection(new ProgramSelection(), EventTrigger.GUI_ACTION);
+            return null;
+        });
+        await("arithmetic disabled with empty selection", () ->
+            action.isEnabledForContext(browser.getActionContext(null)) ? null : Boolean.TRUE);
+        var disjoint = new AddressSet(first, first.add(2));
+        disjoint.addRange(subtract, end);
+        var separate = new ProgramSelection(disjoint);
+        swing(() -> {
+            listing.getListingPanel().setSelection(separate, EventTrigger.GUI_ACTION);
+            return null;
+        });
+        await("noncontiguous Listing selection", () ->
+            separate.equals(listing.getCurrentSelection()) ? Boolean.TRUE : null);
+        SwingUtilities.invokeLater(() -> action.actionPerformed(browser.getActionContext(null)));
+        await("disjoint arithmetic selection refused", () -> dialog("Select Output Register") == null &&
+            tool.getStatusInfo().contains("one contiguous range") ? Boolean.TRUE : null);
+        swing(() -> {
+            listing.getListingPanel().setSelection(selected, EventTrigger.GUI_ACTION);
+            return null;
+        });
+        await("arithmetic enabled for whole instructions", () ->
+            selected.equals(listing.getCurrentSelection()) && action.isEnabledForContext(browser.getActionContext(null))
+                && action.isAddToPopup(browser.getActionContext(null)) ? Boolean.TRUE : null);
+        var cancelled = arithmeticChooser(action, browser);
+        try (var tx = program.openTransaction("Edit while choosing a register")) {
+            program.getBookmarkManager().setBookmark(first, "Note", "GUI probe", "Changed before submission");
+        }
+        swing(() -> { widget(cancelled, JButton.class, b -> "Explain".equals(b.getText())).doClick(0); return null; });
+        await("stale register choice refused", () -> cancelled.isShowing() &&
+            ((DockingDialog) cancelled).getDialogComponent().getStatusText().contains("Program changed") ?
+                Boolean.TRUE : null);
+        swing(() -> { widget(cancelled, JButton.class, b -> "Cancel".equals(b.getText())).doClick(); return null; });
+        await("cancelled register choice closes", () -> !cancelled.isShowing() ? Boolean.TRUE : null);
+        if (swing(() -> tool.getComponentProvider("Arithmetic Explanation").isVisible())) {
+            throw new AssertionError("Cancelling a register choice opened arithmetic evidence");
+        }
+        long revision = program.getModificationNumber();
+        var chooser = arithmeticChooser(action, browser);
+        var provider = swing(() -> tool.getComponentProvider("Arithmetic Explanation"));
+        var table = swing(() -> descendants(provider.getComponent()).filter(JTable.class::isInstance)
+            .map(JTable.class::cast).filter(t -> "BinaryRatArithmeticEvidence".equals(t.getName()))
+            .findFirst().orElseThrow());
+        var published = new CompletableFuture<Long>();
+        TableModelListener listener = event -> {
+            if (table.getRowCount() > 0) {
+                published.complete(System.nanoTime());
+            }
+        };
+        long clicked = swing(() -> {
+            var register = widget(chooser, JComboBox.class, w -> "BinaryRatArithmeticRegister".equals(w.getName()));
+            register.setSelectedItem("RAX");
+            var explain = widget(chooser, JButton.class, b -> "Explain".equals(b.getText()));
+            table.getModel().addTableModelListener(listener);
+            long start = System.nanoTime();
+            explain.doClick(0);
+            return start;
+        });
+        double explainMillis;
+        try {
+            // Open Program; button dispatch to publication of the rows on the EDT. Excludes choosing a register.
+            explainMillis = (published.get(80, TimeUnit.SECONDS) - clicked) / 1e6;
+        }
+        finally {
+            swing(() -> { table.getModel().removeTableModelListener(listener); return null; });
+        }
+        await("arithmetic provider displaying the result", () -> table.isShowing() ? Boolean.TRUE : null);
+        swing(() -> {
+            int source = table.getColumnModel().getColumnIndex("Instruction");
+            int root = table.getSelectedRow();
+            if (root < 0 || !"INT_SUB".equals(table.getValueAt(root, table.getColumnModel().getColumnIndex("Operation")))) {
+                throw new AssertionError("The final subtraction should be selected");
+            }
+            int addRow = checkArithmeticRows(table, program, first, add, subtract);
+            if (!first.equals(listing.getCurrentLocation().getAddress())) {
+                throw new AssertionError("Double-clicking an input moved the Listing");
+            }
+            doubleClick(table, addRow, source);
+            return null;
+        });
+        await("arithmetic double-click to add", () ->
+            add.equals(listing.getCurrentLocation().getAddress()) ? Boolean.TRUE : null);
+        try (var tx = program.openTransaction("Open a transaction without changing the fixture")) {
+            swing(() -> {
+                int row = table.getRowCount() - 1;
+                table.setRowSelectionInterval(row, row);
+                pressEnter(table);
+                return null;
+            });
+            await("navigation waited for an active edit and retained the evidence", () ->
+                tool.getStatusInfo().contains("Wait for the current Program edit") && table.getRowCount() == 6 &&
+                    add.equals(listing.getCurrentLocation().getAddress()) ? Boolean.TRUE : null);
+        }
+        swing(() -> { pressEnter(table); return null; });
+        await("arithmetic Enter to subtract", () ->
+            subtract.equals(listing.getCurrentLocation().getAddress()) ? Boolean.TRUE : null);
+        if (program.getModificationNumber() != revision) {
+            throw new AssertionError("Program revision changed during arithmetic explanation: " + revision +
+                " -> " + program.getModificationNumber() + "; undo history: " + program.getAllUndoNames());
+        }
+        try (var tx = program.openTransaction("Invalidate arithmetic evidence")) {
+            program.getBookmarkManager().setBookmark(subtract, "Note", "GUI probe", "Changed after capture");
+        }
+        await("stale arithmetic rows cleared", () -> table.getRowCount() == 0 &&
+            descendants(provider.getComponent()).filter(JLabel.class::isInstance).map(JLabel.class::cast)
+                .anyMatch(label -> "BinaryRatArithmeticStatus".equals(label.getName()) &&
+                    label.getText().contains("Program changed")) ? Boolean.TRUE : null);
+        // Repopulate the panel and change Programs with the old evidence still selected.
+        swing(() -> { listing.getListingPanel().setSelection(selected, EventTrigger.GUI_ACTION); return null; });
+        await("new selection after edit", () -> selected.equals(listing.getCurrentSelection()) ? Boolean.TRUE : null);
+        var reopened = arithmeticChooser(action, browser);
+        swing(() -> { widget(reopened, JButton.class, b -> "Explain".equals(b.getText())).doClick(); return null; });
+        await("fresh arithmetic evidence", () -> table.getRowCount() == 6 ? Boolean.TRUE : null);
+        var manager = tool.getService(ProgramManager.class);
+        Program other = swing(() -> manager.openProgram(otherFile));
+        await("old evidence discarded on tab switch", () -> other != null && other != program &&
+            manager.getCurrentProgram() == other && table.getRowCount() == 0 ? Boolean.TRUE : null);
+        swing(() -> { pressEnter(table); return null; });
+        if (swing(manager::getCurrentProgram) != other) {
+            throw new AssertionError("Old arithmetic evidence reactivated its previous Program");
+        }
+        closeFixtureTab(manager, listing, other, program);
+        System.out.printf(Locale.ROOT, "BINARYRAT_GUI_ARITHMETIC_OK %s %s %.3f%n", add, subtract, explainMillis);
+    }
+
+    private static void closeFixtureTab(ProgramManager manager, CodeViewerService listing,
+            Program closing, Program remaining) throws Exception {
+        // ListingPanel posts margin updates to a later EDT turn. Keep the outgoing
+        // database alive while the actual Listing changes, including at process exit.
+        Object consumer = new Object();
+        if (!closing.addConsumer(consumer)) {
+            throw new AssertionError("Fixture Program already closed before switching the Listing");
+        }
+        try {
+            if (remaining != null) {
+                swing(() -> { manager.setCurrentProgram(remaining); return null; });
+                await("Listing showing remaining tab", () ->
+                    listing.getListingPanel().getProgram() == remaining ? Boolean.TRUE : null);
+            }
+            if (!swing(() -> manager.closeProgram(closing, true))) {
+                throw new AssertionError("Could not close the disposable GUI fixture tab");
+            }
+            await("Listing detached from outgoing Program", () -> manager.getCurrentProgram() == remaining &&
+                listing.getListingPanel().getProgram() == remaining ? Boolean.TRUE : null);
+        }
+        finally {
+            closing.release(consumer);
+        }
+    }
+
+    private static void pressEnter(JTable table) {
+        var key = table.getInputMap().get(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0));
+        var enter = table.getActionMap().get(key);
+        if (enter == null) {
+            throw new AssertionError("No Enter binding for arithmetic evidence");
+        }
+        enter.actionPerformed(new java.awt.event.ActionEvent(table, 0, "Enter"));
+    }
+
+    /** Validate the displayed expression and its instruction evidence independently of the service. */
+    private static int checkArithmeticRows(JTable table, Program program, Address first, Address add, Address subtract) {
+        var columns = table.getColumnModel();
+        int op = columns.getColumnIndex("Operation");
+        int source = columns.getColumnIndex("Instruction");
+        int order = columns.getColumnIndex("P-code order");
+        int bits = columns.getColumnIndex("Bits");
+        int value = columns.getColumnIndex("Inputs or literal");
+        int id = columns.getColumnIndex("Value");
+        var sites = Map.of("COPY", first, "INT_ADD", add, "INT_SUB", subtract);
+        var arguments = Map.of("COPY", List.of("RCX"), "INT_ADD", List.of("COPY", "0x5"),
+            "INT_SUB", List.of("INT_ADD", "0x2"));
+        var ids = new HashMap<String, String>();
+        int addRow = -1;
+        for (int row = 0; row < table.getRowCount(); row++) {
+            String operation = (String) table.getValueAt(row, op);
+            String inputs = (String) table.getValueAt(row, value);
+            Address expected = sites.get(operation);
+            String label = expected == null ? inputs : operation;
+            if (ids.put(label, (String) table.getValueAt(row, id)) != null ||
+                    !Integer.valueOf(64).equals(table.getValueAt(row, bits))) {
+                throw new AssertionError("Duplicate arithmetic value or wrong width for " + label);
+            }
+            if (expected == null) {
+                String kind = "RCX".equals(label) ? "INPUT" : "CONSTANT";
+                if (!kind.equals(operation) || !"".equals(table.getValueAt(row, source)) ||
+                        !"".equals(table.getValueAt(row, order))) {
+                    throw new AssertionError("Unexpected evidence for leaf " + label);
+                }
+                if (kind.equals("INPUT")) {
+                    doubleClick(table, row, source);
+                }
+                continue;
+            }
+            String expectedInputs = String.join(", ", arguments.get(operation).stream().map(ids::get).toList());
+            int sequence = (int) table.getValueAt(row, order);
+            var pcode = program.getListing().getInstructionAt(expected).getPcode(true);
+            if (!expectedInputs.equals(inputs) || !expected.toString(true).equals(table.getValueAt(row, source)) ||
+                    Arrays.stream(pcode).noneMatch(p -> p.getSeqnum().getTime() == sequence &&
+                        p.getMnemonic().equals(operation))) {
+                throw new AssertionError("Arithmetic row cites the wrong inputs, instruction or p-code operation");
+            }
+            if (operation.equals("INT_ADD")) {
+                addRow = row;
+            }
+        }
+        if (!ids.keySet().equals(Set.of("RCX", "COPY", "0x5", "INT_ADD", "0x2", "INT_SUB"))) {
+            throw new AssertionError("Unexpected arithmetic expression: " + ids.keySet());
+        }
+        return addRow;
     }
 
     private static void inspectUnionViews(PluginTool tool, Program program, CodeViewerService listing)
@@ -360,7 +621,7 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         return -1;
     }
 
-    private static void inspectForeground(PluginTool tool, Program program, CodeViewerService listing,
+    private static DomainFile inspectForeground(PluginTool tool, Program program, CodeViewerService listing,
             Address entry, Address interior) throws Exception {
         ProgramManager manager = tool.getService(ProgramManager.class);
         var baselineOwners = new IdentityHashMap<Object, Boolean>();
@@ -440,16 +701,11 @@ public class LayoutNavigationProbe implements GhidraLaunchable {
         await("inactive tab releasing BinaryRat session", () ->
             manager.getCurrentProgram() == second && sessionOwners.stream().noneMatch(program::isUsedBy) ?
                 Boolean.TRUE : null);
-        swing(() -> {
-            view.setVisible(false);
-            if (!manager.closeProgram(second, true)) {
-                throw new AssertionError("Could not close the disposable foreground test tab");
-            }
-            manager.setCurrentProgram(program);
-            listing.goTo(new ProgramLocation(program, entry), true);
-            return null;
-        });
+        swing(() -> { view.setVisible(false); return null; });
+        closeFixtureTab(manager, listing, second, program);
+        swing(() -> listing.goTo(new ProgramLocation(program, entry), true));
         System.out.printf(Locale.ROOT, "BINARYRAT_GUI_FOREGROUND_OK %d %d 2%n", firstMillis, secondMillis);
+        return copy;
     }
 
     private static long awaitForeground(ComponentProvider view, String function) throws Exception {

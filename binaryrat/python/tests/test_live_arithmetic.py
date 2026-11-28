@@ -58,6 +58,10 @@ class LiveArithmeticTests(unittest.TestCase):
         x86.extend(bytes(192 - len(x86)))
         x86.extend(bytes.fromhex("4889c8 4801d0 c3"))
         x86.extend(bytes(208 - len(x86)) + bytes.fromhex("00c8 c3"))  # ADD AL,CL; RET
+        x86.extend(bytes(224 - len(x86)))
+        x86.extend(bytes.fromhex("480fbed1 48f7d2 48f7da c3"))  # MOVSX RDX,CL; NOT RDX; NEG RDX
+        x86.extend(bytes.fromhex("48b81032547698badcfe c3"))  # MOVABS RAX,0xfedcba9876543210
+        x86.extend(bytes.fromhex("4889c8 480fb6d1 4801d0 c3"))  # reads overlapping RCX and CL
         # x0 = x1+x2; x0 -= 9; x0 ^= x3; x0 &= x2; x0 |= 7; ret
         arm = bytes.fromhex("2000028b 002400d1 000003ca 0000028a 000840b2 c0035fd6")
         # (x1+9)-5, x1+4, and x1+5; each snippet ends with its own return.
@@ -67,7 +71,7 @@ class LiveArithmeticTests(unittest.TestCase):
             project = pyghidra.open_project(cls.marker.parent, cls.marker.stem, create=True)
             opened.callback(project.close)
             for name, language, image, entries in (
-                ("x86", "x86:LE:64:default", bytes(x86), (0, 32, 39, 64, 192, 208)),
+                ("x86", "x86:LE:64:default", bytes(x86), (0, 32, 39, 64, 192, 208, 224, 235, 246)),
                 ("arm", "AARCH64:LE:64:v8A", arm, (0, 24, 36, 44, 52)),
             ):
                 source = cls.marker.parent / (name + ".bin")
@@ -170,6 +174,143 @@ class LiveArithmeticTests(unittest.TestCase):
             for left, right in ((0xffffffff, 1), (0x7fffffff, 1), (0xffffffff, 0xffffffff)):
                 self.assertEqual(expr.evaluate({w1: left, w2: right}), (left + right) & 0xffffffff)
 
+    def _desktop_service(self):
+        from ghidra.framework import Application
+        from jpype import JClass
+
+        if Application.getModuleRootDir("BinaryRat") is None:
+            if os.environ.get("BINARYRAT_REQUIRE_SHARED_SERVICE") == "1":
+                self.fail("the bundle must contain the BinaryRat arithmetic service")
+            self.skipTest("desktop arithmetic requires the BinaryRat extension")
+        return JClass("binaryrat.ArithmeticExplanation")
+
+    def test_desktop_graph_matches_saved_program_explanation(self):
+        from ghidra.util.task import TaskMonitor
+
+        service = self._desktop_service()
+        for name, target, start, end in (("x86", "RAX", 0, 16), ("arm", "x0", 0, 16),
+                                        ("x86", "AL", 208, 208), ("arm", "x0", 52, 52),
+                                        ("x86", "RDX", 224, 231), ("x86", "RAX", 235, 235)):
+            with self.subTest(isa=name, target=target, start=start), open_program(self.marker, "/" + name) as view:
+                program = view._program
+                choices = list(map(str, service.registerNames(program)))
+                self.assertEqual(choices, sorted(set(choices)))
+                self.assertIn(target, choices)
+                self.assertNotIn("RIP" if name == "x86" else "pc", choices)
+                first = program.getMinAddress().add(start)
+                last = program.getMinAddress().add(end)
+                # Keep the stock Python capture as an independent graph and citation oracle.
+                with patch("binaryrat.live._arithmetic_service", return_value=None):
+                    expr = view.explain_arithmetic(_ram(start), _ram(end), target)
+                with patch("binaryrat.live._lift_instruction", side_effect=AssertionError("expected shared service")):
+                    self.assertEqual(view.explain_arithmetic(_ram(start), _ram(end), target), expr)
+                result = service.explain(program, first, last, target, view.info.revision, TaskMonitor.DUMMY)
+                self.assertEqual((result.revision(), result.targetRegister(), result.root()),
+                                 (view.info.revision, target, expr.root))
+                self.assertEqual(len(result.nodes()), len(expr.nodes))
+                for row, node in zip(result.nodes(), expr.nodes):
+                    self.assertEqual((str(row.operation()), row.size(), tuple(row.arguments())),
+                                     (node.op, node.size, node.args))
+                    if node.op == "INPUT":
+                        self.assertEqual(str(row.value()), view.register_name(node.register))
+                        self.assertEqual(str(row.storage().getAddressSpace().getName()), node.register.address.space)
+                        self.assertEqual(row.storage().getOffset(), node.register.address.offset)
+                    elif node.op == "CONSTANT":
+                        self.assertEqual(int(str(row.value()), 16), node.value)
+                    if node.site is None:
+                        self.assertIsNone(row.site())
+                        self.assertEqual(row.sequence(), -1)
+                    else:
+                        self.assertEqual(str(row.site().getAddressSpace().getName()), node.site.space)
+                        self.assertEqual(row.site().getOffset(), node.site.offset)
+                        self.assertEqual(row.sequence(), node.sequence)
+
+    def test_desktop_service_refuses_invalid_stale_and_cancelled_selections(self):
+        from binaryrat.arithmetic import ArithmeticRefusal
+        from ghidra.util.exception import CancelledException
+        from ghidra.util.task import TaskMonitor, TaskMonitorAdapter
+        from java.lang import IllegalArgumentException, IllegalStateException
+
+        service = self._desktop_service()
+        with open_program(self.marker, "/x86") as view:
+            program = view._program
+            base = program.getMinAddress()
+            for start, end, reg in ((0, 20, "RAX"), (32, 34, "RAX"), (39, 42, "RAX"),
+                                    (0, 4, "RAX"), (192, 195, "RAX"), (64, 160, "RAX"), (0, 3, "RIP"),
+                                    (0, 3, "RBX"), (0, 3, "unknown"), (246, 253, "RAX")):
+                with self.subTest(start=start, end=end, reg=reg), self.assertRaises(IllegalArgumentException):
+                    service.explain(program, base.add(start), base.add(end), reg, TaskMonitor.DUMMY)
+                expected = ValueError if end == 4 or reg == "unknown" else ArithmeticRefusal
+                with self.subTest(start=start, end=end, reg=reg):
+                    with patch("binaryrat.live._arithmetic_service", return_value=None), self.assertRaises(expected):
+                        view.explain_arithmetic(_ram(start), _ram(end), reg)
+                    with patch("binaryrat.live._lift_instruction", side_effect=AssertionError("expected shared service")), \
+                            self.assertRaises(expected):
+                        view.explain_arithmetic(_ram(start), _ram(end), reg)
+            with self.assertRaises(IllegalStateException):
+                service.explain(program, base, base, "RAX", view.info.revision - 1, TaskMonitor.DUMMY)
+            cancelled = TaskMonitorAdapter(True)
+            cancelled.cancel()
+            with self.assertRaises(CancelledException):
+                service.explain(program, base, base, "RAX", cancelled)
+            tx = program.startTransaction("Open edit during desktop capture")
+            try:
+                with self.assertRaises(IllegalStateException):
+                    service.explain(program, base, base, "RAX", TaskMonitor.DUMMY)
+            finally:
+                program.endTransaction(tx, False)
+
+    def test_edit_during_desktop_slice_discards_evidence(self):
+        import pyghidra
+        from ghidra.util.task import TaskMonitor
+        from java.lang import IllegalStateException
+        from jpype import JProxy
+
+        service = self._desktop_service()
+        with open_program(self.marker, "/x86") as view:
+            program = view._program
+            base = program.getMinAddress()
+            polls = 0
+
+            def edit_during_capture():
+                nonlocal polls
+                polls += 1
+                if polls == 4:
+                    with pyghidra.transaction(program, "Edit during desktop arithmetic"):
+                        program.setName("changed during capture")
+
+            monitor = JProxy(TaskMonitor, dict(checkCancelled=edit_during_capture))
+            with self.assertRaises(IllegalStateException):
+                service.explain(program, base, base.add(16), "RAX", monitor)
+            self.assertGreaterEqual(polls, 4)
+
+    def test_desktop_service_reads_committed_in_memory_edits_before_project_save(self):
+        import pyghidra
+        from ghidra.program.flatapi import FlatProgramAPI
+        from ghidra.util.task import TaskMonitor
+        from java.lang import IllegalStateException
+
+        service = self._desktop_service()
+        with open_program(self.marker, "/x86") as view:
+            program = view._program
+            entry = program.getMinAddress().add(235)
+            revision = program.getModificationNumber()
+            original = service.explain(program, entry, entry, "RAX", revision, TaskMonitor.DUMMY)
+            self.assertEqual(str(original.nodes()[0].value()), "0xfedcba9876543210")
+            flat = FlatProgramAPI(program)
+            with pyghidra.transaction(program, "Change MOV immediate in active Program"):
+                flat.clearListing(entry, entry.add(9))
+                program.getMemory().setByte(entry.add(2), 0x11)
+                self.assertTrue(flat.disassemble(entry))
+            with self.assertRaises(IllegalStateException):
+                service.explain(program, entry, entry, "RAX", revision, TaskMonitor.DUMMY)
+            fresh = service.explain(program, entry, entry, "RAX", TaskMonitor.DUMMY)
+            self.assertNotEqual(fresh.revision(), revision)
+            self.assertEqual(str(fresh.nodes()[0].value()), "0xfedcba9876543211")
+        with open_program(self.marker, "/x86") as view:
+            saved = view.explain_arithmetic(_ram(235), _ram(235), "RAX")
+            self.assertEqual(saved.evaluate({}), 0xfedcba9876543210)
+
     def test_optional_proof_uses_actual_selected_ranges(self):
         from binaryrat.arithmetic_proof import prove_equivalence
 
@@ -218,7 +359,8 @@ class LiveArithmeticTests(unittest.TestCase):
                             view._program.setName("changed")
                     return instruction
 
-                with patch("binaryrat.live._lift_instruction", side_effect=edit_after_last_lift), \
+                with patch("binaryrat.live._arithmetic_service", return_value=None), \
+                        patch("binaryrat.live._lift_instruction", side_effect=edit_after_last_lift), \
                         self.assertRaises(StaleProgramError):
                     view.explain_arithmetic(_ram(start), _ram(end), "RAX")
         with open_program(self.marker, "/x86") as reopened:

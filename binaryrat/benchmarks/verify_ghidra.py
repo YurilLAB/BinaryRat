@@ -89,7 +89,7 @@ def measured_run(argv: list[str], log: Path, timeout: float,
     started = time.monotonic()
     peak, samples = 0, 0
     phase_peaks: dict[str, int] = {}
-    current_phase = None
+    active_phases: set[str] = set()
     errors: set[str] = set()
     with log.open("wb") as output, log.open("r", encoding="utf-8", errors="replace") as observer:
         process = subprocess.Popen(argv, stdout=output, stderr=subprocess.STDOUT, env=env)
@@ -103,10 +103,10 @@ def measured_run(argv: list[str], log: Path, timeout: float,
                 for line in observer.readlines():
                     match = PHASE.search(line)
                     if match:
-                        current_phase = match.group(1)
-                        phase_peaks.setdefault(current_phase, 0)
-                    elif TIMING.search(line):
-                        current_phase = None
+                        active_phases.add(match.group(1))
+                        phase_peaks.setdefault("+".join(sorted(active_phases)), 0)
+                    elif completed := TIMING.search(line):
+                        active_phases.discard(completed.group(2))
                 total = 0
                 try:
                     try:
@@ -125,8 +125,10 @@ def measured_run(argv: list[str], log: Path, timeout: float,
                 except (psutil.NoSuchProcess, psutil.ZombieProcess):
                     pass
                 peak = max(peak, total)
-                if current_phase:
-                    phase_peaks[current_phase] = max(phase_peaks[current_phase], total)
+                if active_phases:
+                    # Both lanes share the JVM and process tree during stock verification.
+                    phase = "+".join(sorted(active_phases))
+                    phase_peaks[phase] = max(phase_peaks.get(phase, 0), total)
                 samples += 1
                 if time.monotonic() - started > timeout:
                     raise TimeoutError(f"Ghidra exceeded {timeout} seconds; see {log}")
@@ -555,6 +557,60 @@ def check_stack_strings(headless: Path, script_directory: Path, destination: Pat
             "table": passed[0][2] == "true", "log": log.name, "wall_seconds": measured["wall_seconds"]}
 
 
+def validate_stock_audit(proof: dict, output: Path, count: int, requested: int, *,
+                         allow_legacy: bool = False) -> None:
+    """Verify the published bytes, row accounting and shared native-worker budget."""
+    if not isinstance(proof, dict):
+        raise ValueError("candidate parity report must be a JSON object")
+    totals = [proof.get(key) for key in ("scheduled_matches", "stock_fallbacks")]
+    if (any(type(value) is not int or value < 0 for value in totals)
+            or type(proof.get("function_count")) is not int or sum(totals) != count
+            or proof["function_count"] != count or proof.get("reference") != "stock-reused-serial"):
+        raise ValueError("candidate parity report does not cover every prepared function")
+    if proof.get("output_sha256") != sha256(output):
+        raise ValueError("candidate parity report digest differs from the published export")
+    fields = ("admitted_workers", "candidate_workers", "reference_watched_leases", "peak_running")
+    if allow_legacy and "execution" not in proof and not any(key in proof for key in fields):
+        return
+    if any(type(proof.get(field)) is not int for field in fields):
+        raise ValueError("missing or invalid verified worker accounting")
+    admitted, candidate, reference, peak = (proof[field] for field in fields)
+    if not (1 <= admitted <= requested and (1 if count else 0) <= peak <= admitted):
+        raise ValueError("verified workers or peak leases exceed admission")
+    if reference != count:
+        raise ValueError("verified export requires a watched stock lease for each reference row")
+    if proof.get("execution") == "sequential":
+        reason = proof.get("fallback_reason")
+        if (candidate != admitted or reason not in ("single_worker", "shared_candidate_session") or
+                (reason == "single_worker" and admitted != 1)):
+            raise ValueError("invalid sequential verification fallback")
+    elif (proof.get("execution") != "overlapped" or "fallback_reason" in proof or
+          admitted < 2 or candidate != admitted - 1):
+        raise ValueError("overlapped verification must reserve one admitted reference worker")
+
+
+def validate_verified_cache(proof: dict, count: int, state: str) -> None:
+    """Every reused candidate must still receive a fresh ordered stock reference."""
+    cache = proof.get("candidate_cache")
+    if not isinstance(cache, dict) or cache.get("enabled") is not True:
+        raise ValueError("expected an enabled verified-export cache")
+    keys = ("hits", "replayed", "misses", "stored", "store_rejected")
+    if any(type(cache.get(key)) is not int or cache[key] < 0 for key in keys):
+        raise ValueError("invalid verified-export cache counters")
+    leases = proof.get("candidate_compute_leases")
+    reused = cache["hits"] + cache["replayed"]
+    if (type(leases) is not int or leases != cache["misses"] or leases + reused != count or
+            cache["stored"] != leases or cache["store_rejected"] != 0):
+        raise ValueError("verified-export cache outcomes do not account for all candidates")
+    if proof.get("reference_watched_leases") != count:
+        raise ValueError("a cached candidate bypassed its ordered stock reference")
+    if (state == "cold" and reused == 0) or (state == "warm" and cache["replayed"] == count):
+        return
+    if state == "edited" and leases > 0 and cache["replayed"] > 0:
+        return
+    raise ValueError(f"unexpected {state} verified-export cache evidence")
+
+
 def check_stock_verified(headless: Path, binary: Path, scripts: Path, destination: Path,
                          timeout: float, environment: dict[str, str]) -> dict:
     """Compare verified output with a separate stock pass and probe fail-closed behavior."""
@@ -562,41 +618,87 @@ def check_stock_verified(headless: Path, binary: Path, scripts: Path, destinatio
         workspace = Path(directory)
         project = [str(headless), str(workspace), "fixture", "-scriptPath", str(scripts)]
 
-        def script(output: Path, mode: str) -> list[str]:
-            return ["-postScript", "BinaryRatExport.java", str(output), mode, "2", "60", "16"]
+        def script(output: Path, mode: str, workers: int = 2) -> list[str]:
+            return ["-postScript", "BinaryRatExport.java", str(output), mode, str(workers), "60", "16"]
 
         verified, reference = workspace / "verified.jsonl", workspace / "reference.jsonl"
+        single = workspace / "single-worker.jsonl"
         log = destination / "stock-verified.log"
+        cache_env = environment | {"BINARYRAT_CACHE_DIR": str(workspace / "verified cache")}
         measured = measured_run(project + ["-import", str(binary)] +
-                                script(verified, "stock-verified") + script(reference, "serial"),
-                                log, timeout, environment)
+                                script(verified, "stock-verified") +
+                                script(single, "stock-verified", 1) + script(reference, "serial"),
+                                log, timeout, cache_env)
         if (measured["returncode"] or "BinaryRat stock verification passed:" not in
                 log.read_text(encoding="utf-8", errors="replace") or
-                first_differing_byte(verified, reference) is not None):
+                first_differing_byte(verified, reference) is not None or
+                first_differing_byte(single, reference) is not None):
             raise RuntimeError(f"stock-verified export did not match the independent stock pass; see {log}")
         rows = list(load_export(verified))
         proof = json.loads(Path(str(verified) + ".parity.json").read_text(encoding="utf-8"))
-        counts = [proof[key] for key in ("scheduled_matches", "stock_fallbacks")]
-        if (not rows or not all(row.successful for row in rows) or
-                any(type(count) is not int or count < 0 for count in counts) or
-                proof["reference"] != "stock-reused-serial" or
-                proof["output_sha256"] != sha256(verified) or
-                proof["function_count"] != sum(counts) or sum(counts) != len(rows)):
-            raise RuntimeError(f"invalid stock verification evidence; see {log}")
+        single_proof = json.loads(Path(str(single) + ".parity.json").read_text(encoding="utf-8"))
+        validate_stock_audit(proof, verified, len(rows), 2)
+        validate_stock_audit(single_proof, single, len(rows), 1)
+        if not rows or not all(row.successful for row in rows):
+            raise RuntimeError(f"verified fixture missing decompilation results; see {log}")
+        validate_verified_cache(proof, len(rows), "cold")
+        validate_verified_cache(single_proof, len(rows), "warm")
+        if environment.get("BINARYRAT_REQUIRE_VERIFIED_OVERLAP") == "1" and proof["execution"] != "overlapped":
+            raise RuntimeError(f"the required multi-worker verified export did not overlap; see {log}")
 
-        stopped = workspace / "stopped.jsonl"
-        sidecar = Path(str(stopped) + ".parity.json")
-        stopped.write_bytes(b"existing export\n")
-        sidecar.write_bytes(b"existing report\n")
-        stop_log = destination / "stock-verified-stopped.log"
-        process = project + ["-process", binary.name, "-noanalysis", "-readOnly"]
-        measured_run(process + script(stopped, "stock-verified"), stop_log, timeout,
-                     environment | {"BINARYRAT_LEASE_TIMEOUT_MS": "1"})
-        if ("Cannot verify interrupted leases:" not in stop_log.read_text(
-                encoding="utf-8", errors="replace") or
-                stopped.read_bytes() != b"existing export\n" or
-                sidecar.read_bytes() != b"existing report\n"):
-            raise RuntimeError(f"interrupted verification replaced an existing export; see {stop_log}")
+        original = next((row for row in rows if row.function.name.startswith("FUN_") and
+                         re.search(r"\b" + re.escape(row.function.name) + r"\s*\(", row.c)), None)
+        if original is None:
+            raise RuntimeError(f"expected a local function visibly named in its own C output; see {log}")
+        digest = sha256(binary)
+        renamed = "binaryrat_reopened_" + digest[:16]
+        process = project + ["-process", binary.name, "-noanalysis"]
+
+        def reopened(state: str, *, edit_after: bool = False) -> tuple[dict, Path]:
+            output, stock = workspace / f"{state}.jsonl", workspace / f"{state}.stock.jsonl"
+            args = list(process) if edit_after else process + ["-readOnly"]
+            args += script(output, "stock-verified") + script(stock, "serial")
+            if edit_after:
+                entry = original.function.entry
+                args += ["-postScript", "BinaryRatCacheFixtureEdit.java", digest,
+                         entry.space, f"{entry.offset:x}", renamed]
+            run_log = destination / f"stock-verified-{state}.log"
+            result = measured_run(args, run_log, timeout, cache_env)
+            contents = run_log.read_text(encoding="utf-8", errors="replace")
+            if (result["returncode"] or "BinaryRat stock verification passed:" not in contents or
+                    first_differing_byte(output, stock) is not None or
+                    (edit_after and f"BinaryRat fixture function renamed: {renamed}" not in contents)):
+                raise RuntimeError(f"{state} cache did not preserve fresh stock bytes; see {run_log}")
+            audit = json.loads(Path(str(output) + ".parity.json").read_text(encoding="utf-8"))
+            validate_stock_audit(audit, output, len(rows), 2)
+            validate_verified_cache(audit, len(rows), state)
+            if audit["execution"] != proof["execution"]:
+                raise RuntimeError(f"verified execution mode changed across cache checks; see {run_log}")
+            return audit, output
+
+        warm, published = reopened("warm", edit_after=True)
+        edited, changed = reopened("edited")
+        fresh = next((row for row in load_export(changed) if row.function.entry == original.function.entry), None)
+        if (fresh is None or fresh.function.body_sha256 != original.function.body_sha256 or
+                fresh.function.program_id != original.function.program_id or fresh.function.name != renamed or
+                fresh.c == original.c or renamed not in fresh.c):
+            raise RuntimeError("an offline rename did not reach the verified result at the original cache key")
+
+        sidecar = Path(str(published) + ".parity.json")
+        previous = (sha256(published), sha256(sidecar))
+        process += ["-readOnly"]
+        # All candidates can now replay. The fresh stock reference must still run under
+        # its deadline, both when it shares the work interval and when it borrows one slot.
+        for workers in (1, 2):
+            stop_log = destination / f"stock-verified-stopped-{workers}.log"
+            measured_run(process + script(published, "stock-verified", workers), stop_log, timeout,
+                         cache_env | {"BINARYRAT_LEASE_TIMEOUT_MS": "1"})
+            stop_text = stop_log.read_text(encoding="utf-8", errors="replace")
+            if ("Cannot verify interrupted leases: stock at" not in stop_text or
+                    "BinaryRat stock verification passed:" in stop_text or
+                    (sha256(published), sha256(sidecar)) != previous or
+                    any(workspace.glob(".binaryrat-*"))):
+                raise RuntimeError(f"interrupted verification replaced an existing export; see {stop_log}")
 
         blocked = workspace / "blocked.jsonl"
         blocked.write_bytes(b"existing export\n")
@@ -607,7 +709,8 @@ def check_stock_verified(headless: Path, binary: Path, scripts: Path, destinatio
         if ("Choose a regular output file:" not in content or "BinaryRat export starting" in content or
                 blocked.read_bytes() != b"existing export\n"):
             raise RuntimeError(f"invalid parity report destination was not rejected; see {blocked_log}")
-    return {**proof, "exact_independent_stock_bytes": True,
+    return {**proof, "single_worker": single_proof, "reopened": warm, "after_edit": edited,
+            "exact_independent_stock_bytes": True,
             "interrupted_export_preserved": True, "report_collision_rejected": True}
 
 

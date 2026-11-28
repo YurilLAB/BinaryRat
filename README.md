@@ -26,7 +26,7 @@ BinaryRat is an open-source reverse-engineering project for Linux and Windows, b
 - **Stack strings** recover text a function builds on its stack, with the instructions that wrote it.
 - **Call-site corrections** show an instruction's p-code with register names, before and after Listing overrides, and apply or replace a reviewed prototype at one call with native undo. Indirect calls start from the decompiler's view of their arguments.
 - **Desktop and scripting access** provides BinaryRat actions in CodeBrowser, headless exports, and a typed Python API that can inspect one instruction's p-code before and after Listing overrides.
-- **Register arithmetic** explains how a selected x86-64 or AArch64 instruction range computes a register. The optional Z3 check proves equal outputs or shows input values that reproduce a difference.
+- **Register arithmetic in CodeBrowser** traces a selected x86-64 or AArch64 register to the instructions that computed it. Double-click a contributing operation to open its instruction in the Listing. The Python CLI can also compare two ranges using Z3.
 - **Portable layout reviews** let a colleague inspect the evidence offline and rerun the same recovery against their own saved Program.
 - **BinaryRat analyst tools** compare two decompiler exports with `binaryrat-diff` (`--patch` shows the changed C) and show which instructions support a proposed field with `binaryrat-explain`. Both work offline on saved reports. `binaryrat-decompile` decompiles a function from a saved project, selected by name or by any address inside it.
 
@@ -43,16 +43,8 @@ Every commit to `master` is built and tested on Linux and Windows.
 
 ## Documentation
 
-| Topic | Document |
-|---|---|
-| Build the engine and run the tests | [Engine and tooling](binaryrat/README.md) |
-| Install and use the Ghidra extension | [Export bridge](binaryrat/bridge/README.md) |
-| Python API and analyst commands | [Python client](binaryrat/python/README.md) |
-| Checks, CI and raw evidence | [Verification](binaryrat/docs/VERIFICATION.md) |
-| Using BinaryRat in a Ghidra team | [Adoption guide](binaryrat/docs/ADOPTION.md) |
-| Design, gates and roadmap | [Architecture](binaryrat/docs/ARCHITECTURE.md) |
-| Changes to upstream Ghidra files | [Core patch ledger](binaryrat/docs/core-patches/README.md) |
-| Questions and bug reports | [Support](.github/SUPPORT.md) |
+- **Using BinaryRat** · [CodeBrowser and headless tools](binaryrat/bridge/README.md) · [Python API](binaryrat/python/README.md) · [Adoption](binaryrat/docs/ADOPTION.md) · [Support](.github/SUPPORT.md)
+- **Developing BinaryRat** · [Build and test](binaryrat/README.md) · [Architecture](binaryrat/docs/ARCHITECTURE.md) · [Verification](binaryrat/docs/VERIFICATION.md) · [Core patches](binaryrat/docs/core-patches/README.md)
 
 ## License
 

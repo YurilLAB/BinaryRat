@@ -85,6 +85,14 @@ def discover_calls(text: str) -> list[tuple[list[str], str]]:
 
 
 class CoverageTests(unittest.TestCase):
+    def test_hosted_parity_checks_require_the_multi_worker_path(self):
+        verify = load(MAIN)["jobs"]["verify"]["steps"]
+        for name in ("Verify exact stock output on the pinned LLVM 19 large-binary sample",
+                     "Stock versus BinaryRat Ghidra integration and benchmark evidence"):
+            step, = [step for step in verify if step.get("name") == name]
+            with self.subTest(step=name):
+                self.assertEqual(step.get("env", {}).get("BINARYRAT_REQUIRE_VERIFIED_OVERLAP"), "1")
+
     def test_proof_backend_is_required_in_verify_jobs(self):
         verify = load(MAIN)["jobs"]["verify"]["steps"]
         for name in ("Python API and live native-client tests",

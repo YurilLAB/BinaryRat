@@ -147,13 +147,23 @@ class LargeParityTests(unittest.TestCase):
         self.write(self.candidate, self.sample_rows()[1])
         summary = {"function_count": 2, "reference": "stock-reused-serial",
                    "scheduled_matches": 1, "stock_fallbacks": 1,
+                   "admitted_workers": 2, "candidate_workers": 1, "peak_running": 2,
+                   "reference_watched_leases": 2, "execution": "overlapped",
+                   "candidate_cache": {"enabled": False}, "candidate_compute_leases": 2,
                    "output_sha256": probe.sha256(self.candidate)}
         path.write_text(json.dumps(summary), encoding="utf-8")
-        self.assertEqual(probe.validate_candidate("stock-verified", self.candidate, 2), summary)
+        self.assertEqual(probe.validate_candidate("stock-verified", self.candidate, 2, 2), summary)
+        for update in ({"candidate_cache": {"enabled": True}}, {"candidate_compute_leases": 1}):
+            path.write_text(json.dumps(summary | update), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "one uncached candidate lease"):
+                probe.validate_candidate("stock-verified", self.candidate, 2, 2)
+        path.write_text(json.dumps(summary | {"peak_running": 1}), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "must exercise overlapping"):
+            probe.validate_candidate("stock-verified", self.candidate, 2, 2, require_overlap=True)
         summary["stock_fallbacks"] = 0
         path.write_text(json.dumps(summary), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "cover every prepared function"):
-            probe.validate_candidate("stock-verified", self.candidate, 2)
+            probe.validate_candidate("stock-verified", self.candidate, 2, 2)
 
         summary["stock_fallbacks"] = 1
         path.write_text(json.dumps(summary), encoding="utf-8")
@@ -161,7 +171,45 @@ class LargeParityTests(unittest.TestCase):
         rows[0]["revision"] = 4
         self.write(self.candidate, rows)
         with self.assertRaisesRegex(ValueError, "digest differs"):
-            probe.validate_candidate("stock-verified", self.candidate, 2)
+            probe.validate_candidate("stock-verified", self.candidate, 2, 2)
+
+    def test_reference_coverage_and_total_admission_include_both_lanes(self):
+        self.write(self.candidate, self.sample_rows()[1])
+        audit = {"function_count": 2, "reference": "stock-reused-serial", "scheduled_matches": 2,
+                 "stock_fallbacks": 0, "output_sha256": probe.sha256(self.candidate)}
+        overlap = dict(audit, admitted_workers=2, candidate_workers=1, reference_watched_leases=2,
+                       peak_running=2, execution="overlapped")
+        sequential = dict(audit, admitted_workers=1, candidate_workers=1, reference_watched_leases=2,
+                          peak_running=1, execution="sequential", fallback_reason="single_worker")
+        for update in ({"admitted_workers": 3}, {"candidate_workers": 2}, {"peak_running": 3},
+                       {"peak_running": False}, {"peak_running": 0}, {"reference_watched_leases": 1},
+                       {"execution": "sequential"}, {"function_count": True},
+                       {"fallback_reason": "single_worker"}):
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                probe.validate_stock_audit(overlap | update, self.candidate, 2, 2)
+        # A constrained host can admit just one of two requested slots.
+        probe.validate_stock_audit(sequential, self.candidate, 2, 2)
+        # A compatible open session lends a worker while keeping its entire candidate pool.
+        shared = sequential | {"admitted_workers": 2, "candidate_workers": 2,
+                               "fallback_reason": "shared_candidate_session"}
+        probe.validate_stock_audit(shared, self.candidate, 2, 2)
+        with self.assertRaisesRegex(ValueError, "invalid sequential"):
+            probe.validate_stock_audit(shared | {"fallback_reason": "single_worker"}, self.candidate, 2, 2)
+        Path(f"{self.candidate}.parity.json").write_text(json.dumps(sequential), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "must exercise overlapping"):
+            probe.validate_candidate("stock-verified", self.candidate, 2, 2, require_overlap=True)
+        for update in ({"execution": "overlapped"}, {"reference_watched_leases": 1}):
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                probe.validate_stock_audit(sequential | update, self.candidate, 2, 2)
+        # Archived pre-overlap scripts can still be compared via --candidate-scripts.
+        with self.assertRaises(ValueError):
+            probe.validate_stock_audit(audit, self.candidate, 2, 2)
+        probe.validate_stock_audit(audit, self.candidate, 2, 2, allow_legacy=True)
+        with self.assertRaises(ValueError):
+            probe.validate_stock_audit(audit | {"peak_running": 2}, self.candidate, 2, 2,
+                                       allow_legacy=True)
+        with self.assertRaisesRegex(ValueError, "JSON object"):
+            probe.validate_stock_audit([], self.candidate, 2, 2)
 
 
 if __name__ == "__main__":

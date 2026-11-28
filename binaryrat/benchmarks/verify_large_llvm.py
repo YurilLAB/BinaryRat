@@ -15,7 +15,8 @@ import subprocess
 import sys
 import tempfile
 
-from verify_ghidra import PROJECT, TIMING, first_differing_byte, load_export, measured_run, sha256
+from verify_ghidra import (PROJECT, TIMING, first_differing_byte, load_export, measured_run,
+                           sha256, validate_stock_audit)
 
 
 LLVM19_SHA256 = "3523f50f635d2a1ea47518a392451f2854b92823ceaf1345fb806099dd1a3b8a"
@@ -100,16 +101,20 @@ def compare_exports(stock: Path, candidate: Path) -> dict:
     return result
 
 
-def validate_candidate(mode: str, output: Path, count: int) -> dict | None:
+def validate_candidate(mode: str, output: Path, count: int, workers: int, *,
+                       allow_legacy: bool = False, require_overlap: bool = False) -> dict | None:
     if mode == "stock-verified":
         summary = json.loads(Path(f"{output}.parity.json").read_text(encoding="utf-8"))
-        counts = [summary[key] for key in ("scheduled_matches", "stock_fallbacks")]
-        if (any(type(value) is not int or value < 0 for value in counts)
-                or sum(counts) != count or summary["function_count"] != count
-                or summary["reference"] != "stock-reused-serial"):
-            raise ValueError("candidate parity report does not cover every prepared function")
-        if summary["output_sha256"] != sha256(output):
-            raise ValueError("candidate parity report digest differs from the published export")
+        validate_stock_audit(summary, output, count, workers, allow_legacy=allow_legacy)
+        if require_overlap and (summary.get("execution") != "overlapped" or
+                                (count > 1 and summary["peak_running"] < 2)):
+            raise ValueError("large-binary verification must exercise overlapping stock and candidate work")
+        if "execution" in summary:
+            cache = summary.get("candidate_cache")
+            leases = summary.get("candidate_compute_leases")
+            if (not isinstance(cache, dict) or cache.get("enabled") is not False or
+                    type(leases) is not int or leases != count):
+                raise ValueError("large-binary verification requires one uncached candidate lease per function")
         return summary
     if mode == "scheduled":
         summary = json.loads(Path(f"{output}.schedule.json").read_text(encoding="utf-8"))
@@ -242,7 +247,13 @@ def verify(args: argparse.Namespace, destination: Path, report: dict) -> None:
                     raise RuntimeError(f"missing export completion or memory evidence: {name}")
                 measured["coverage"] = validate_export(output, sample, base, identity)
                 if label == "candidate":
-                    measured["sidecar"] = validate_candidate(mode, output, len(sample))
+                    historical = candidate_scripts != BRIDGE.resolve()
+                    measured["sidecar"] = validate_candidate(
+                        mode, output, len(sample), workers, allow_legacy=historical,
+                        require_overlap=(not historical and workers > 1 and
+                                         os.environ.get("BINARYRAT_REQUIRE_VERIFIED_OVERLAP") == "1"))
+                    if mode == "stock-verified" and measured["sidecar"].get("execution") == "overlapped":
+                        measured["phase_timing"] = "scheduled and serial share one elapsed interval"
                 execution[label] = measured
                 print(f"{name}: {measured['wall_seconds']:.2f}s, "
                       f"{measured['coverage']['completed']}/{len(sample)} completed", flush=True)

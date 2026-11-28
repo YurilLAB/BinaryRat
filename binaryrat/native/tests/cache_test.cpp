@@ -115,6 +115,50 @@ void identity_and_restart() {
     });
 }
 
+void interrupted_write_recovery() {
+    TemporaryDirectory directory;
+    const auto id = ArtifactCache::key_digest(key(1));
+    const auto prefix = directory.path / (id + ".tmp-");
+    auto stage = [&](const std::string& suffix) {
+        auto path = prefix;
+        path += suffix;
+        std::ofstream(path) << "{partial";
+        return path;
+    };
+    {
+        ArtifactCache cache(directory.path);
+        cache.put(key(1), "completed", {"dep"});
+    }
+    const auto partial = stage("123-0");
+    const auto first_write = directory.path / (ArtifactCache::key_digest(key(2)) +
+                                                ".tmp-123-18446744073709551615");
+    std::ofstream(first_write) << "unfinished new entry";
+    const auto others = std::vector{stage("123"), stage("123-backup"), stage("01-2"),
+                                    stage("1-18446744073709551616"), stage("1-2.bak")};
+    const auto subdir = directory.path / (id + ".tmp-123-1");
+    std::filesystem::create_directory(subdir);
+    const auto target = directory.path / "analyst-notes";
+    std::ofstream(target) << "keep";
+    const auto link = directory.path / (id + ".tmp-123-2");
+    std::error_code link_error;
+    std::filesystem::create_symlink(target, link, link_error);
+
+    ArtifactCache reopened(directory.path);
+    const auto entries = reopened.scan();
+    require(entries.size() == 1 && entries[0].id == id &&
+            entries[0].dependencies == std::vector<std::string>{"dep"} &&
+            reopened.get(key(1)).value() == "completed",
+            "an interrupted replacement preserves the previous committed record");
+    require(!std::filesystem::exists(partial) && !std::filesystem::exists(first_write),
+            "reopening reclaims staged writes of new and existing records");
+    for (const auto& other : others)
+        require(std::filesystem::exists(other), "staging lookalikes survive reopening");
+    require(std::filesystem::is_directory(subdir) && std::filesystem::exists(target),
+            "directories and unrelated files survive staging cleanup");
+    if (!link_error) require(std::filesystem::is_symlink(link), "staging cleanup preserves links");
+    require(reopened.scan().size() == 1, "repeated scans leave the committed cache intact");
+}
+
 void dependency_invalidation() {
     TemporaryDirectory directory;
     ArtifactCache cache(directory.path);
@@ -214,8 +258,10 @@ void records_that_cannot_be_changed() {
     const auto id = ArtifactCache::key_digest(key(2));
     const auto corrupt = directory.path / (ArtifactCache::key_digest(key(3)) + ".json");
     { std::ofstream output(corrupt); output << "{partial"; }
+    const auto staged = directory.path / (id + ".tmp-456-3");
+    std::ofstream(staged) << "{partial";
     {
-        Pin pin(directory.path, {directory.path / (id + ".json"), corrupt});
+        Pin pin(directory.path, {directory.path / (id + ".json"), corrupt, staged});
         if (!pin.active()) {
             std::cout << "cache pinning skipped: this process ignores file permissions" << std::endl;
             return;
@@ -225,10 +271,11 @@ void records_that_cannot_be_changed() {
         const auto stored = cache.scan();
         require(stored.size() == 1 && stored[0].id == id, "a corrupt record that cannot be deleted is skipped");
         require(std::filesystem::exists(corrupt), "the held corrupt record is left in place");
+        require(std::filesystem::exists(staged), "a pinned staging file is left for the next scan");
         require(cache.get(key(2)).value() == "kept", "a refused update keeps the old record");
     }
-    require(cache.scan().size() == 1 && !std::filesystem::exists(corrupt),
-            "a released corrupt record is deleted by the next scan");
+    require(cache.scan().size() == 1 && !std::filesystem::exists(corrupt) && !std::filesystem::exists(staged),
+            "released corrupt and staged files are deleted by the next scan");
     require(cache.remove(id) && !cache.get(key(2)), "a released record can be removed");
 }
 
@@ -254,6 +301,7 @@ void concurrent_access() {
 int main() {
     try {
         identity_and_restart();
+        interrupted_write_recovery();
         dependency_invalidation();
         corruption_limits_and_paths();
         records_that_cannot_be_changed();

@@ -274,9 +274,12 @@ never enters the inference Program.
 The raw comparator keeps the official ascending, reused-process stock
 reference. Ghidra's join-space allocations can survive its native flush and
 affect both analysis and printed temporary names. Program dependency replay
-does not capture this process history. The `stock-verified` export runs the
-scheduled phase first, then checks each record with an independent ascending
-serial pass. It writes a match count, fallback count, and digest of the exported
+does not capture this process history. The `stock-verified` export compares
+the candidates with an independent process that visits every function in stock
+order. When a fresh pool admits at least two workers, one slot is reserved for
+that process while the others prepare candidates. With a single slot or an
+already-shared pool, the two passes run in sequence. The export writes a match
+count, fallback count, and digest of the exported
 bytes. The large-file CI test compares that export to a separate stock JVM.
 [LLVM parity evidence](evidence/llvm19-linux.md)
 The source-built fork drops those join records at each native flush, so it
@@ -434,7 +437,7 @@ their representation and decompilation.
 | Order | BinaryRat feature | Delivery and acceptance |
 |---|---|---|
 | 1 | Inspect one instruction and review shared storage | The Python API returns detached raw and override-aware operations, qualified varnodes, widths, counts and truncation flags. In a summary report the desktop labels the loads supporting each union view. The CLI also shows the consuming operation when recorded. Check a real flow override, unchanged instructions, stale reads, multiple call paths and malformed citations. |
-| 2 | Explain a selected arithmetic result | The saved-Program Python API and `binaryrat-arithmetic` lift an exact Listing selection and trace a general register to its inputs. The proof extra compares two such expressions with a bounded native Z3 process. A CodeBrowser selection action and measured interactive latency under background analysis remain open. |
+| 2 | Explain a selected arithmetic result | A CodeBrowser action and the bundled Python API trace a register through a Listing range with the same Java service. The desktop reads the active Program and provides instruction navigation. The CLI reads saved Programs and can compare expressions with a bounded native Z3 process. Interactive latency under competing background analysis remains open. |
 | 3 | Share an evidence review between analysts | A portable read-only layout review carries the captured report and proposal digest. `binaryrat-explain --check-project` opens a recipient's saved Program and regenerates the report using its BinaryRat extension. Validating approval at apply time, sharing decisions and synchronized review remain open. |
 
 For a future IL interchange format, version a projection of p-code. Include the
@@ -448,8 +451,13 @@ The arithmetic pilot follows effective p-code definitions backwards from the
 last exact write in the range. Unique temporaries are local to one instruction.
 Unwritten inputs must correspond to supported registers. The expression records
 ordinal references to earlier nodes, byte widths and qualified p-code locations.
-The Python adapter builds this small graph and releases the Program before the CLI
-starts a proof. The optional native Z3 executable comes from a pinned wheel and
+The BinaryRat extension builds this graph for both CodeBrowser and the bundled
+Python client. The desktop runs a cancellable task against the active Program,
+checks its modification number before displaying or navigating the results,
+and releases the task's Program reference on exit. On stock Ghidra the Python
+client computes the same graph from effective p-code. Live differential tests
+compare the nodes, operands and instruction citations across both paths. The
+CLI releases its saved Program before starting a proof. The optional native Z3 executable comes from a pinned wheel and
 runs in a separate process with a solver memory limit and a wall deadline. This
 keeps the CLI's proof checks usable after the JVM closes. Ghidra's optional
 SymbolicSummaryZ3 extension remains a candidate for a future desktop integration.

@@ -12,7 +12,7 @@ also catch an error shared by the fork and upstream. Keep both gates.
 |---|---|---|
 | SLEIGH decoding | Live stock and packaged Ghidra decode 40 x86-64 and 40 AArch64 little-endian test instructions. The test checks boundaries, mnemonic, operands and representative p-code operations. Seven isolated prefixes must leave the Listing undefined. LLVM MC 19.1.7 independently decoded the 80 vectors during development. | Add held-out instruction families, PC-relative targets at two load addresses, and supported context modes. Compare canonical operands, width, target and length so spelling aliases cannot create a false failure. |
 | Instruction evidence | Exercise the public Python API through an actual saved Program. Check a CALL changed to BRANCH by a Listing flow override, empty semantics, invalid addresses, unsigned operands, missing output, caps and cancellation. Inject an edit between raw and effective reads and require a stale-read error. | Extend independent ISA expectations to defined flags and explicitly mask unspecified flags. |
-| Register explanations | Real x86-64 and AArch64 ranges must agree with Ghidra's concrete emulator and independent arithmetic expectations. Test all 65,536 pairs for eight-bit addition, stale reads, overrides, overlapping writes and refusal of memory or control flow. On both CI hosts, the pinned solver must prove equality and produce a concretely replayable difference. | Expand the supported instructions and register aliases one family at a time with independent vectors and explicit refusal tests. |
+| Register explanations | Compare each row of the CodeBrowser service with the stock-compatible Python implementation on real x86-64 and AArch64 ranges. Check the instruction, p-code order, register storage, operands and widths. In CodeBrowser, select unsaved code, navigate to producers by mouse and keyboard, and invalidate the table after an edit. Concrete checks include the p-code emulator and all 65,536 pairs for eight-bit addition. The pinned solver must prove equality and produce a replayable difference. | Expand instructions and register aliases one family at a time. Measure interaction latency while background analysis competes for resources. |
 | Inferred types | Compare separate DWARF and PDB ground truth on stripped binaries. Property tests generate call graphs with reused loads at different offsets, then change one citation, view or path. Verify the actual load, consumer and call site shown to the analyst and reject inconsistent reports. | Measure per-kind precision, recall and abstentions on held-out families. |
 | Portable layout reviews | Regenerate a capture in a reopened project. Change a real field displacement under the same executable identity and require the project check to detect it. Exercise missing witnesses, tampered report contents, oversized and deeply nested input, and mismatched target parameters. | Extend the same read-only checks to additional evidence formats before supporting shared decisions. |
 | State and resources | The reviewed write service has live rollback, undo/redo, stale-review and reopen checks. Native scheduling and caches have model tests and seeded fuzzers. | For shared reviews, test duplicate, missing and reordered updates, simultaneous incompatible edits and revocation. Record peak RSS, selected-function latency and cancellation latency separately from whole-program time. |
@@ -57,6 +57,16 @@ handoff offline took a median 6.70 ms (p95 29.91 ms) across 500 trials.
 The project check also incurs the time to open the Program and regenerate the
 layout. [Arithmetic fixtures](../python/tests/test_live_arithmetic.py) ·
 [Project check](../python/tests/test_live_summary_review.py)
+
+The extension's arithmetic service took a median 0.062 ms (p95 0.175 ms)
+for the six-instruction x86-64 fixture and 0.025 ms (p95 0.052 ms) for the
+five-instruction AArch64 fixture on a shared Linux host. These are 200 calls
+per architecture after 25 warmups, with an open Program. The timings exclude
+the chooser, Swing rendering and Listing navigation. Five CodeBrowser runs
+against the final extension measured 4.7, 6.7, 15.7 and 58.3 ms on ELF and
+3.6 ms on PE from clicking **Explain** to populating the evidence table on
+Linux. Each run navigated to the expected instructions by mouse and keyboard
+and cleared the evidence after an edit. [Desktop probe](../benchmarks/gui_fixture/LayoutNavigationProbe.java)
 
 ## Ghidra integration checks
 

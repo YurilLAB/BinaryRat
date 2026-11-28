@@ -49,8 +49,7 @@ class EngineClient:
         if cache_dir is not None:
             argv += ["--cache", str(cache_dir)]
         self._process = subprocess.Popen(
-            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-            encoding="utf-8", errors="strict", bufsize=1,
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         )
         self._timeout = timeout
         self._limit = max_response_bytes
@@ -68,9 +67,9 @@ class EngineClient:
                 line = self._process.stdout.readline(self._limit + 1)
                 if not line:
                     raise EOFError("engine closed stdout")
-                if len(line.encode("utf-8")) > self._limit:
+                if len(line) > self._limit:
                     raise ValueError("engine response exceeds maximum size")
-                self._deliver(line)
+                self._deliver(line.decode("utf-8"))
         except BaseException as error:
             self._deliver(error)
 
@@ -101,8 +100,8 @@ class EngineClient:
                 raise ProtocolError("client is closed")
             self._next_id += 1
             request_id = str(self._next_id)
-            payload = json.dumps({"id": request_id, "op": op, **fields}, allow_nan=False)
-            if len(payload.encode("utf-8")) > 16 * 1024 * 1024:
+            payload = json.dumps({"id": request_id, "op": op, **fields}, allow_nan=False).encode("utf-8")
+            if len(payload) > 16 * 1024 * 1024:
                 raise ValueError("request exceeds native protocol limit of 16 MiB")
             assert self._process.stdin is not None
             deadline = time.monotonic() + self._timeout
@@ -111,7 +110,7 @@ class EngineClient:
             def write_request() -> None:
                 try:
                     assert self._process.stdin is not None
-                    self._process.stdin.write(payload + "\n")
+                    self._process.stdin.write(payload + b"\n")
                     self._process.stdin.flush()
                     sent.put(None)
                 except BaseException as error:

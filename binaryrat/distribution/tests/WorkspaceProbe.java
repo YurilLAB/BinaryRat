@@ -213,6 +213,7 @@ public final class WorkspaceProbe implements GhidraLaunchable {
             action(tool, "BinaryRatForegroundPlugin", "Inspect Selected Function");
             action(tool, "BinaryRatWorkspacePlugin", "Export Decompilation");
             action(tool, "BinaryRatWorkspacePlugin", "Browse Layout Evidence");
+            action(tool, "BinaryRatWorkspacePlugin", "Explain Selected Register Arithmetic");
             action(tool, "BinaryRatWorkspacePlugin", "Getting Started");
             return null;
         });

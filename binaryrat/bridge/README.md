@@ -49,8 +49,8 @@ Open a Program and let auto-analysis finish. In **Window → Script Manager**,
 select `BinaryRatExport.java` in the BinaryRat category and run it. Turn on
 **In Tool** for the script to add **Tools → BinaryRat → Export Decompilation**.
 
-Select an export mode and a destination JSONL file. **Stock-verified** runs
-scheduled decompilation and then checks it against the stock serial reference.
+Select an export mode and a destination JSONL file. **Stock-verified** checks
+scheduled decompilation against an independent stock serial reference.
 It can take longer and writes a `.parity.json` report alongside the JSONL.
 **Scheduled** writes a `.schedule.json` report, and **Serial** runs a single
 stock decompiler process. CodeBrowser asks before replacing an export or its
@@ -70,6 +70,22 @@ The table shows exact field accesses. New reports fingerprint each cited instruc
 
 CI opens the installed extension in CodeBrowser, runs both actions on the packed-structure fixture and checks the resulting Listing address. The `gui-layout/report.json` artifact records the recovery and navigation times, including script compilation and dialogs. [Desktop verification](../benchmarks/verify_gui_layout.py)
 
+### Explain a register in the Listing
+
+Select one contiguous range of complete instructions and choose **Tools → BinaryRat →
+Explain Selected Register Arithmetic**. The same action is available by
+right-clicking the selection under **BinaryRat**. Choose the register whose value you want at
+the end of the range. The **Arithmetic Explanation** table gives each input, constant
+and operation a value number. Read the operand numbers to follow a calculation
+backwards from the selected result. Double-click an operation, or select it and
+press Enter, to jump to its instruction. The **P-code order** column distinguishes
+multiple operations produced by one instruction.
+
+The action reads the active Program, including unsaved edits. If an edit makes the
+evidence stale, select the instructions and run it again. The supported selections
+are the same bounded straight-line x86-64 and AArch64 register calculations as the
+Python API. [CLI and Python examples](../python/README.md#explain-a-register-calculation)
+
 ### Review a layout across calls
 
 In the BinaryRat workspace, place the cursor inside a function and choose **Tools → BinaryRat → Recover Summary Layout at Cursor**. Select the zero-based parameter to inspect. The evidence table shows accesses from the selected function and supported direct callees. Its **Call path** column shows the address and byte shift of each recorded call. Double-click an access to open its instruction in the Listing.
@@ -81,7 +97,7 @@ in the test corpus uses the same offset as a four-byte integer and an
 eight-byte floating-point value. Double-clicking either row navigates to the
 load. Shared-storage candidates are review-only.
 
-When the selected parameter has an eligible generic pointer and the evidence supports a fixed layout, choose **Review and Apply Parameter Type**. Review the current type, destination, field widths, and minimum observed extent, then choose **Apply**. Applying creates a new structure, retypes the selected parameter, and records evidence references in a single native Ghidra undo step. The function signature becomes user-defined. Protected signatures, incomplete evidence, and stale previews are refused.
+When the selected parameter has an eligible generic pointer and the evidence supports a fixed layout, choose **Review and Apply Parameter Type**. Review the current type, destination, field widths, and minimum observed extent, then choose **Apply**. Applying creates a new structure, retypes the selected parameter, and records evidence references in a single native Ghidra undo step. The function signature becomes user-defined. A pointer to an analyst's named type, including an opaque handle defined as a typedef of `void`, keeps its type. Protected signatures, incomplete evidence, and stale previews are refused.
 
 ## Run headless
 
@@ -120,7 +136,8 @@ export BINARYRAT_CACHE_DIR="$PWD/build/decompile-cache"
 Use `scheduled` in the command above and omit `-deleteProject` to save the
 analyzed project. Reopen it with `-process PROGRAM -noanalysis -readOnly` and
 the same cache directory. The engine owns that directory exclusively while it
-runs. Each session replays entries from disk against the current Program before
+runs. On restart it reclaims staging files left by an interrupted record
+replacement and keeps the last committed record. Each session replays entries from disk against the current Program before
 reuse. A fresh import can produce different analysis records, which triggers
 recomputation where the recorded answers differ.
 Only results that pass this check can bypass a decompiler lease. The cache
@@ -149,15 +166,22 @@ throws on any byte difference, like `compare`.
 ### Stock-verified output
 
 Use `stock-verified` for exact bytes from Ghidra 12.2's ascending serial
-decompilation. BinaryRat runs the scheduled phase under its ordinary resource
-limits and closes the pool before starting a fresh stock serial process.
-That process visits every function in order. BinaryRat keeps a scheduled row
-when all bytes match and takes the stock row when they differ. The extra full
-serial pass determines the cost of verification. Interrupted decompilation or a
-detected Program change aborts publication.
+decompilation. With a fresh pool and at least two admitted workers, BinaryRat reserves one for
+a fresh stock process and uses the others for scheduled candidates. The stock
+process visits every selected function in ascending order, including candidate
+cache hits. Both computations run within the export's admitted worker count.
+BinaryRat compares their decompiler results and emits one record per function
+in stock order. If the results differ, the stock result supplies the record.
+With one admitted worker or an existing compatible candidate session, the
+candidate pass finishes before the reference borrows a worker. Other ordinary
+handles can continue using the shared session. The reference starts with a fresh
+native process and returns its slot after verification. An interrupted lease,
+an interrupted stock decompilation or a detected Program change aborts publication.
 
 `OUTPUT.parity.json` contains the match and fallback counts, up to 32 fallback
-addresses, and the SHA-256 of the exact JSONL. Output and report use separate
+addresses, and the SHA-256 of the exact JSONL. It also records the execution
+mode, admitted and candidate worker counts, peak concurrent leases and the
+number of stock reference calls run under a watched lease. Output and report use separate
 filesystem renames. The digest lets consumers check that the report belongs to
 the export they read.
 

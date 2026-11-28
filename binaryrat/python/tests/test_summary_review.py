@@ -90,6 +90,45 @@ class SummaryReviewTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     open_review(damaged)
 
+    def test_check_review_accepts_a_second_handoff_and_preserves_comparison_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first, raw, second = (Path(directory, name) for name in ("first", "raw", "second"))
+            original = witnessed(report())
+            first.write_text(make_review(parse_summary_report(original)), encoding="ascii")
+            for expected, edit in (
+                    ("matched", lambda d: d.update(revision=8)),
+                    ("changed", lambda d: d["edges"][0].update(argument_value_storage="register:00000010")),
+                    ("unverifiable", lambda d: d["edges"][0].pop("instruction_sha256")),
+                    ("incompatible", lambda d: d.update(language_id="AARCH64:LE:64:v8A"))):
+                with self.subTest(expected=expected):
+                    changed = copy.deepcopy(original)
+                    edit(changed)
+                    raw.write_text(json.dumps(changed), encoding="utf-8")
+                    second.write_text(make_review(parse_summary_report(changed)), encoding="utf-16")
+                    reference = cli(first, "--check-review", raw)
+                    rc, output, err = cli(first, "--check-review", second)
+                    self.assertEqual((rc, output, err), reference)
+                    self.assertEqual(rc, 0 if expected == "matched" else 1)
+                    result = json.loads(output)
+                    self.assertEqual((result["status"], result["verification"]), (expected, "supplied_report"))
+
+    def test_check_review_validates_both_handoffs_before_classifying_a_difference(self):
+        original = witnessed(report())
+        with tempfile.TemporaryDirectory() as directory:
+            good, bad = (Path(directory, name) for name in ("good", "bad"))
+            good.write_text(make_review(parse_summary_report(original)), encoding="ascii")
+            changed = copy.deepcopy(original)
+            changed["language_id"] = "AARCH64:LE:64:v8A"
+            envelope = json.loads(make_review(parse_summary_report(changed)))
+            for key, invalid in (("capture_sha256", "0" * 64), ("proposal_sha256", "f" * 64),
+                                 ("review_format", "unknown")):
+                bad.write_text(json.dumps(envelope | {key: invalid}), encoding="utf-8")
+                for first, second in ((good, bad), (bad, good)):
+                    with self.subTest(key=key, damaged_input=1 if first == bad else 2):
+                        rc, output, err = cli(first, "--check-review", second)
+                        self.assertEqual((rc, output), (2, ""))
+                        self.assertIn("version-1" if key == "review_format" else "checksum", err)
+
     def test_powershell_encoded_review_round_trip_and_strict_byte_limits(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory, "report.json")

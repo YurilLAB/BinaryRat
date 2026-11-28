@@ -5,8 +5,11 @@ package binaryrat.desktop;
 import docking.action.DockingAction;
 import docking.action.builder.ActionBuilder;
 import docking.widgets.OptionDialogBuilder;
+import ghidra.app.context.ListingActionContext;
 import ghidra.app.plugin.ProgramPlugin;
 import ghidra.app.services.GhidraScriptService;
+import ghidra.app.services.GoToService;
+import ghidra.app.services.ProgramManager;
 import ghidra.framework.plugintool.PluginInfo;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.plugintool.util.PluginStatus;
@@ -20,13 +23,14 @@ import ghidra.program.util.ProgramLocation;
     category = "Analysis",
     shortDescription = "BinaryRat workspace actions",
     description = "Export, recover and inspect BinaryRat evidence, call sites and stack strings from CodeBrowser.",
-    servicesRequired = { GhidraScriptService.class }
+    servicesRequired = { GhidraScriptService.class, GoToService.class, ProgramManager.class }
 )
 public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
 
     private final DockingAction export;
     private final DockingAction recover;
     private final DockingAction recoverSummary;
+    private final ArithmeticEvidenceProvider arithmetic;
     private final DockingAction browse;
     private final DockingAction callSites;
     private final DockingAction stackStrings;
@@ -40,6 +44,16 @@ public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
             .onAction(context -> showGettingStarted())
             .buildAndInstall(tool);
         export = scriptAction("Export Decompilation", "BinaryRatExport.java", "2_evidence");
+        arithmetic = new ArithmeticEvidenceProvider(tool, getName());
+        new ActionBuilder(ArithmeticEvidenceProvider.ACTION, getName())
+            .menuPath("Tools", "BinaryRat", ArithmeticEvidenceProvider.ACTION)
+            .menuGroup("2_evidence")
+            .popupMenuPath("BinaryRat", ArithmeticEvidenceProvider.ACTION)
+            .withContext(ListingActionContext.class)
+            .enabledWhen(this::hasArithmeticSelection)
+            .popupWhen(this::hasArithmeticSelection)
+            .onAction(context -> arithmetic.select(context.getProgram(), context.getSelection()))
+            .buildAndInstall(tool);
         recover = scriptAction("Recover Layout at Cursor", "BinaryRatRecoverLayouts.java", "2_evidence");
         var summary = new SummaryLayoutCursor(tool);
         recoverSummary = new ActionBuilder(SummaryLayoutCursor.ACTION, getName())
@@ -60,6 +74,17 @@ public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
     }
 
     @Override
+    protected void programDeactivated(Program program) {
+        arithmetic.deactivate(program);
+    }
+
+    @Override
+    protected void dispose() {
+        arithmetic.disposeEvidence();
+        super.dispose();
+    }
+
+    @Override
     protected void locationChanged(ProgramLocation location) {
         boolean open = currentProgram != null;
         export.setEnabled(open);
@@ -69,6 +94,11 @@ public final class BinaryRatWorkspacePlugin extends ProgramPlugin {
         callSites.setEnabled(open && location != null);
         stackStrings.setEnabled(open);
         profile.setEnabled(open);
+    }
+
+    private boolean hasArithmeticSelection(ListingActionContext context) {
+        return currentProgram != null && currentProgram == context.getProgram() &&
+            context.getSelection() != null && !context.getSelection().isEmpty();
     }
 
     private DockingAction scriptAction(String title, String script, String group) {

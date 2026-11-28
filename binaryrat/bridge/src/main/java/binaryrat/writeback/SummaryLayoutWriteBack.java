@@ -283,7 +283,8 @@ public final class SummaryLayoutWriteBack {
 			throw new IOException("Apply requires a pointer-width parameter in one register");
 		}
 		DataType pointed = pointer.getDataType();
-		if (pointed != null && !VoidDataType.isVoidDataType(pointed) &&
+		// A named typedef can denote an opaque object even when its base is void.
+		if (pointed != null && !(pointed instanceof VoidDataType) &&
 				(!Undefined.isUndefined(pointed) || Undefined.isUndefinedArray(pointed))) {
 			throw new IOException("This parameter already has a specific pointer type");
 		}

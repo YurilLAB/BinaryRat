@@ -14,6 +14,7 @@ import java.util.List;
 
 import com.google.gson.JsonObject;
 
+import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.program.model.listing.Function;
@@ -32,6 +33,7 @@ public final class DecompilationSession implements AutoCloseable {
 	public static final int DEFAULT_TIMEOUT_SECONDS = 60;
 
 	private static final IdentityHashMap<Program, List<Backend>> OPEN = new IdentityHashMap<>();
+	private static final IdentityHashMap<Program, StockVerification> VERIFYING = new IdentityHashMap<>();
 
 	private record Options(int workers, int timeout, boolean syntaxTree, Path cache) {}
 
@@ -53,6 +55,135 @@ public final class DecompilationSession implements AutoCloseable {
 
 	public static DecompilationSession open(Program program, int workers, int timeoutSeconds,
 			boolean syntaxTree) throws IOException {
+		return open(program, workers, timeoutSeconds, syntaxTree, null);
+	}
+
+	/** One ordered reference per Program. Ordinary sessions keep their existing admission and cache rules. */
+	public static StockVerification reserveStockVerification(Program program) throws IOException {
+		synchronized (OPEN) {
+			if (program == null || program.isClosed() || VERIFYING.containsKey(program)) {
+				throw new IOException("Stock verification needs an open Program without another verifier");
+			}
+			var reservation = new StockVerification(program);
+			VERIFYING.put(program, reservation);
+			return reservation;
+		}
+	}
+
+	public static final class StockVerification implements AutoCloseable {
+		private final Program program;
+		private final Thread owner = Thread.currentThread();
+		private DecompilationSession candidate;
+		private ScheduledDecompiler.StockLane reference;
+		private boolean shared;
+		private boolean openedReference;
+		private boolean closed;
+
+		private StockVerification(Program program) {
+			this.program = program;
+		}
+
+		private void checkOwner() throws IOException {
+			if (closed || Thread.currentThread() != owner) {
+				throw new IOException("Only the verification owner can use the ordered stock reference");
+			}
+		}
+
+		public DecompilationSession openCandidates(int workers, int timeoutSeconds) throws IOException {
+			checkOwner();
+			if (candidate != null) {
+				throw new IOException("The verification candidate is already open");
+			}
+			candidate = open(program, workers, timeoutSeconds, false, this);
+			return candidate.retain();
+		}
+
+		public boolean canOverlap() {
+			return !shared && candidate.workers() >= 2;
+		}
+
+		public JsonObject stats() throws IOException {
+			return candidate.stats();
+		}
+
+		public String fallbackReason() {
+			return shared ? "shared_candidate_session" : "single_worker";
+		}
+
+		/** Hold a Java admission slot before borrowing a process. Other borrowers enter this
+		 * same queue before acquiring any native lease, so they cannot occupy the stock slot. */
+		public void openReference(TaskMonitor monitor) throws IOException, CancelledException {
+			checkOwner();
+			if (candidate == null || openedReference) {
+				throw new IOException("The ordered reference requires one candidate and a fresh history");
+			}
+			Backend backend = candidate.backend;
+			backend.checkEpoch();
+			monitor.checkCancelled();
+			backend.queue.enter(false, monitor);
+			try {
+				reference = backend.scheduler.borrowStockReference(program, monitor);
+				openedReference = true;
+			}
+			finally {
+				if (reference == null) {
+					backend.queue.leave();
+				}
+			}
+		}
+
+		/** Caller supplies every function in stock serial order, including candidate cache hits. */
+		public ScheduledDecompiler.Run read(Function function, TaskMonitor monitor)
+				throws IOException, CancelledException {
+			checkOwner();
+			if (reference == null || function == null || function.getProgram() != program || function.isExternal()) {
+				throw new IOException("Stock verification requires an active reference and a local function");
+			}
+			monitor.checkCancelled();
+			candidate.backend.checkEpoch();
+			var run = reference.decompile(function, monitor);
+			monitor.checkCancelled();
+			candidate.backend.checkEpoch();
+			if (!run.memoryWatched() || !"completed".equals(run.status())) {
+				throw new IOException("Cannot verify interrupted leases: stock at " + function.getEntryPoint() +
+					": " + run.status());
+			}
+			return run;
+		}
+
+		public void releaseReference() throws IOException {
+			checkOwner();
+			if (reference != null) {
+				try {
+					reference.close();
+				}
+				finally {
+					reference = null;
+					candidate.backend.queue.leave();
+				}
+			}
+		}
+
+		@Override
+		public void close() throws IOException {
+			if (closed) {
+				return;
+			}
+			checkOwner();
+			try (DecompilationSession handle = candidate) {
+				releaseReference();
+			}
+			finally {
+				closed = true;
+				synchronized (OPEN) {
+					VERIFYING.remove(program);
+				}
+			}
+		}
+	}
+
+	private static DecompilationSession open(Program program, int workers, int timeoutSeconds,
+			boolean syntaxTree, StockVerification reservation) throws IOException {
 		if (program == null || workers < 1 || workers > 256 ||
 				timeoutSeconds < 1 || timeoutSeconds > 86_400) {
 			throw new IllegalArgumentException("Expected a Program, 1–256 workers and timeout 1–86400 seconds");
@@ -68,6 +199,9 @@ public final class DecompilationSession implements AutoCloseable {
 				for (Backend backend : existing) {
 					if (backend.revision == revision && backend.options.equals(options)) {
 						backend.checkEpoch();
+						if (reservation != null) {
+							reservation.shared = true;
+						}
 						backend.references++;
 						return new DecompilationSession(backend);
 					}
@@ -179,6 +313,16 @@ public final class DecompilationSession implements AutoCloseable {
 		}
 	}
 
+	/** Shared native registration options for the scheduled exporter and its serial reference. */
+	public static void configureDecompiler(DecompInterface decompiler, Program program, boolean syntaxTree) {
+		DecompileOptions options = new DecompileOptions();
+		options.grabFromProgram(program);
+		decompiler.setOptions(options);
+		decompiler.setSimplificationStyle("decompile");
+		decompiler.toggleCCode(true);
+		decompiler.toggleSyntaxTree(syntaxTree);
+	}
+
 	private static Backend create(Program program, long revision, Options options) throws IOException {
 		Object consumer = new Object();
 		if (!program.addConsumer(consumer)) {
@@ -208,14 +352,8 @@ public final class DecompilationSession implements AutoCloseable {
 				environment("BINARYRAT_OTHER_RESERVE_BYTES", 512L << 20), timeout,
 				environment("BINARYRAT_KILL_GRACE_MS", 5000),
 				environment("BINARYRAT_LEASE_TIMEOUT_MS", timeout * 1_000L));
-			scheduler = new ScheduledDecompiler(engine, program, decompiler -> {
-				DecompileOptions decompileOptions = new DecompileOptions();
-				decompileOptions.grabFromProgram(program);
-				decompiler.setOptions(decompileOptions);
-				decompiler.setSimplificationStyle("decompile");
-				decompiler.toggleCCode(true);
-				decompiler.toggleSyntaxTree(options.syntaxTree());
-			}, limits);
+			scheduler = new ScheduledDecompiler(engine, program,
+				d -> configureDecompiler(d, program, options.syntaxTree()), limits);
 			if (scheduler.workers() < 1) {
 				throw new IOException("The memory budget admits no native decompiler workers. " +
 					"Reduce the JVM heap or adjust the BinaryRat memory reservations");

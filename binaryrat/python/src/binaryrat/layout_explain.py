@@ -284,8 +284,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="show proposals and possible accesses starting at this byte offset (decimal or 0x hex)")
     action.add_argument("--make-review", action="store_true",
                         help="print a portable JSON review of this interprocedural summary report")
-    action.add_argument("--check-review", type=Path, metavar="FRESH_REPORT",
-                        help="compare this portable review with a supplied summary report offline")
+    action.add_argument("--check-review", type=Path, metavar="REPORT_OR_REVIEW",
+                        help="compare this portable review with a summary report or a second portable review offline")
     action.add_argument("--check-project", nargs=2, metavar=("PROJECT.gpr", "/PROGRAM"),
                         help="rerun summary recovery on the saved Program and compare with this review")
     parser.add_argument("--install-dir", type=Path, help="Ghidra installation for --check-project")
@@ -302,7 +302,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.check_project is not None:
                 result = check_project_review(captured, *args.check_project, install_dir=args.install_dir)
             else:
-                fresh = parse_summary_report(_read_document(args.check_review))
+                document = _read_document(args.check_review)
+                if isinstance(document, dict) and "review_format" in document:
+                    fresh = open_review(document)
+                else:
+                    fresh = parse_summary_report(document)
                 result = check_review(captured, fresh)
             print(json.dumps(result))
             return 0 if result["status"] == "matched" else 1

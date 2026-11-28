@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.TimeUnit;
 
 import ghidra.app.decompiler.*;
 import generic.jar.ResourceFile;
@@ -29,6 +30,7 @@ import ghidra.util.task.TaskMonitor;
  * to Ghidra's own callback and only observes the answers.
  */
 public final class TracingDecompiler extends DecompInterface {
+	private final boolean installRecorder;
 	private RecordingCallback recorder;
 	private long attachedPid;
 	// DecompInterface exposes setters but no getters for these registration actions.
@@ -37,6 +39,15 @@ public final class TracingDecompiler extends DecompInterface {
 	private boolean cCode = true;
 	private boolean paramMeasures;
 	private boolean jumpLoads;
+
+	public TracingDecompiler() {
+		this(true);
+	}
+
+	// The ordered reference retains DecompInterface's original, uninstrumented callback.
+	TracingDecompiler(boolean installRecorder) {
+		this.installRecorder = installRecorder;
+	}
 
 	@Override
 	public synchronized boolean toggleSyntaxTree(boolean value) {
@@ -70,7 +81,7 @@ public final class TracingDecompiler extends DecompInterface {
 	protected void initializeProcess() throws IOException, DecompileException {
 		// openProgram() installs Ghidra's callback and then initializes the process;
 		// swap in the recording subclass before the program is registered with it.
-		if (decompCallback != null && !(decompCallback instanceof RecordingCallback)) {
+		if (installRecorder && decompCallback != null && !(decompCallback instanceof RecordingCallback)) {
 			recorder = new RecordingCallback(program, getLanguage(), program.getCompilerSpec(),
 				getDataTypeManager());
 			decompCallback = recorder;
@@ -134,12 +145,59 @@ public final class TracingDecompiler extends DecompInterface {
 		}
 	}
 
+	synchronized long readyProcessId() {
+		return decompProcess == null || !decompProcess.isReady() ? -1 : currentProcessId();
+	}
+
+	/** Stop this owned process and wait for its physical slot before starting a replacement.
+	 * Ghidra's normal dispose is asynchronous. A worker retains its configured Program here. */
+	synchronized void suspendNativeProcess() throws IOException {
+		if (decompProcess == null) {
+			return;
+		}
+		Process child;
+		try {
+			child = nativeProcess();
+		}
+		catch (ReflectiveOperationException failure) {
+			throw new IOException("cannot identify the decompiler process being replaced", failure);
+		}
+		stopProcess();
+		if (child == null || !child.isAlive()) {
+			return;
+		}
+		boolean interrupted = false;
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (child.isAlive()) {
+			long left = deadline - System.nanoTime();
+			if (left <= 0) {
+				if (interrupted) {
+					Thread.currentThread().interrupt();
+				}
+				throw new IOException("decompiler did not exit before its worker slot was needed");
+			}
+			try {
+				child.waitFor(left, TimeUnit.NANOSECONDS);
+			}
+			catch (InterruptedException cancelled) {
+				interrupted = true;
+			}
+		}
+		if (interrupted) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	private Process nativeProcess() throws ReflectiveOperationException {
+		Field field = DecompileProcess.class.getDeclaredField("nativeProcess");
+		field.setAccessible(true);
+		return (Process) field.get(decompProcess);
+	}
+
 	private long currentProcessId() {
 		try {
-			Field field = DecompileProcess.class.getDeclaredField("nativeProcess");
-			field.setAccessible(true);
-			Object nativeProcess = field.get(decompProcess);
-			return nativeProcess instanceof Process process && process.isAlive() ? process.pid() : -1;
+			Process child = nativeProcess();
+			return child != null && child.isAlive() ? child.pid() : -1;
 		}
 		catch (Exception exception) {
 			return -1;

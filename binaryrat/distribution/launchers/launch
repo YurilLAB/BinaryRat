@@ -16,8 +16,16 @@ fi
 export PATH="$JAVA_HOME/bin:$PATH"
 export BINARYRAT_BUNDLE_DIR="$root"
 unset BINARYRAT_ENGINE
-export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/BinaryRat"
-export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/BinaryRat"
+# A script can launch another BinaryRat process with its parent's scoped profile.
+# Scope each directory again only if the child selected a different XDG root.
+if [ -z "${XDG_CONFIG_HOME:-}" ] || [ "$XDG_CONFIG_HOME" != "${BINARYRAT_LAUNCH_CONFIG_HOME:-}" ]; then
+    export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/BinaryRat"
+fi
+if [ -z "${XDG_CACHE_HOME:-}" ] || [ "$XDG_CACHE_HOME" != "${BINARYRAT_LAUNCH_CACHE_HOME:-}" ]; then
+    export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/BinaryRat"
+fi
+export BINARYRAT_LAUNCH_CONFIG_HOME="$XDG_CONFIG_HOME"
+export BINARYRAT_LAUNCH_CACHE_HOME="$XDG_CACHE_HOME"
 mkdir -p -- "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
 case "$mode" in
     desktop) exec "$root/ghidra/ghidraRun" "$@" ;;

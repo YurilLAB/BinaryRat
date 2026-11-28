@@ -95,10 +95,11 @@ def main():
         result = re.findall(r"^BINARYRAT_GUI_NAVIGATION_OK (\w+) (\w+) (\w+) ([0-9.]+) ([0-9.]+)$",
                             log, re.MULTILINE)
         foreground = re.findall(r"^BINARYRAT_GUI_FOREGROUND_OK (\d+) (\d+) (\d+)$", log, re.MULTILINE)
+        arithmetic = re.findall(r"^BINARYRAT_GUI_ARITHMETIC_OK (\w+) (\w+) ([0-9.]+)$", log, re.MULTILINE)
         if 'Exception in thread "AWT-EventQueue' in log:
             raise RuntimeError(f"CodeBrowser raised an uncaught Swing exception. See {output / 'gui.log'}")
-        if len(result) != 1 or len(foreground) != 1:
-            raise RuntimeError("Missing GUI navigation or foreground decompilation confirmation")
+        if len(result) != 1 or len(foreground) != 1 or len(arithmetic) != 1:
+            raise RuntimeError("Missing GUI layout, arithmetic navigation or foreground decompilation confirmation")
     entry, cursor, navigated, recovery_time, browse_time = result[0]
     first_ms, next_ms, cancellations = (int(value) for value in foreground[0])
     details = {"passed": True, "fixture": artifact["id"], "binary_sha256": artifact["binary_sha256"],
@@ -109,6 +110,10 @@ def main():
                "program_clean_after_navigation": True, "instruction_bytes_verified": True,
                "gui_wall_seconds_including_script_compilation_and_dialogs": {
                    "recover": float(recovery_time), "browse_and_navigate": float(browse_time)},
+               "arithmetic_navigation": {"mouse_destination": arithmetic[0][0],
+                                         "keyboard_destination": arithmetic[0][1],
+                                         "explain_click_to_table_population_ms": float(arithmetic[0][2]),
+                                         "active_unsaved_code": True, "stale_rows_cleared": True},
                "foreground_decompilation": {"first_ms": first_ms, "next_ms": next_ms,
                                              "cancelled_requests": cancellations,
                                              "inactive_tab_released_session": True,

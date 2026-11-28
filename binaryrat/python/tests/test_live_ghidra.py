@@ -192,6 +192,42 @@ class LiveProgramInputTests(unittest.TestCase):
         for timeout in (0.5, 3600):
             self.assertIsInstance(LiveClient(endpoint, timeout=timeout), LiveClient)
 
+    def test_idle_deadline_covers_partial_requests_and_restarts_after_authorized_work(self):
+        token = secrets.token_urlsafe(32)
+        view = Mock(spec=ProgramView)
+        started, release = Event(), Event()
+
+        def read_type(category, name):
+            started.set()
+            if not release.wait(5):
+                raise AssertionError("test did not release the read")
+            return None
+
+        view.data_type.side_effect = read_type
+        with _Service(view, token) as service:
+            worker = Thread(target=service.serve_until_idle, args=(1,), daemon=True)
+            worker.start()
+            try:
+                with socket.create_connection(service.server_address, 5) as client:
+                    request = {"version": 1, "method": "data_type", "token": token,
+                               "args": {"category": "/", "name": "fixture"}}
+                    client.sendall(_encode(request, 1024))
+                    self.assertTrue(started.wait(3))
+                    worker.join(1.1)  # An authorized operation may finish after its idle interval.
+                    self.assertTrue(worker.is_alive())
+                    release.set()
+                    self.assertEqual(json.loads(_frame(client, 1024, monotonic() + 3)),
+                                     {"version": 1, "result": None})
+                endpoint = LiveEndpoint(service.server_address[1], token)
+                self.assertIsNone(LiveClient(endpoint, timeout=3).data_type("/", "after"))
+                with socket.create_connection(service.server_address, 3) as partial:
+                    partial.sendall(b'{"version":')
+                    worker.join(2)
+                    self.assertFalse(worker.is_alive(), "partial request prolonged the idle deadline")
+            finally:
+                release.set()
+                worker.join(3)
+
     def test_live_stack_strings_bounds_and_errors(self):
         token = secrets.token_urlsafe(32)
         entry = Address("ram", 16)

@@ -120,6 +120,66 @@ bodies differed for `LLVMGetNamedMetadataNumOperands` and
 `LLVMGetDebugLocDirectory`. The number of differing rows can vary with
 the work assigned to each native process.
 
+## Overlapping the stock reference and scheduled candidates
+
+On the same saved 129,673,080-byte LLVM fixture, a four-slot verified export
+used three candidate workers and one ordered stock reference. Each of the
+six exports below ran in a fresh JVM. The order was stock, previous verified,
+overlapped verified, then the reverse. Both script versions first ran a
+one-function warmup. The previous exporter came from commit
+`cfe9849f7dc60f190b014dabad2e73e2df76e87c`. The native engine, library,
+Program, stock Ghidra 12.2 installation, 2 GiB heap, 60-second deadline,
+128-function chunks and disabled cache were the same across these six runs.
+
+| Export | Wall seconds, runs 1 / 2 | Median seconds | Peak process-tree RSS, GiB, runs 1 / 2 |
+| --- | ---: | ---: | ---: |
+| Stock serial | 70.11 / 74.78 | 72.45 | 1.29 / 1.40 |
+| Previous stock-verified | 117.80 / 115.15 | 116.48 | 1.65 / 1.45 |
+| Overlapped stock-verified | 79.01 / 82.13 | 80.57 | 2.22 / 1.99 |
+
+The median verified wall time fell by 35.90 seconds on this sample. The
+overlapped run took 8.13 seconds longer than stock alone and used more peak
+memory. RSS was sampled every 50 ms across the full process tree and can count
+shared pages more than once. Overlapping phase times describe one shared
+interval. The headless wall time includes JVM startup and result publication.
+
+Every export produced the same 384 JSONL records, including the same incomplete
+`LLVMLinkModules2` result. Their SHA-256 was
+`e96703186235de3f110bcc901b30ba84f944ce7821fc24700d3902f4effb4d44`.
+Each overlapped pass ran 384 uncached candidate leases and 384 watched reference
+leases, reached four concurrent leases and used one stock fallback. The saved
+Program hashes stayed unchanged. In an earlier attempt while compiler and GUI
+tests were competing for CPU, one candidate in the previous exporter exceeded
+the deadline and verification stopped before publishing. The six reported runs
+used the unchanged deadline during an exclusive local test window. These two
+repetitions measure this decompilation sample. Whole-program analysis and
+throughput on other binaries require separate measurements.
+
+After the shared-session fallback and native startup cleanup were integrated,
+two more pairs used the same saved Program and deadline. Both final verified
+exports again matched all 384 stock records. Each reported 384 candidate
+leases, 384 watched reference leases, four peak concurrent leases and one
+stock fallback.
+
+| Final implementation | Wall seconds, runs 1 / 2 | Median seconds | Peak process-tree RSS, GiB, runs 1 / 2 |
+| --- | ---: | ---: | ---: |
+| Stock serial | 76.99 / 78.34 | 77.67 | 1.30 / 1.31 |
+| Stock-verified | 79.88 / 87.98 | 83.93 | 2.01 / 1.98 |
+
+These four JVM runs alternated order between pairs. The engine SHA-256 was
+`3dac1e45924fd6664b91c2408876941eb4d9df46237f8727d3107fabed76b9f0`.
+The earlier six runs used engine
+`ae75f24e1b69613f010248586e499cfa66f36dfdf9a97efe6423bad5b96e3708`.
+The final measured `BinaryRatExport.java` SHA-256 was
+`af840257f350741be95081316c4147e78f9ce2de337c90cda3600811c857179d`.
+A subsequent diagnostic wording change affects retired decompiler pools.
+All four runs used healthy pools.
+
+To compare an earlier exporter, extract its `binaryrat/bridge/ghidra_scripts`
+directory from Git and pass it as `--candidate-scripts` to the command above.
+Use `--repetitions 2` or more, repeat with the current script directory, and
+compare `report.json` and both runs' per-function records.
+
 ## Export allocation check
 
 On Linux x86-64 with official Ghidra 12.2 and JDK 25.0.5, a separate

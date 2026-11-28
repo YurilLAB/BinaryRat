@@ -311,6 +311,7 @@ class _Service(TCPServer):
         self._view = view
         self._token = token
         self.last_authorized = monotonic()
+        self.idle_deadline = float("inf")
         self._operations = {
             "functions": (view.functions, None),
             "function_at": (view.function_at, "entry"),
@@ -398,7 +399,11 @@ class _Service(TCPServer):
         while (remaining := self.last_authorized + idle_timeout - monotonic()) > 0:
             self.timeout = remaining
             previous = self.last_authorized
-            self.handle_request()
+            self.idle_deadline = previous + idle_timeout
+            try:
+                self.handle_request()
+            finally:
+                self.idle_deadline = float("inf")
             if self.last_authorized != previous:
                 self.last_authorized = monotonic()
 
@@ -409,7 +414,10 @@ class _Connection(BaseRequestHandler):
     def handle(self) -> None:
         version = {"version": LIVE_PROTOCOL_VERSION}
         try:
-            request = _object(_frame(self.request, _MAX_REQUEST, monotonic() + _IO_TIMEOUT))
+            deadline = min(self.server.idle_deadline, monotonic() + _IO_TIMEOUT)
+            request = _object(_frame(self.request, _MAX_REQUEST, deadline))
+            if monotonic() >= self.server.idle_deadline:
+                return
             result = self.server.reply(request)
             try:
                 response = _encode(version | {

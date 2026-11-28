@@ -14,16 +14,19 @@ if not exist "%JAVA_HOME%\bin\java.exe" (
 )
 set "PATH=%JAVA_HOME%\bin;%PATH%"
 set "BINARYRAT_ENGINE="
+rem Keep inherited application directories when a script launches BinaryRat again.
 if defined XDG_CONFIG_HOME (
-    set "XDG_CONFIG_HOME=%XDG_CONFIG_HOME%\BinaryRat"
+    if /i not "%XDG_CONFIG_HOME%"=="%BINARYRAT_LAUNCH_CONFIG_HOME%" set "XDG_CONFIG_HOME=%XDG_CONFIG_HOME%\BinaryRat"
 ) else (
     set "XDG_CONFIG_HOME=%LOCALAPPDATA%\BinaryRat\config"
 )
 if defined XDG_CACHE_HOME (
-    set "XDG_CACHE_HOME=%XDG_CACHE_HOME%\BinaryRat"
+    if /i not "%XDG_CACHE_HOME%"=="%BINARYRAT_LAUNCH_CACHE_HOME%" set "XDG_CACHE_HOME=%XDG_CACHE_HOME%\BinaryRat"
 ) else (
     set "XDG_CACHE_HOME=%LOCALAPPDATA%\BinaryRat\cache"
 )
+set "BINARYRAT_LAUNCH_CONFIG_HOME=%XDG_CONFIG_HOME%"
+set "BINARYRAT_LAUNCH_CACHE_HOME=%XDG_CACHE_HOME%"
 if not exist "%XDG_CONFIG_HOME%\." mkdir "%XDG_CONFIG_HOME%"
 if not exist "%XDG_CONFIG_HOME%\." exit /b 1
 if not exist "%XDG_CACHE_HOME%\." mkdir "%XDG_CACHE_HOME%"

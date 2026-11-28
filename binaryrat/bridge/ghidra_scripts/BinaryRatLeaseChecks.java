@@ -4,15 +4,20 @@
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.StringReader;
 import java.math.BigInteger;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -22,10 +27,13 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
+import com.google.gson.JsonParser;
 
 import binaryrat.DecompOutput;
+import binaryrat.DecompilationSession;
 import binaryrat.EngineClient;
 import binaryrat.ScheduledDecompiler;
+import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileProcess;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
@@ -57,6 +65,8 @@ public class BinaryRatLeaseChecks extends GhidraScript {
         require(fixture != null, "fixture must contain an initialized function");
         checkSampleReader();
         checkExportPolicy(fixture.getEntryPoint());
+        checkVerificationOwnership(fixture);
+        checkUnconfirmedReferenceExit(fixture);
         Path directory = Files.createTempDirectory("binaryrat-lease-check-");
         try (EngineClient engine = EngineClient.start(EngineClient.findExecutable(), directory);
                 ScheduledDecompiler scheduler = testScheduler(engine)) {
@@ -167,6 +177,242 @@ public class BinaryRatLeaseChecks extends GhidraScript {
         println("BinaryRat lease lifecycle checks passed");
     }
 
+    private void checkVerificationOwnership(Function fixture) throws Exception {
+        int workers = DecompilationSession.DEFAULT_WORKERS;
+        try (var failed = DecompilationSession.reserveStockVerification(currentProgram)) {
+            failed.openCandidates(0, 60);
+            throw new AssertionError("invalid verifier setup succeeded");
+        }
+        catch (IllegalArgumentException expected) {
+            // The failed setup must not strand the verifier's reservation.
+        }
+        try (var foreground = DecompilationSession.open(currentProgram, workers, 60)) {
+            require(foreground.decompileForeground(fixture, monitor).completed(), "ordinary foreground handle");
+            if (!foreground.cacheEnabled()) {
+                // CodeBrowser retains this full-tree handle while its export script runs.
+                checkNestedExport(fixture, workers, null, false);
+            }
+            else {
+                try (var verification = DecompilationSession.reserveStockVerification(currentProgram)) {
+                    try (var unused = verification.openCandidates(workers, 60)) {
+                        throw new AssertionError("different registrations shared an exclusive cache directory");
+                    }
+                    catch (IOException expected) {
+                        require(expected.getMessage().contains("BINARYRAT_CACHE_DIR"), "preserve the cache lock");
+                    }
+                }
+            }
+            require(foreground.decompileForeground(fixture, monitor).completed(), "foreground survives export");
+        }
+
+        try (var regular = DecompilationSession.open(currentProgram, 1, 60, false)) {
+            if (regular.cacheEnabled()) {
+                var first = regular.decompileWithMetrics(fixture, monitor);
+                require(first.stored() || first.lookup().usable(), "prime the compatible candidate cache");
+            }
+            checkNestedExport(fixture, 1, "shared_candidate_session", regular.cacheEnabled());
+            try (var verification = DecompilationSession.reserveStockVerification(currentProgram);
+                    var candidate = verification.openCandidates(1, 60)) {
+                require(!verification.canOverlap(), "shared one-slot fallback");
+                try (var other = DecompilationSession.reserveStockVerification(currentProgram)) {
+                    throw new AssertionError("two verifiers own the reference");
+                }
+                catch (IOException expected) {
+                    require(expected.getMessage().contains("another verifier"), "specific verification conflict");
+                }
+                // Cancel after the reference opens. Cleanup must stop it, return the original
+                // candidate and leave the admission queue so the surviving handle can continue.
+                TaskMonitorAdapter cancelled = new TaskMonitorAdapter(true) {
+                    int checks;
+                    @Override
+                    public void checkCancelled() throws CancelledException {
+                        if (++checks == 5) {
+                            cancel();
+                        }
+                        super.checkCancelled();
+                    }
+                };
+                try {
+                    verification.openReference(cancelled);
+                    throw new AssertionError("reference ignored cancellation during setup");
+                }
+                catch (CancelledException expected) {
+                    require(cancelled.isCancelled(), "fixture cancellation");
+                }
+                require(regular.decompileForeground(fixture, monitor).completed(), "candidate restored after failed loan");
+                verification.openReference(monitor);
+                checkContendedReference(fixture, verification, regular);
+            }
+            require(regular.decompileForeground(fixture, monitor).completed(), "normal handle outlives its loan");
+        }
+        try (var verification = DecompilationSession.reserveStockVerification(currentProgram);
+                var candidate = verification.openCandidates(2, 60)) {
+            verification.openReference(monitor);
+            if (!candidate.cacheEnabled()) {
+                try (var foreground = DecompilationSession.open(currentProgram, workers, 60)) {
+                    require(foreground.decompileForeground(fixture, monitor).completed(),
+                        "ordinary inspector opens and works during stock verification");
+                }
+            }
+            var foreign = new FutureTask<>(() -> verification.read(fixture, TaskMonitor.DUMMY));
+            var thread = new Thread(foreign, "binaryrat-foreign-stock-reference");
+            thread.start();
+            try {
+                foreign.get(10, TimeUnit.SECONDS);
+                throw new AssertionError("foreign thread advanced the ordered reference");
+            }
+            catch (ExecutionException expected) {
+                require(expected.getCause() instanceof IOException failure &&
+                    failure.getMessage().contains("verification owner"), "reject interleaved reference calls");
+            }
+            finally {
+                foreign.cancel(true);
+                thread.join(5000);
+            }
+        }
+    }
+
+    /** Simulate losing confirmation of process exit during slot restoration. The wrapper
+     * forwards shutdown to the actual stock child; it only hides the exit from the handoff. */
+    private void checkUnconfirmedReferenceExit(Function function) throws Exception {
+        try (var regular = DecompilationSession.open(currentProgram, 1, 60, false)) {
+            try (var verification = DecompilationSession.reserveStockVerification(currentProgram);
+                    var candidate = verification.openCandidates(1, 60)) {
+                verification.openReference(monitor);
+                Object lane = readField(verification, verification.getClass(), "reference");
+                var stock = (DecompInterface) readField(lane, lane.getClass(), "stock");
+                var process = (DecompileProcess) readField(stock, DecompInterface.class, "decompProcess");
+                Field nativeField = DecompileProcess.class.getDeclaredField("nativeProcess");
+                nativeField.setAccessible(true);
+                var child = (Process) nativeField.get(process);
+                require(child.isAlive(), "fault must target this reference's live child");
+                var hidden = new Process() {
+                    @Override public boolean isAlive() { return true; }
+                    @Override public boolean waitFor(long duration, TimeUnit unit) throws InterruptedException {
+                        unit.sleep(duration);
+                        return false;
+                    }
+                    @Override public void destroy() { child.destroy(); }
+                    @Override public int waitFor() throws InterruptedException { return child.waitFor(); }
+                    @Override public int exitValue() { return child.exitValue(); }
+                    @Override public InputStream getInputStream() { return child.getInputStream(); }
+                    @Override public InputStream getErrorStream() { return child.getErrorStream(); }
+                    @Override public OutputStream getOutputStream() { return child.getOutputStream(); }
+                };
+                nativeField.set(process, hidden);
+                try {
+                    verification.releaseReference();
+                    throw new AssertionError("returned worker capacity before its stock process exited");
+                }
+                catch (IOException expected) {
+                    require(expected.getMessage().contains("did not exit"), "require confirmed slot restoration");
+                }
+                finally {
+                    nativeField.set(process, child);
+                    require(child.waitFor(5, TimeUnit.SECONDS), "the owned stock child really stopped");
+                }
+            }
+            // A live ordinary handle keeps this backend open. Its loan permit must have
+            // been released, but the retired pool must refuse another native process.
+            try (var retry = DecompilationSession.reserveStockVerification(currentProgram);
+                    var candidate = retry.openCandidates(1, 60)) {
+                var deadline = new TaskMonitorAdapter(true);
+                var watchdog = Executors.newSingleThreadScheduledExecutor();
+                watchdog.schedule(deadline::cancel, 10, TimeUnit.SECONDS);
+                try {
+                    retry.openReference(deadline);
+                    throw new AssertionError("reused a backend after unconfirmed native process exit");
+                }
+                catch (IOException retired) {
+                    require(retired.getMessage().contains("native process ownership could not be confirmed") &&
+                        retired.getCause() instanceof IOException cause && cause.getMessage().contains("did not exit"),
+                        "retired backend must retain the reason its process slot became unavailable");
+                }
+                finally {
+                    watchdog.shutdownNow();
+                }
+            }
+        }
+        try (var fresh = DecompilationSession.reserveStockVerification(currentProgram);
+                var candidate = fresh.openCandidates(1, 60)) {
+            fresh.openReference(monitor);
+            require(fresh.read(function, monitor).traced().results().decompileCompleted(),
+                "a fresh backend can resume after failed restoration");
+        }
+    }
+
+    private static Object readField(Object object, Class<?> owner, String name) throws ReflectiveOperationException {
+        Field field = owner.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(object);
+    }
+
+    /** Run the actual export and a separate serial check in this same GhidraScript Program. */
+    private void checkNestedExport(Function fixture, int workers, String fallback, boolean cached) throws Exception {
+        Path directory = Files.createTempDirectory("binaryrat-open-session-");
+        try {
+            var sample = directory.resolve("functions.tsv");
+            long offset = fixture.getEntryPoint().subtract(currentProgram.getImageBase());
+            Files.writeString(sample, Long.toUnsignedString(offset, 16) + "\t1\tfixture\n");
+            var verified = directory.resolve("verified.jsonl");
+            var stock = directory.resolve("stock.jsonl");
+            runScript("BinaryRatExport.java", new String[] { verified.toString(), "stock-verified",
+                Integer.toString(workers), "60", "16", sample.toString() });
+            runScript("BinaryRatExport.java", new String[] { stock.toString(), "serial", "1", "60", "16", sample.toString() });
+            JsonObject proof = JsonParser.parseString(Files.readString(Path.of(verified + ".parity.json"))).getAsJsonObject();
+            require(Files.mismatch(verified, stock) == -1 && proof.get("function_count").getAsInt() == 1 &&
+                proof.get("reference_watched_leases").getAsInt() == 1, "in-session export must match fresh stock");
+            if (fallback != null) {
+                require(proof.get("execution").getAsString().equals("sequential") &&
+                    proof.get("fallback_reason").getAsString().equals(fallback), "report shared fallback");
+            }
+            if (cached) {
+                var cache = proof.getAsJsonObject("candidate_cache");
+                require(proof.get("candidate_compute_leases").getAsInt() == 0 &&
+                    cache.get("hits").getAsInt() + cache.get("replayed").getAsInt() == 1,
+                    "cached candidate must retain its independent ordered reference row");
+            }
+        }
+        finally {
+            require(FileUtilities.deleteDir(directory), "remove nested export files");
+        }
+    }
+
+    private static void checkContendedReference(Function function, DecompilationSession.StockVerification verification,
+            DecompilationSession regular) throws Exception {
+        var queued = new CountDownLatch(1);
+        var waiterMonitor = new TaskMonitorAdapter(true) {
+            int checks;
+            @Override
+            public void checkCancelled() throws CancelledException {
+                if (++checks == 2) {
+                    queued.countDown();
+                }
+                super.checkCancelled();
+            }
+        };
+        var referenceMonitor = new TaskMonitorAdapter(true);
+        var watchdog = Executors.newSingleThreadScheduledExecutor();
+        watchdog.schedule(() -> { waiterMonitor.cancel(); referenceMonitor.cancel(); }, 30, TimeUnit.SECONDS);
+        var pending = new FutureTask<>(() -> regular.decompileForeground(function, waiterMonitor));
+        var thread = new Thread(pending, "binaryrat-contending-foreground");
+        thread.start();
+        try {
+            require(queued.await(10, TimeUnit.SECONDS), "foreground reaches the occupied admission queue");
+            var run = verification.read(function, referenceMonitor);
+            require(run.memoryWatched() && run.traced().results().decompileCompleted() && !pending.isDone(),
+                "queued foreground must not steal the engine lease required by the reference");
+            verification.releaseReference();
+            require(pending.get(10, TimeUnit.SECONDS).completed(), "queued foreground resumes after the loan");
+        }
+        finally {
+            waiterMonitor.cancel();
+            pending.cancel(true);
+            watchdog.shutdownNow();
+            thread.join(5000);
+        }
+    }
+
     private static void checkExportPolicy(ghidra.program.model.address.Address entry) throws Exception {
         require(BinaryRatExport.Mode.SERIAL.syntaxTree() && BinaryRatExport.Mode.PARALLEL.syntaxTree() &&
             BinaryRatExport.Mode.SCHEDULED.syntaxTree() && !BinaryRatExport.Mode.VERIFIED_CANDIDATE.syntaxTree(),
@@ -185,6 +431,38 @@ public class BinaryRatLeaseChecks extends GhidraScript {
                 audit.finish(new byte[32]).get("stock_fallbacks").getAsInt() == 1,
                 "stock payload failure must win over a successful C-only candidate");
         }
+        var streamed = new BinaryRatExport.StockParityAudit(null);
+        var expected = DecompOutput.fromJson(cOnly);
+        var same = DecompOutput.fromJson(cOnly);
+        require(streamed.select(entry, expected, same) == same,
+            "identical independently constructed decompiler output must match");
+        for (String field : new String[] { "completed", "error", "prototype", "c" }) {
+            JsonObject changed = cOnly.deepCopy();
+            if (field.equals("completed")) {
+                changed.addProperty(field, false);
+            }
+            else {
+                changed.addProperty(field, changed.get(field).getAsString() + "\n");
+            }
+            require(streamed.select(entry, expected, DecompOutput.fromJson(changed)) == expected,
+                "stock must win a mismatch in " + field);
+        }
+        for (String flag : new String[] { "timed_out", "cancelled", "failed_to_start" }) {
+            JsonObject interrupted = cOnly.deepCopy();
+            interrupted.addProperty(flag, true);
+            try {
+                streamed.select(entry, expected, DecompOutput.fromJson(interrupted));
+                throw new AssertionError("accepted interrupted candidate: " + flag);
+            }
+            catch (IOException refused) {
+                require(refused.getMessage().contains("Cannot verify interrupted leases"),
+                    "an interrupted candidate must report its refusal");
+            }
+        }
+        JsonObject counts = streamed.finish(new byte[32]);
+        require(counts.get("scheduled_matches").getAsInt() == 1 &&
+            counts.get("stock_fallbacks").getAsInt() == 4 && counts.get("function_count").getAsInt() == 5,
+            "only completed comparisons participate in the streamed audit counts");
     }
 
     private static void checkSampleReader() throws Exception {
